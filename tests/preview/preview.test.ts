@@ -9,6 +9,7 @@ const requiredSecurityHeaders: Readonly<Record<string, string>> = Object.freeze(
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-resource-policy": "same-origin",
   "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
   "x-permitted-cross-domain-policies": "none",
@@ -68,12 +69,13 @@ Deno.test("GET / is an accessible credential-free preview status page", async ()
     assert(html.includes(landmark), `missing ${landmark}`);
   }
   assert(html.includes("Credential-free"));
-  assert(html.includes("Integration invocation is disabled."));
+  assert(html.includes("Invocation is disabled."));
   assert(html.includes("Credential access"));
   assert(html.includes("Storage mode"));
   assert(html.includes("Vendor mode"));
   assert(html.includes(ACCEPTED_REVISION));
   assert(html.includes("114 cases"));
+  assert(!html.includes("126 cases"));
   assert(html.includes(`href="${REPOSITORY_URL}"`));
 });
 
@@ -102,10 +104,12 @@ Deno.test("preview page states the non-production activation boundary", async ()
   assert(html.includes("Activation remains blocked"));
   assert(
     html.includes(
-      "no production-readiness, credential or key custody, storage, vendor integration, or MCP transport/protocol conformance claim",
+      "no production-readiness, production key custody, storage, vendor integration, or MCP transport/protocol conformance claim",
     ),
   );
-  assert(html.includes("no mutable behavior"));
+  assert(html.includes("cannot invoke an integration"));
+  assert(html.includes("read a credential"));
+  assert(html.includes("mutate state"));
 });
 
 Deno.test("GET /healthz returns the canonical stable health schema", async () => {
@@ -131,19 +135,19 @@ Deno.test("GET /healthz returns the canonical stable health schema", async () =>
   });
 });
 
-Deno.test("MCP routes fail closed for every method with JSON-RPC-shaped 503", async () => {
+Deno.test("MCP routes fail closed permanently for every method with JSON-RPC-shaped 403", async () => {
   for (const path of ["/mcp", "/mcp/legacy"]) {
     for (const method of ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "BREW"]) {
       const response = request(path, method);
-      equals(response.status, 503);
+      equals(response.status, 403);
       equals(response.headers.get("content-type"), "application/json; charset=utf-8");
       equals(response.headers.get("retry-after"), null);
       equals(response.headers.get("www-authenticate"), null);
       equals(JSON.parse(await response.text()), {
         jsonrpc: "2.0",
         error: {
-          code: -32000,
-          message: "Cairn preview invocation is disabled.",
+          code: -32003,
+          message: "Cairn preview invocation is permanently disabled.",
         },
         id: null,
       });
@@ -155,7 +159,7 @@ Deno.test("MCP failure does not inspect or read a hostile body stream", async ()
   for (const path of ["/mcp", "/mcp/legacy"]) {
     const hostile = hostileRequest(path);
     const response = preview.fetch(hostile.request);
-    equals(response.status, 503);
+    equals(response.status, 403);
     await response.text();
     equals(hostile.counts(), { bodyAccesses: 0, bodyReaderCalls: 0 });
   }

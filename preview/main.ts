@@ -15,6 +15,7 @@ const SECURITY_HEADERS = Object.freeze(
       "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), identity-credentials-get=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), otp-credentials=(), payment=(), publickey-credentials-create=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), storage-access=(), usb=(), web-share=(), window-management=(), xr-spatial-tracking=()",
     ],
     ["Referrer-Policy", "no-referrer"],
+    ["Strict-Transport-Security", "max-age=31536000; includeSubDomains"],
     ["X-Content-Type-Options", "nosniff"],
     ["X-Frame-Options", "DENY"],
     ["X-Permitted-Cross-Domain-Policies", "none"],
@@ -27,7 +28,7 @@ const HOME_HTML = `<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light dark">
-  <title>Cairn Gateway credential-free preview</title>
+  <title>Cairn Gateway — credential-free public preview</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -81,7 +82,7 @@ const HOME_HTML = `<!DOCTYPE html>
     dt, dd { margin: 0; padding-block: 0.75rem; border-top: 1px solid var(--line); }
     dt { color: var(--muted); padding-right: 1rem; }
     dd { font-weight: 650; }
-    dl > :first-of-type, dl > :nth-of-type(2) { border-top: 0; }
+    dt:first-of-type, dd:first-of-type { border-top: 0; }
     .status {
       display: inline-flex;
       align-items: center;
@@ -104,9 +105,9 @@ const HOME_HTML = `<!DOCTYPE html>
     }
     @media (max-width: 34rem) {
       dl { grid-template-columns: 1fr; }
-      dt { padding-bottom: 0.1rem; }
-      dd { padding-top: 0.1rem; }
-      dl > :nth-of-type(2) { border-top: 1px solid var(--line); }
+      dt { border-top: 0; padding-bottom: 0.1rem; }
+      dt:not(:first-of-type) { border-top: 1px solid var(--line); }
+      dd { border-top: 0; padding-top: 0.1rem; }
     }
     @media (prefers-color-scheme: dark) {
       :root {
@@ -125,9 +126,9 @@ const HOME_HTML = `<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <p class="eyebrow">Public preview · Credential-free</p>
-    <h1>Cairn Gateway preview</h1>
-    <p class="lede">A minimal status surface for the accepted offline fixture. Integration invocation is disabled.</p>
+    <p class="eyebrow">Public engineering preview · Credential-free</p>
+    <h1>Delegate access. Keep the credentials.</h1>
+    <p class="lede">Cairn Gateway is an authority boundary for agents: narrowly scoped capabilities, explicit policy, revocable identity, and no caller access to underlying credentials. This deployment exposes project evidence only. Invocation is disabled.</p>
   </header>
   <main>
     <section aria-labelledby="preview-status">
@@ -145,16 +146,25 @@ const HOME_HTML = `<!DOCTYPE html>
         <dd>None</dd>
       </dl>
     </section>
+    <section aria-labelledby="project-purpose">
+      <h2 id="project-purpose">What exists today</h2>
+      <ul>
+        <li>A capability and policy core with exact route allowlisting and tenant isolation.</li>
+        <li>An adapter-neutral durability contract covering ambiguous commits without unsafe retries.</li>
+        <li>Separate owner, device, agent, workload, and credential-custody authority boundaries.</li>
+        <li>Fail-closed request proofs, revocation, replay protection, and exact operation projection.</li>
+      </ul>
+    </section>
     <section aria-labelledby="accepted-evidence">
-      <h2 id="accepted-evidence">Accepted evidence</h2>
-      <p>Accepted public revision:</p>
+      <h2 id="accepted-evidence">Evidence, not promises</h2>
+      <p>Accepted foundation: <strong>114 cases</strong> — 90 Stage 0 plus 24 Stage 1A, zero skips.</p>
+      <p>Accepted foundation revision:</p>
       <p><code>${ACCEPTED_REVISION}</code></p>
-      <p>Offline acceptance gate: <strong>114 cases</strong> — 90 Stage 0 plus 24 Stage 1A, with zero skips.</p>
     </section>
     <aside aria-labelledby="activation-boundary">
       <h2 id="activation-boundary">Activation remains blocked</h2>
-      <p>This preview makes no production-readiness, credential or key custody, storage, vendor integration, or MCP transport/protocol conformance claim.</p>
-      <p>It cannot invoke an integration and has no mutable behavior.</p>
+      <p>This preview makes no production-readiness, production key custody, storage, vendor integration, or MCP transport/protocol conformance claim.</p>
+      <p>It cannot invoke an integration, read a credential, mutate state, or proxy to a caller-selected destination.</p>
     </aside>
   </main>
   <footer>
@@ -188,8 +198,8 @@ const MCP_DISABLED_JSON = `${
   JSON.stringify({
     jsonrpc: "2.0",
     error: {
-      code: -32000,
-      message: "Cairn preview invocation is disabled.",
+      code: -32003,
+      message: "Cairn preview invocation is permanently disabled.",
     },
     id: null,
   })
@@ -227,7 +237,7 @@ export default {
     const route = url.search === "" ? url.pathname : "";
 
     if (route === "/mcp" || route === "/mcp/legacy") {
-      return json(MCP_DISABLED_JSON, 503);
+      return json(MCP_DISABLED_JSON, 403);
     }
 
     if (route !== "/" && route !== "/healthz") {

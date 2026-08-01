@@ -1,5 +1,9 @@
 import { assert, equals } from "../assert.ts";
 import { TOOL_NAMES } from "../../apps/gateway/mcp.ts";
+import {
+  assertExpectedGitRemote,
+  inspectGitRemotePolicy,
+} from "../../scripts/git_remote_policy.ts";
 async function runtimeFiles(): Promise<string[]> {
   const out: string[] = [];
   async function walk(path: string) {
@@ -45,9 +49,20 @@ Deno.test("MCP surface remains exact and fixture-only", () => {
     "connection_status",
   ]);
 });
-Deno.test("repository has no Git remote", async () => {
-  const output = await new Deno.Command("git", { args: ["remote"], stdout: "piped" }).output();
-  assert(!new TextDecoder().decode(output.stdout).trim());
+Deno.test("repository has only the exact approved public origin", async () => {
+  const snapshot = await inspectGitRemotePolicy();
+  assertExpectedGitRemote(snapshot);
+  for (const field of ["effectiveFetchUrls", "effectivePushUrls"] as const) {
+    const rewritten = structuredClone(snapshot);
+    rewritten[field] = ["https://evil.invalid/PaulKinlan/cairn-gateway.git"];
+    let denied = false;
+    try {
+      assertExpectedGitRemote(rewritten);
+    } catch {
+      denied = true;
+    }
+    assert(denied, `${field} rewrite accepted`);
+  }
 });
 Deno.test("secret-like local files are ignored", async () => {
   const ignore = await Deno.readTextFile(".gitignore");

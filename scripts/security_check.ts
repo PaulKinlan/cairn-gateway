@@ -1,3 +1,5 @@
+import { assertExpectedGitRemote, inspectGitRemotePolicy } from "./git_remote_policy.ts";
+
 const runtimeRoots = ["apps", "packages"], runtimeFiles: string[] = [];
 async function walk(path: string): Promise<void> {
   for await (const entry of Deno.readDir(path)) {
@@ -58,7 +60,7 @@ for (const file of tracked) {
     if (pattern.test(text)) throw new Error(`credential-shaped tracked content: ${file}`);
   }
 }
-if ((await git(["remote"])).trim()) throw new Error("repository remote is forbidden at Stage 0");
+assertExpectedGitRemote(await inspectGitRemotePolicy());
 console.log(
-  `security-check: ${runtimeFiles.length} runtime TypeScript files and ${tracked.length} tracked paths recursively checked; no forbidden network/listener, credential-shaped, remote-import, or Git-remote surface`,
+  `security-check: ${runtimeFiles.length} runtime TypeScript files and ${tracked.length} tracked paths recursively checked; no forbidden network/listener, credential-shaped, or remote-import surface; exact public origin policy passed`,
 );
