@@ -1,4 +1,5 @@
 // deno-lint-ignore-file require-await
+import { types as nodeTypes } from "node:util";
 import type {
   Agent,
   Connection,
@@ -35,7 +36,7 @@ function assertPlainData(value: unknown, active = new WeakSet<object>()): void {
   }
   if (typeof value !== "object") throw new Error("plain data denied");
   const object = value as object;
-  if (active.has(object)) throw new Error("plain data denied");
+  if (nodeTypes.isProxy(object) || active.has(object)) throw new Error("plain data denied");
   active.add(object);
   try {
     const array = Array.isArray(object);
@@ -68,8 +69,8 @@ function freezePlainData(value: unknown, seen = new WeakSet<object>()): void {
 /** Rejects accessors, exotic prototypes, symbols, cycles, and proxies before use. */
 function plainDataSnapshot<T>(value: T): Readonly<T> {
   try {
+    // Deno's local runtime proxy predicate is trap-free; use it recursively before reflection.
     assertPlainData(value);
-    // structuredClone rejects proxies even when their reflection traps imitate a plain record.
     const snapshot = structuredClone(value);
     assertPlainData(snapshot);
     freezePlainData(snapshot);
@@ -230,26 +231,27 @@ export class MemoryStore implements MetadataStore {
     value: BootstrapCommit,
     now: number,
   ): Promise<boolean> {
-    this.#owned(ctx, { ...value.principal, userId: value.principal.id });
-    this.#owned(ctx, value.agent);
-    this.#owned(ctx, value.device);
+    const snapshot = plainDataSnapshot(value);
+    this.#owned(ctx, { ...snapshot.principal, userId: snapshot.principal.id });
+    this.#owned(ctx, snapshot.agent);
+    this.#owned(ctx, snapshot.device);
     return await this.backend.exclusive(async () => {
       const transaction = await bootstrapTransaction(
         ctx,
-        value.principal,
-        value.agent,
-        value.device,
+        snapshot.principal,
+        snapshot.agent,
+        snapshot.device,
       );
       const hash = await transactionHash(transaction);
       if (
-        value.principal.id !== ctx.userId || value.principal.tenantId !== ctx.tenantId ||
-        value.principal.kind !== "cryptographic" || value.principal.emailRequired !== false ||
-        value.principal.status !== "active" || value.principal.epoch !== 1 ||
-        value.agent.status !== "active" || value.agent.epoch !== 1 ||
-        value.agent.thumbprint !== transaction.agent_jkt ||
-        value.device.agentId !== value.agent.id || value.device.role !== "admin" ||
-        value.device.status !== "active" || value.device.epoch !== 1 ||
-        value.device.thumbprint !== transaction.device_jkt ||
+        snapshot.principal.id !== ctx.userId || snapshot.principal.tenantId !== ctx.tenantId ||
+        snapshot.principal.kind !== "cryptographic" || snapshot.principal.emailRequired !== false ||
+        snapshot.principal.status !== "active" || snapshot.principal.epoch !== 1 ||
+        snapshot.agent.status !== "active" || snapshot.agent.epoch !== 1 ||
+        snapshot.agent.thumbprint !== transaction.agent_jkt ||
+        snapshot.device.agentId !== snapshot.agent.id || snapshot.device.role !== "admin" ||
+        snapshot.device.status !== "active" || snapshot.device.epoch !== 1 ||
+        snapshot.device.thumbprint !== transaction.device_jkt ||
         transaction.agent_jkt === transaction.device_jkt ||
         this.backend.principals.has(entityKey(ctx, "principal", ctx.userId)) ||
         [...this.backend.agents.values()].some((agent) =>
@@ -261,16 +263,16 @@ export class MemoryStore implements MetadataStore {
       ) return false;
       if (!this.#consumeChallenge(ctx, challengeId, hash, "bootstrap", now)) return false;
       this.backend.principals.set(
-        entityKey(ctx, "principal", value.principal.id),
-        structuredClone(value.principal),
+        entityKey(ctx, "principal", snapshot.principal.id),
+        snapshot.principal,
       );
       this.backend.agents.set(
-        entityKey(ctx, "agent", value.agent.id),
-        structuredClone(value.agent),
+        entityKey(ctx, "agent", snapshot.agent.id),
+        snapshot.agent,
       );
       this.backend.devices.set(
-        entityKey(ctx, "device", value.device.id),
-        structuredClone(value.device),
+        entityKey(ctx, "device", snapshot.device.id),
+        snapshot.device,
       );
       return true;
     });
@@ -281,13 +283,14 @@ export class MemoryStore implements MetadataStore {
     value: EnrollmentRequestCommit,
     now: number,
   ): Promise<boolean> {
-    this.#owned(ctx, value.request);
+    const snapshot = plainDataSnapshot(value);
+    this.#owned(ctx, snapshot.request);
     return await this.backend.exclusive(async () => {
       const principal = this.backend.principals.get(entityKey(ctx, "principal", ctx.userId));
-      const agent = this.backend.agents.get(entityKey(ctx, "agent", value.request.agentId));
+      const agent = this.backend.agents.get(entityKey(ctx, "agent", snapshot.request.agentId));
       if (!principal || !agent) return false;
       const agentThumbprint = await jwkThumbprint(agent.publicJwk);
-      const transaction = await enrollmentTransaction(ctx, value.request, principal, agent);
+      const transaction = await enrollmentTransaction(ctx, snapshot.request, principal, agent);
       const hash = await transactionHash(transaction);
       let ownerAgentKeyDenied = false;
       for (const ownerAgent of this.backend.agents.values()) {
@@ -299,22 +302,22 @@ export class MemoryStore implements MetadataStore {
         ) ownerAgentKeyDenied = true;
       }
       if (
-        principal.status !== "active" || principal.epoch !== value.principalEpoch ||
-        agent.status !== "active" || agent.epoch !== value.agentEpoch ||
-        agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
-        transaction.candidate_jkt !== value.request.thumbprint || ownerAgentKeyDenied ||
-        transaction.candidate_jkt === agentThumbprint || value.request.status !== "pending" ||
-        value.request.expiresAt <= now || value.request.expiresAt > now + 600 ||
-        transaction.request_id !== value.request.id || transaction.agent_id !== agent.id ||
+        principal.status !== "active" || principal.epoch !== snapshot.principalEpoch ||
+        agent.status !== "active" || agent.epoch !== snapshot.agentEpoch ||
+        agentThumbprint !== agent.thumbprint || agent.thumbprint !== snapshot.agentThumbprint ||
+        transaction.candidate_jkt !== snapshot.request.thumbprint || ownerAgentKeyDenied ||
+        transaction.candidate_jkt === agentThumbprint || snapshot.request.status !== "pending" ||
+        snapshot.request.expiresAt <= now || snapshot.request.expiresAt > now + 600 ||
+        transaction.request_id !== snapshot.request.id || transaction.agent_id !== agent.id ||
         [...this.backend.devices.values()].some((device) =>
           device.tenantId === ctx.tenantId && device.userId === ctx.userId &&
-          device.thumbprint === value.request.thumbprint
+          device.thumbprint === snapshot.request.thumbprint
         )
       ) return false;
-      const key = entityKey(ctx, "enrollment", value.request.id);
+      const key = entityKey(ctx, "enrollment", snapshot.request.id);
       if (this.backend.enrollments.has(key)) return false;
       if (!this.#consumeChallenge(ctx, challengeId, hash, "enroll_candidate", now)) return false;
-      this.backend.enrollments.set(key, structuredClone(value.request));
+      this.backend.enrollments.set(key, snapshot.request);
       return true;
     });
   }
@@ -324,18 +327,19 @@ export class MemoryStore implements MetadataStore {
     value: ApprovalCommit,
     now: number,
   ): Promise<boolean> {
-    this.#owned(ctx, value.device);
+    const snapshot = plainDataSnapshot(value);
+    this.#owned(ctx, snapshot.device);
     return await this.backend.exclusive(async () => {
-      const requestKey = entityKey(ctx, "enrollment", value.requestId);
+      const requestKey = entityKey(ctx, "enrollment", snapshot.requestId);
       const request = this.backend.enrollments.get(requestKey);
       const principal = this.backend.principals.get(entityKey(ctx, "principal", ctx.userId));
       const agent = request
         ? this.backend.agents.get(entityKey(ctx, "agent", request.agentId))
         : undefined;
-      const approver = this.backend.devices.get(entityKey(ctx, "device", value.approverId));
+      const approver = this.backend.devices.get(entityKey(ctx, "device", snapshot.approverId));
       if (!request || !principal || !agent || !approver) return false;
       const requestThumbprint = await jwkThumbprint(request.candidateJwk);
-      const deviceThumbprint = await jwkThumbprint(value.device.publicJwk);
+      const deviceThumbprint = await jwkThumbprint(snapshot.device.publicJwk);
       const agentThumbprint = await jwkThumbprint(agent.publicJwk);
       const approverThumbprint = await jwkThumbprint(approver.publicJwk);
       let ownerAgentKeyDenied = false;
@@ -353,32 +357,33 @@ export class MemoryStore implements MetadataStore {
         agent,
         request,
         approver,
-        value.device.id,
+        snapshot.device.id,
       );
       const hash = await transactionHash(transaction);
       if (
         request.status !== "pending" || request.expiresAt <= now ||
-        principal.status !== "active" || principal.epoch !== value.principalEpoch ||
-        agent.status !== "active" || agent.epoch !== value.agentEpoch ||
-        agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
-        requestThumbprint !== request.thumbprint || deviceThumbprint !== value.device.thumbprint ||
+        principal.status !== "active" || principal.epoch !== snapshot.principalEpoch ||
+        agent.status !== "active" || agent.epoch !== snapshot.agentEpoch ||
+        agentThumbprint !== agent.thumbprint || agent.thumbprint !== snapshot.agentThumbprint ||
+        requestThumbprint !== request.thumbprint ||
+        deviceThumbprint !== snapshot.device.thumbprint ||
         requestThumbprint !== deviceThumbprint || ownerAgentKeyDenied ||
         deviceThumbprint === agentThumbprint ||
         approver.status !== "active" || approver.role !== "admin" ||
-        approver.agentId !== request.agentId || approver.epoch !== value.approverEpoch ||
+        approver.agentId !== request.agentId || approver.epoch !== snapshot.approverEpoch ||
         approverThumbprint !== approver.thumbprint ||
-        approver.thumbprint !== value.approverThumbprint ||
+        approver.thumbprint !== snapshot.approverThumbprint ||
         approverThumbprint === agentThumbprint ||
-        approverThumbprint === deviceThumbprint || value.device.agentId !== request.agentId ||
-        value.device.thumbprint !== request.thumbprint || value.device.role !== "member" ||
-        value.device.status !== "active" || value.device.epoch !== 1 ||
-        JSON.stringify(value.device.publicJwk) !== JSON.stringify(request.candidateJwk) ||
-        this.backend.devices.has(entityKey(ctx, "device", value.device.id))
+        approverThumbprint === deviceThumbprint || snapshot.device.agentId !== request.agentId ||
+        snapshot.device.thumbprint !== request.thumbprint || snapshot.device.role !== "member" ||
+        snapshot.device.status !== "active" || snapshot.device.epoch !== 1 ||
+        JSON.stringify(snapshot.device.publicJwk) !== JSON.stringify(request.candidateJwk) ||
+        this.backend.devices.has(entityKey(ctx, "device", snapshot.device.id))
       ) return false;
       if (!this.#consumeChallenge(ctx, challengeId, hash, "approve_enrollment", now)) return false;
       this.backend.devices.set(
-        entityKey(ctx, "device", value.device.id),
-        structuredClone(value.device),
+        entityKey(ctx, "device", snapshot.device.id),
+        snapshot.device,
       );
       this.backend.enrollments.set(requestKey, { ...request, status: "approved" });
       return true;
@@ -390,10 +395,11 @@ export class MemoryStore implements MetadataStore {
     value: RemovalCommit,
     now: number,
   ): Promise<boolean> {
+    const snapshot = plainDataSnapshot(value);
     return await this.backend.exclusive(async () => {
-      const agent = this.backend.agents.get(entityKey(ctx, "agent", value.agentId));
-      const approver = this.backend.devices.get(entityKey(ctx, "device", value.approverId));
-      const targetKey = entityKey(ctx, "device", value.targetId);
+      const agent = this.backend.agents.get(entityKey(ctx, "agent", snapshot.agentId));
+      const approver = this.backend.devices.get(entityKey(ctx, "device", snapshot.approverId));
+      const targetKey = entityKey(ctx, "device", snapshot.targetId);
       const target = this.backend.devices.get(targetKey);
       if (!agent || !approver || !target) return false;
       const agentThumbprint = await jwkThumbprint(agent.publicJwk);
@@ -403,18 +409,18 @@ export class MemoryStore implements MetadataStore {
       const hash = await transactionHash(transaction);
       if (
         agent.tenantId !== ctx.tenantId || agent.userId !== ctx.userId ||
-        agent.status !== "active" || agent.epoch !== value.agentEpoch ||
-        agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
+        agent.status !== "active" || agent.epoch !== snapshot.agentEpoch ||
+        agentThumbprint !== agent.thumbprint || agent.thumbprint !== snapshot.agentThumbprint ||
         approver.tenantId !== ctx.tenantId || approver.userId !== ctx.userId ||
         approver.status !== "active" || approver.role !== "admin" ||
-        approver.agentId !== agent.id || approver.epoch !== value.approverEpoch ||
+        approver.agentId !== agent.id || approver.epoch !== snapshot.approverEpoch ||
         approverThumbprint !== approver.thumbprint ||
-        approver.thumbprint !== value.approverThumbprint ||
+        approver.thumbprint !== snapshot.approverThumbprint ||
         approverThumbprint === agentThumbprint ||
         target.tenantId !== ctx.tenantId || target.userId !== ctx.userId ||
         target.status !== "active" || target.agentId !== agent.id ||
-        target.epoch !== value.targetEpoch || target.role !== value.targetRole ||
-        targetThumbprint !== target.thumbprint || target.thumbprint !== value.targetThumbprint ||
+        target.epoch !== snapshot.targetEpoch || target.role !== snapshot.targetRole ||
+        targetThumbprint !== target.thumbprint || target.thumbprint !== snapshot.targetThumbprint ||
         targetThumbprint === agentThumbprint
       ) return false;
       if (!this.#consumeChallenge(ctx, challengeId, hash, "remove_device", now)) return false;
@@ -564,7 +570,16 @@ export class MemoryStore implements MetadataStore {
     reason?: RevocationEvent["reason"],
     at?: number,
   ): Promise<void> {
-    return this.#update(ctx, this.backend.grants, "grant", value, value.version, reason, at);
+    const snapshot = plainDataSnapshot(value);
+    return this.#update(
+      ctx,
+      this.backend.grants,
+      "grant",
+      snapshot,
+      snapshot.version,
+      reason,
+      at,
+    );
   }
   async updateConnection(
     ctx: TenantContext,

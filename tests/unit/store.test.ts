@@ -341,6 +341,24 @@ Deno.test("raw identity writes reject accessors, proxies, symbols, and exotic pr
     "plain data denied",
   );
 
+  let selfRemovingTrapReads = 0;
+  const selfRemoving = { ...agent, id: ids.agent("agent_self_removing_proxy") };
+  const plainReplacement = structuredClone(agent.publicJwk);
+  selfRemoving.publicJwk = new Proxy(agent.publicJwk, {
+    getPrototypeOf: (target) => {
+      selfRemovingTrapReads++;
+      selfRemoving.publicJwk = plainReplacement;
+      return Object.getPrototypeOf(target);
+    },
+  });
+  await rejects(() => store.putAgent(ctx, selfRemoving), "plain data denied");
+  equals(selfRemovingTrapReads, 0);
+  equals(await store.getAgent(ctx, selfRemoving.id), undefined);
+
+  const cyclic = { ...agent, id: ids.agent("agent_cycle") } as Agent & { cycle?: unknown };
+  cyclic.cycle = cyclic;
+  await rejects(() => store.putAgent(ctx, cyclic), "plain data denied");
+
   const symbolRecord = { ...agent, id: ids.agent("agent_symbol") } as Agent & {
     [key: symbol]: string;
   };
@@ -354,6 +372,50 @@ Deno.test("raw identity writes reject accessors, proxies, symbols, and exotic pr
 
   equals((await store.getDevice(ctx, member.id))!.role, "member");
   equals((await store.getDevice(ctx, member.id))!.agentId, agent.id);
+});
+
+Deno.test("grant updates store immutable snapshots in both status directions", async () => {
+  const backend = new MemoryAuthorityBackend();
+  const store = new MemoryStore(backend);
+  const { grant } = await seed(store);
+
+  const activeUpdate: Grant = { ...grant, version: 2, expiresAt: grant.expiresAt + 100 };
+  await store.updateGrant(ctx, activeUpdate);
+  activeUpdate.status = "revoked";
+  activeUpdate.version = 99;
+  activeUpdate.expiresAt = 0;
+  activeUpdate.agentId = ids.agent("agent_mutated");
+  activeUpdate.deviceId = ids.device("device_mutated");
+  activeUpdate.connectionId = ids.connection("connection_mutated");
+  activeUpdate.operation = "mutated.operation" as Grant["operation"];
+  equals(await store.getGrant(ctx, grant.id), {
+    ...grant,
+    version: 2,
+    expiresAt: grant.expiresAt + 100,
+  });
+
+  const revokedUpdate: Grant = {
+    ...grant,
+    status: "revoked",
+    version: 3,
+    expiresAt: grant.expiresAt - 100,
+  };
+  await store.updateGrant(ctx, revokedUpdate);
+  revokedUpdate.status = "active";
+  revokedUpdate.version = 999;
+  revokedUpdate.expiresAt = Number.MAX_SAFE_INTEGER;
+  revokedUpdate.agentId = ids.agent("agent_rebound");
+  revokedUpdate.deviceId = ids.device("device_rebound");
+  revokedUpdate.connectionId = ids.connection("connection_rebound");
+  revokedUpdate.operation = "rebound.operation" as Grant["operation"];
+  equals(await store.getGrant(ctx, grant.id), {
+    ...grant,
+    status: "revoked",
+    version: 3,
+    expiresAt: grant.expiresAt - 100,
+  });
+  const authoritative = [...backend.grants.values()][0];
+  assert(Object.isFrozen(authoritative));
 });
 
 Deno.test("device role, parent agent, and owner-wide agent/device key roles are immutable", async () => {

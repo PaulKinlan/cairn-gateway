@@ -231,7 +231,7 @@ Deno.test("legacy lifecycle requires initialized notification with internal per-
   const listed = await harness.dispatch(encoder.encode(JSON.stringify(list)), "/mcp/legacy");
   assert(Array.isArray((listed!.result as { tools: unknown[] }).tools));
 });
-Deno.test("every tool rejects revoked state and Date.now cannot bypass real expiry", async () => {
+Deno.test("every tool rejects revoked state and replaced clock globals cannot bypass expiry", async () => {
   const requests = [
     modern("search_capabilities", { query: "github" }),
     modern("describe_operation", { operation: "github.user.read@v1" }),
@@ -250,13 +250,19 @@ Deno.test("every tool rejects revoked state and Date.now cannot bypass real expi
   }
   await new Promise((resolve) => setTimeout(resolve, 1_100));
   const originalDateNow = Date.now;
+  const originalMathFloor = Math.floor;
+  const originalNumberIsSafeInteger = Number.isSafeInteger;
   Date.now = () => 0;
+  Math.floor = () => 0;
+  Number.isSafeInteger = () => true;
   try {
     for (const expired of expiring) {
       await rejects(() => expired.harness.dispatch(expired.bytes), "grant denied");
     }
   } finally {
     Date.now = originalDateNow;
+    Math.floor = originalMathFloor;
+    Number.isSafeInteger = originalNumberIsSafeInteger;
   }
   const bytes = encoder.encode(JSON.stringify(requests[0]));
   for (const subject of ["principal", "agent", "device", "grant", "connection"] as const) {

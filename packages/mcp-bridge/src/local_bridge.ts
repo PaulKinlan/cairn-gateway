@@ -22,7 +22,9 @@ import { type VerifiedMcpAuth, verifyMcpAuth } from "../../../apps/gateway/mcp_a
 import type { LegacyMcpSession } from "../../../apps/gateway/mcp.ts";
 
 const capturedDateNow = Date.now.bind(Date);
-const systemClock = () => Math.floor(capturedDateNow() / 1000);
+const capturedMathFloor = Math.floor.bind(Math);
+const capturedNumberIsSafeInteger = Number.isSafeInteger.bind(Number);
+const systemClock = () => capturedMathFloor(capturedDateNow() / 1000);
 
 interface PolicySession {
   capability: string;
@@ -125,7 +127,7 @@ class PolicyMcpCore implements StructuredCore {
   }
   #now(): number {
     const value = this.#session.clock();
-    if (!Number.isSafeInteger(value) || value < 0) throw new Error("policy denied");
+    if (!capturedNumberIsSafeInteger(value) || value < 0) throw new Error("policy denied");
     return value;
   }
   async #activeGrant() {

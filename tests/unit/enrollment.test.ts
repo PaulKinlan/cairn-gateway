@@ -13,8 +13,10 @@ import type { DeviceSigner } from "../../packages/core/src/crypto/device_signer.
 import { base64url, canonical, encoder } from "../../packages/core/src/crypto/encoding.ts";
 import { jwkThumbprint, shortFingerprint } from "../../packages/core/src/crypto/thumbprint.ts";
 import type {
+  ApprovalCommit,
   BootstrapCommit,
   EnrollmentRequestCommit,
+  RemovalCommit,
 } from "../../packages/core/src/store/store.ts";
 const ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("principal_7Yp9") },
   now = 2_000_000_000;
@@ -278,6 +280,148 @@ Deno.test("bootstrap signature rejects substituted agent identity and key", asyn
     "proof",
   );
 });
+Deno.test("authoritative commit inputs reject accessors without observation", async () => {
+  const store = new MemoryStore();
+  let reads = 0;
+  const accessor = <T>(property: string): T => {
+    const value = {} as T;
+    Object.defineProperty(value, property, {
+      enumerable: true,
+      get: () => {
+        reads++;
+        return {};
+      },
+    });
+    return value;
+  };
+  await rejects(
+    () => store.commitBootstrap(ctx, "unused", accessor<BootstrapCommit>("principal"), now),
+    "plain data denied",
+  );
+  await rejects(
+    () =>
+      store.commitEnrollmentRequest(
+        ctx,
+        "unused",
+        accessor<EnrollmentRequestCommit>("request"),
+        now,
+      ),
+    "plain data denied",
+  );
+  await rejects(
+    () => store.commitApproval(ctx, "unused", accessor<ApprovalCommit>("device"), now),
+    "plain data denied",
+  );
+  await rejects(
+    () => store.commitRemoval(ctx, "unused", accessor<RemovalCommit>("agentId"), now),
+    "plain data denied",
+  );
+  equals(reads, 0);
+});
+
+Deno.test("hostile approval role and JWK inputs neither consume challenge nor elevate", async () => {
+  for (const hostileField of ["role-accessor", "jwk-accessor", "self-removing-proxy"] as const) {
+    const backend = new MemoryAuthorityBackend();
+    const { store, service, device: admin } = await boot(backend);
+    const { candidateJkt, result } = await pending(service);
+    const approver = (await store.getDevice(ctx, "device_a"))!;
+    const candidateId = ids.device(`device_${hostileField}`);
+    const tx = {
+      action: "approve_enrollment",
+      principal_epoch: 1,
+      agent_epoch: 1,
+      agent_jkt: (await store.getAgent(ctx, "agent_a"))!.thumbprint,
+      approver_epoch: 1,
+      candidate_epoch: 1,
+      tenant_id: ctx.tenantId,
+      user_id: ctx.userId,
+      request_id: "enroll_b",
+      approver_id: approver.id,
+      approver_jkt: approver.thumbprint,
+      agent_id: ids.agent("agent_a"),
+      candidate_id: candidateId,
+      candidate_jkt: candidateJkt,
+      fingerprint: result.fingerprint,
+      expires_at: now + 600,
+    };
+    const challenge = await service.approvalChallenge(
+      ctx,
+      "enroll_b",
+      approver.id,
+      candidateId,
+      result.fingerprint,
+      now,
+    );
+    const signed = await proof(admin, tx, challenge);
+    let hostileReads = 0;
+    class HostileApprovalStore extends MemoryStore {
+      override async commitApproval(
+        context: TenantContext,
+        challengeId: string,
+        value: ApprovalCommit,
+        at: number,
+      ) {
+        const hostile: ApprovalCommit = { ...value, device: { ...value.device } };
+        if (hostileField === "role-accessor") {
+          Object.defineProperty(hostile.device, "role", {
+            enumerable: true,
+            get: () => {
+              hostileReads++;
+              return hostileReads === 1 ? "member" : "admin";
+            },
+          });
+        } else if (hostileField === "jwk-accessor") {
+          const publicJwk = hostile.device.publicJwk;
+          Object.defineProperty(hostile.device, "publicJwk", {
+            enumerable: true,
+            get: () => {
+              hostileReads++;
+              return publicJwk;
+            },
+          });
+        } else {
+          const publicJwk = hostile.device.publicJwk;
+          hostile.device.publicJwk = new Proxy(publicJwk, {
+            getPrototypeOf: (target) => {
+              hostileReads++;
+              hostile.device.publicJwk = structuredClone(publicJwk);
+              return Object.getPrototypeOf(target);
+            },
+          });
+        }
+        return await super.commitApproval(context, challengeId, hostile, at);
+      }
+    }
+    const hostileService = new DeviceEnrollmentService(new HostileApprovalStore(backend));
+    await rejects(
+      () =>
+        hostileService.approve(
+          ctx,
+          "enroll_b",
+          approver.id,
+          candidateId,
+          result.fingerprint,
+          signed,
+          now,
+        ),
+      "plain data denied",
+    );
+    equals(hostileReads, 0);
+    equals(await store.getDevice(ctx, candidateId), undefined);
+
+    await service.approve(
+      ctx,
+      "enroll_b",
+      approver.id,
+      candidateId,
+      result.fingerprint,
+      signed,
+      now,
+    );
+    equals((await store.getDevice(ctx, candidateId))!.role, "member");
+  }
+});
+
 Deno.test("candidate and approval challenges bind full tenant transaction and consume once", async () => {
   const { store, service, device: admin } = await boot();
   const { candidateJkt, result } = await pending(service);
