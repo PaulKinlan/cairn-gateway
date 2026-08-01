@@ -10,18 +10,22 @@ status/epoch/version and mutate all affected challenge, identity, revocation, re
 or finalization records. Production composition may not assemble authorization from separate check
 and consume calls.
 
-A reservation result is exactly `reserved`, `denied`, `already_consumed`, or `unknown_commit`. Only
-`reserved` may reach a connector. The adapter atomically writes both proof nonces, capability JTI,
-and a metadata-only attempt reservation. Dispatch has one durable permit. A crash during dispatch
-finalizes to `dispatch_unknown`; neither ambiguity state is automatically retried. This is
-at-most-once dispatch authorization, not external exactly-once execution.
+A reservation result is exactly `reserved`, `denied`, `already_consumed`, or `unknown_commit`.
+Reservation alone never authorizes a connector. The adapter atomically writes both proof nonces,
+capability JTI, and a metadata-only attempt reservation, then a separate one-time atomic `reserved`
+→ `dispatching` claim returns the only durable dispatch permit. Finalization validates that permit;
+restart recovery terminally marks unresolved dispatch as `dispatch_unknown`. Neither ambiguity state
+is automatically retried. This is at-most-once dispatch authorization, not external exactly-once
+execution.
 
 Durable envelopes carry schema version, migration state/generation, authority generation,
-independent replay/revocation/schema high-watermarks, and record versions. Migrations and restores
-must preserve or increase every watermark. Older/unavailable schemas, corrupt records, stale
-snapshots, partial migrations, and rolled-back clocks deny authority. Canonical UTF-8 JSON sorts
-object keys, permits only plain data and safe integers, and rejects undefined, exotic objects,
-accessors, symbols, cycles, and non-finite numbers independently of adapter prototypes.
+independent replay/revocation/schema high-watermarks, and record versions. Preparing, committing,
+failed, and recovered migration states are separate adapter-atomic CAS commits. Restore must
+preserve every current record and monotonically increase its version as well as every watermark.
+Older/unavailable schemas, corrupt records, stale snapshots, record deletion/rollback, partial
+migrations, and rolled-back clocks deny authority. Canonical UTF-8 JSON sorts object keys, permits
+only plain data and safe integers, and rejects undefined, exotic objects, accessors, symbols, sparse
+arrays, extra array properties, cycles, and non-finite numbers independently of adapter prototypes.
 
 ## Storage decision deferred
 

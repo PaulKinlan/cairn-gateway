@@ -6,9 +6,9 @@
   "tasks": {
     "fmt": "deno fmt --check",
     "lint": "deno lint",
-    "typecheck": "deno check packages/core/mod.ts packages/core/src/store/schema.ts packages/core/src/store/migrations.ts packages/mcp-bridge/mod.ts apps/control/main.ts apps/gateway/main.ts",
+    "typecheck": "deno check packages/core/mod.ts packages/core/src/store/authority_transaction.ts packages/core/src/store/schema.ts packages/core/src/store/keys.ts packages/core/src/store/migrations.ts tests/stage1/fixtures/offline_reference_adapter.ts tests/stage1/workers/authority_worker.ts tests/stage1/durability_contract.test.ts scripts/stage1_denominator.ts packages/mcp-bridge/mod.ts apps/control/main.ts apps/gateway/main.ts",
     "stage0:preflight": "deno run --allow-read=. --allow-run=git scripts/stage0_denominator.ts",
-    "stage1:denominator": "deno run --allow-read=. scripts/stage1_denominator.ts",
+    "stage1:denominator": "deno run --allow-read --allow-write --allow-run scripts/stage1_denominator.ts",
     "test:unit": "deno test tests/unit",
     "test:integration": "deno test tests/integration",
     "test:security": "deno test --allow-read=. --allow-run=git tests/security",

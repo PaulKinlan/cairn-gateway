@@ -1,22 +1,31 @@
-import { OfflineReferenceAuthority, type Owner } from "../fixtures/offline_reference_adapter.ts";
+import type {
+  AttemptFinalization,
+  AuthorityTransition,
+  ChallengeCreationTransaction,
+  ChallengeTransaction,
+  DispatchClaimTransaction,
+  DispatchPermitClaim,
+  DispatchRecoveryTransaction,
+  InvocationReservationTransaction,
+  ReplayTransaction,
+} from "../../../packages/core/src/store/authority_transaction.ts";
+import { ids, type TenantContext } from "../../../packages/core/src/domain/types.ts";
+import {
+  InjectedFault,
+  OfflineReferenceAuthority,
+  type Owner,
+} from "../fixtures/offline_reference_adapter.ts";
 
 type Input = {
   action: string;
   root: string;
   owner?: Owner;
-  id?: string;
-  hash?: string;
-  hashes?: string[];
-  kind?: "nonce" | "jti";
-  expiresAt?: number;
-  now?: number;
-  suffix?: string;
-  enrollmentId?: string;
-  subject?: "principal" | "agent" | "device" | "grant" | "connection";
-  status?: "active" | "revoked";
-  version?: number;
+  transaction?: unknown;
+  claim?: DispatchPermitClaim;
   custodyRef?: string;
   path?: string;
+  fault?: string;
+  mutation?: { path: string; value?: unknown; deletion?: boolean };
 };
 const input = JSON.parse(Deno.args[0] ?? "null") as Input;
 if (!input?.root || !input.action) throw new Error("worker input denied");
@@ -25,12 +34,12 @@ const owner = (): Owner => {
   if (!input.owner) throw new Error("owner required");
   return input.owner;
 };
+const ctx = (): TenantContext => ({
+  tenantId: ids.tenant(owner().tenantId),
+  userId: ids.user(owner().userId),
+});
 let value: unknown;
 try {
-  if (["consume", "beginDispatch", "consumeChallenge"].includes(input.action)) {
-    const jitter = crypto.getRandomValues(new Uint8Array(1))[0]! % 13;
-    await new Promise((resolve) => setTimeout(resolve, jitter));
-  }
   switch (input.action) {
     case "initialize":
       await adapter.initialize();
@@ -42,72 +51,98 @@ try {
     case "inspect":
       value = await adapter.inspect(owner());
       break;
-    case "consume":
-      value = await adapter.consume(
-        owner(),
-        input.kind!,
-        input.hashes!,
-        input.expiresAt!,
-        input.now!,
-      );
+    case "raw":
+      value = await adapter.read(false);
+      break;
+    case "consumeReplay":
+      value = await adapter.consumeReplay(ctx(), input.transaction as ReplayTransaction);
       break;
     case "reserve":
-      value = await adapter.reserve(owner(), input.id!, input.now!, input.suffix);
-      break;
-    case "beginDispatch":
-      value = await adapter.beginDispatch(owner(), input.id!);
-      break;
-    case "unknown":
-      value = await adapter.markDispatchUnknown(owner(), input.id!);
-      break;
-    case "issueChallenge":
-      value = await adapter.issueChallenge(owner(), input.id!, input.hash!, input.expiresAt!);
-      break;
-    case "consumeChallenge":
-      value = await adapter.consumeChallenge(
-        owner(),
-        input.id!,
-        input.hash!,
-        input.now!,
-        input.enrollmentId,
+      value = await adapter.reserveInvocation(
+        ctx(),
+        input.transaction as InvocationReservationTransaction,
       );
       break;
+    case "reserveFault":
+      value = await adapter.reserveInvocationFault(
+        ctx(),
+        input.transaction as InvocationReservationTransaction,
+        input.fault as never,
+      );
+      break;
+    case "claim":
+      value = await adapter.claimDispatch(ctx(), input.transaction as DispatchClaimTransaction);
+      break;
+    case "claimFault":
+      value = await adapter.claimDispatchFault(
+        ctx(),
+        input.transaction as DispatchClaimTransaction,
+        input.fault as never,
+      );
+      break;
+    case "dispatch":
+      value = await adapter.dispatchWithPermit(ctx(), input.claim!, input.fault === "ambiguous");
+      break;
+    case "finalize":
+      value = await adapter.finalizeAttempt(ctx(), input.transaction as AttemptFinalization);
+      break;
+    case "recover":
+      value = await adapter.recoverDispatch(
+        ctx(),
+        input.transaction as DispatchRecoveryTransaction,
+      );
+      break;
+    case "issue":
+      value = await adapter.issueChallenge(
+        ctx(),
+        input.transaction as ChallengeCreationTransaction,
+      );
+      break;
+    case "commit":
+      value = await adapter.commitChallenge(ctx(), input.transaction as ChallengeTransaction);
+      break;
     case "transition":
-      value = await adapter.transition(owner(), input.subject!, input.status!, input.version!);
+      value = await adapter.transitionAuthority(ctx(), input.transaction as AuthorityTransition);
       break;
     case "legacy":
       await adapter.writeLegacy(owner());
       value = true;
       break;
     case "migrate":
-      value = await adapter.migrate();
+      value = await adapter.migrate(input.fault as never);
       break;
     case "snapshot":
       await adapter.snapshot(input.path!);
       value = true;
       break;
+    case "replace":
+      await Deno.copyFile(input.path!, adapter.statePath);
+      value = true;
+      break;
     case "restore":
       value = await adapter.restore(input.path!);
       break;
-    case "corrupt":
-      await adapter.corrupt();
+    case "mutate":
+    case "mutatePath": {
+      const targetPath = input.action === "mutatePath" ? input.path! : adapter.statePath;
+      const state = JSON.parse(await Deno.readTextFile(targetPath)) as Record<string, unknown>;
+      const segments = input.mutation!.path.split(".");
+      let target = state;
+      for (const segment of segments.slice(0, -1)) {
+        target = target[segment] as Record<string, unknown>;
+      }
+      const last = segments.at(-1)!;
+      if (input.mutation!.deletion) delete target[last];
+      else target[last] = input.mutation!.value;
+      await Deno.writeTextFile(targetPath, JSON.stringify(state));
       value = true;
       break;
-    case "crashBefore":
-      Deno.exit(75);
-      break;
-    case "reserveExit":
-      await adapter.reserve(owner(), input.id!, input.now!, input.suffix);
-      Deno.exit(75);
-      break;
-    case "dispatchExit":
-      await adapter.beginDispatch(owner(), input.id!);
-      Deno.exit(75);
-      break;
+    }
     default:
       throw new Error("worker action denied");
   }
   console.log(JSON.stringify({ outcome: "ok", value }));
-} catch {
+} catch (error) {
+  if (error instanceof InjectedFault) Deno.exit(75);
   console.log(JSON.stringify({ outcome: "denied" }));
 }

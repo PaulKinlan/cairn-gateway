@@ -5,7 +5,8 @@
 - Accepted Stage 0 base: `25ee6526f683fbd4aa1e955b93c3eb3adf53211d`.
 - Stage 0 denominator: exactly 90 unchanged tests, zero skipped.
 - Stage 0 coverage floors: 84.0% branch, 96.3% function, 90.6% line.
-- Stage 1A denominator: exactly 24 IDs (`DUR-01`…`DUR-24`), zero skipped.
+- Stage 1A denominator: exactly 24 executed names (`DUR-01`…`DUR-24`), zero duplicate, skipped,
+  ignored, filtered, failed, or unregistered events.
 - Combined offline gate: exactly 114 cases.
 
 ## Stage 1A qualified boundary
@@ -13,11 +14,13 @@
 The offline reference adapter demonstrates the contract across independent Deno processes and disk
 restarts. It uses atomic lock/write/rename only as test machinery and is not production storage
 evidence. Invocation authorization validates tenant/owner, subject status and monotonic versions,
-consumes both nonces and JTI, and reserves one attempt in one commit. Only `reserved` grants a
-single dispatch permit. `unknown_commit` and `dispatch_unknown` never trigger automatic retry.
-Challenges, enrollment mutation, revocation, replay, reservation, and attempt transitions are
-atomic. Schema, migration, record, authority, replay, and revocation generations are monotonic;
-stale restore and clock rollback fail closed.
+consumes both nonces and JTI, and reserves one attempt in one commit. Reservation does not dispatch;
+only a subsequent atomic `reserved` → `dispatching` claim returns the one durable permit.
+`unknown_commit` and `dispatch_unknown` never trigger automatic retry. Purpose-bound bootstrap,
+enrollment, approval, and removal ceremonies, revocation, replay, reservation, and attempt
+transitions are atomic. The persisted effective clock governs replay and every challenge. Schema,
+migration, record, authority, replay, and revocation generations are monotonic; partial migration,
+stale restore, per-record deletion/rollback, nested corruption, and clock rollback fail closed.
 
 ## Still blocked
 

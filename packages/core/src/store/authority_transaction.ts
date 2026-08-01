@@ -14,6 +14,7 @@ export type AtomicAuthorityResult =
 export interface ChallengeCreationTransaction {
   challenge: EnrollmentChallenge;
   expectedAbsent: true;
+  now: number;
 }
 
 export interface ChallengeTransaction {
@@ -65,10 +66,52 @@ export type AttemptState =
   | "failed_safe"
   | "dispatch_unknown";
 
-export interface AttemptFinalization {
+/** Opaque value returned only by the durable reserved -> dispatching claim. */
+export interface DurableDispatchPermit {
   attemptId: string;
-  expectedState: "reserved" | "dispatching";
-  nextState: Exclude<AttemptState, "reserved" | "dispatching">;
+  claimVersion: number;
+  authorityGeneration: number;
+  token: string;
+}
+
+export type DispatchPermitClaim =
+  | { outcome: "permit"; permit: DurableDispatchPermit }
+  | { outcome: "denied"; reason: string }
+  | { outcome: "already_consumed" }
+  | { outcome: "unknown_commit" };
+
+export interface DispatchClaimTransaction {
+  attemptId: string;
+  expectedState: "reserved";
+  now: number;
+}
+
+export type AttemptTerminalResult =
+  | { outcome: "completed"; resultHash: string }
+  | { outcome: "failed_safe"; reason: string }
+  | { outcome: "dispatch_unknown" };
+
+export type AttemptFinalization =
+  | {
+    attemptId: string;
+    expectedState: "reserved";
+    nextState: "failed_safe";
+    result: Extract<AttemptTerminalResult, { outcome: "failed_safe" }>;
+    now: number;
+  }
+  | {
+    attemptId: string;
+    expectedState: "dispatching";
+    permit: DurableDispatchPermit;
+    nextState: "completed" | "failed_safe" | "dispatch_unknown";
+    result: AttemptTerminalResult;
+    now: number;
+  };
+
+export interface DispatchRecoveryTransaction {
+  attemptId: string;
+  expectedState: "dispatching";
+  nextState: "dispatch_unknown";
   now: number;
 }
 
@@ -94,17 +137,25 @@ export interface DurableAuthorityTransactions {
     ctx: TenantContext,
     transaction: InvocationReservationTransaction,
   ): Promise<InvocationReservation>;
+  claimDispatch(
+    ctx: TenantContext,
+    transaction: DispatchClaimTransaction,
+  ): Promise<DispatchPermitClaim>;
   finalizeAttempt(
     ctx: TenantContext,
     transaction: AttemptFinalization,
   ): Promise<AtomicAuthorityResult>;
+  recoverDispatch(
+    ctx: TenantContext,
+    transaction: DispatchRecoveryTransaction,
+  ): Promise<AtomicAuthorityResult>;
 }
 
-/** Only this explicit result authorizes dispatch. Ambiguous results are terminal for the attempt. */
+/** Only the one-time durable permit claim authorizes connector dispatch. */
 export function grantsDispatch(
-  result: InvocationReservation,
-): result is Extract<InvocationReservation, { outcome: "reserved" }> {
-  return result.outcome === "reserved";
+  result: DispatchPermitClaim,
+): result is Extract<DispatchPermitClaim, { outcome: "permit" }> {
+  return result.outcome === "permit";
 }
 
 /** Ambiguous commit and dispatch outcomes are never retryable automatically. */
