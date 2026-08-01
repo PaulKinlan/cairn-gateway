@@ -21,6 +21,22 @@ assumptions. No account, credential, live endpoint, package install, or provider
 | GitHub issuer / tokens        | https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps                               | Reviewed documentation does not establish an RFC 9207 `iss` response parameter guarantee. Token expiry/refresh behavior depends on app settings/features.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | **BLOCKER:** do not assume `iss` or refresh behavior; compensate with one compiled provider/integration and verify before activation.                                                                                                    |
 | GitHub user endpoint          | https://docs.github.com/en/rest/users/users#get-the-authenticated-user                                              | Authenticated-user endpoint is `GET /user`; response contains more data than Cairn should expose.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Verified connector target; Stage 0 projects only five allowlisted fields and never performs the call.                                                                                                                                    |
 
+## Stage 1A durable-authority qualification (offline)
+
+Stage 1A descends from exact accepted fixture commit `25ee6526f683fbd4aa1e955b93c3eb3adf53211d`. The
+accepted seven Stage 0 test files remain unchanged at exactly 90 tests and their coverage floors are
+independently gated. The adapter-neutral contract and canonical schema are exercised by exactly 24
+manifest IDs using an offline reference adapter. Concurrency and fault cases use separate Deno
+processes and persistent disk state, including restart, CAS, commit/reply ambiguity, dispatch
+ambiguity, migration, stale restore, clock rollback, and corruption. This qualifies the contract
+only; it does not attest any production database or external exactly-once behavior.
+
+No official material was retrieved and no network, package, listener, vendor, credential,
+environment, fetch, remote import, deployment, UI, or Git remote surface was added. Deno KV versus
+external storage remains unresolved, as do key custody, official MCP/named clients, callbacks,
+revocation policy, and retention. Ambiguous `unknown_commit` and `dispatch_unknown` outcomes are
+terminal for automatic processing.
+
 ## Offline authority boundary
 
 Stage 0's executable MCP fixture is created only by a zero-argument composition root. It internally

@@ -64,6 +64,10 @@ export interface RemovalCommit {
   targetRole: Device["role"];
 }
 
+/**
+ * Stage 0 fixture store. It remains frozen for the accepted 90-test denominator and is not a
+ * production durability contract. Production authority must implement DurableAuthorityTransactions.
+ */
 export interface MetadataStore {
   putPrincipal(ctx: TenantContext, value: Principal): Promise<void>;
   getPrincipal(ctx: TenantContext, id: string): Promise<Principal | undefined>;
@@ -148,3 +152,16 @@ export interface MetadataStore {
   consumeInvocation(ctx: TenantContext, binding: InvocationBinding): Promise<InvocationDecision>;
   revocations(ctx: TenantContext): Promise<RevocationEvent[]>;
 }
+
+export type {
+  AtomicAuthorityResult,
+  AttemptFinalization,
+  AttemptState,
+  AuthorityTransition,
+  ChallengeCreationTransaction,
+  ChallengeTransaction,
+  DurableAuthorityTransactions,
+  InvocationReservation,
+  InvocationReservationTransaction,
+  ReplayTransaction,
+} from "./authority_transaction.ts";

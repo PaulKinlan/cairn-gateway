@@ -6,17 +6,24 @@
   "tasks": {
     "fmt": "deno fmt --check",
     "lint": "deno lint",
-    "typecheck": "deno check packages/core/mod.ts packages/mcp-bridge/mod.ts apps/control/main.ts apps/gateway/main.ts",
+    "typecheck": "deno check packages/core/mod.ts packages/core/src/store/schema.ts packages/core/src/store/migrations.ts packages/mcp-bridge/mod.ts apps/control/main.ts apps/gateway/main.ts",
+    "stage0:preflight": "deno run --allow-read=. --allow-run=git scripts/stage0_denominator.ts",
+    "stage1:denominator": "deno run --allow-read=. scripts/stage1_denominator.ts",
     "test:unit": "deno test tests/unit",
     "test:integration": "deno test tests/integration",
     "test:security": "deno test --allow-read=. --allow-run=git tests/security",
-    "test": "deno task test:unit && deno task test:integration && deno task test:security",
-    "coverage": "rm -rf .coverage && deno test --allow-read=. --allow-run=git --coverage=.coverage tests/unit tests/integration tests/security && deno coverage .coverage --detailed --threshold=70",
+    "test:stage0": "deno task test:unit && deno task test:integration && deno task test:security",
+    "test:stage1": "deno test --allow-read=. --allow-write --allow-run tests/stage1/durability_contract.test.ts",
+    "test": "deno task test:stage0 && deno task test:stage1",
+    "coverage:stage0": "rm -rf .coverage && deno test --allow-read=. --allow-run=git --coverage=.coverage tests/unit tests/integration tests/security && deno coverage .coverage --detailed && deno run --allow-read=.coverage scripts/stage0_coverage.ts",
+    "coverage": "deno task coverage:stage0",
     "security": "deno task test:security && deno run --allow-read=. --allow-run=git scripts/security_check.ts",
     "mcp-contract": "deno run --allow-read=tests/fixtures scripts/mcp_contract_gate.ts",
     "dependency-graph": "deno info --json packages/core/mod.ts >/dev/null",
     "dependency-audit": "deno audit",
-    "check": "deno task fmt && deno task lint && deno task typecheck && deno task mcp-contract && deno task test && deno task security && deno task dependency-graph && deno task dependency-audit && deno task coverage"
+    "check:stage0": "deno task stage0:preflight && deno task fmt && deno task lint && deno task typecheck && deno task mcp-contract && deno task test:stage0 && deno task security && deno task dependency-graph && deno task dependency-audit && deno task coverage:stage0",
+    "check:stage1": "deno task stage1:denominator && deno task fmt && deno task lint && deno task typecheck && deno task test:stage1 && deno task security",
+    "check": "deno task check:stage0 && deno task check:stage1"
   },
   "lock": { "frozen": true }
 }
