@@ -1,3 +1,14 @@
+import { types as nodeTypes } from "node:util";
+import { jwkThumbprint } from "../crypto/thumbprint.ts";
+
+const intrinsicIsProxy = nodeTypes.isProxy;
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicDescriptors = Object.getOwnPropertyDescriptors;
+const intrinsicOwnKeys = Reflect.ownKeys;
+const IntrinsicWeakSet = WeakSet;
+const intrinsicWeakSetHas = WeakSet.prototype.has;
+const intrinsicWeakSetAdd = WeakSet.prototype.add;
+
 export const DURABLE_AUTHORITY_SCHEMA_VERSION = 2 as const;
 export const DURABLE_AUTHORITY_MIN_SCHEMA_VERSION = 1 as const;
 
@@ -119,19 +130,78 @@ function canonicalValue(value: unknown, active: Set<object>): string {
   }
 }
 
+function containsProxy(
+  value: unknown,
+  seen = new IntrinsicWeakSet<object>(),
+): boolean {
+  if (!value || typeof value !== "object") return false;
+  const object = value as object;
+  if (intrinsicReflectApply(intrinsicIsProxy, nodeTypes, [object])) return true;
+  if (intrinsicReflectApply(intrinsicWeakSetHas, seen, [object])) return false;
+  intrinsicReflectApply(intrinsicWeakSetAdd, seen, [object]);
+  const descriptors = intrinsicDescriptors(object);
+  for (const key of intrinsicOwnKeys(descriptors)) {
+    const descriptor = descriptors[key as keyof typeof descriptors];
+    if (descriptor && "value" in descriptor && containsProxy(descriptor.value, seen)) return true;
+  }
+  return false;
+}
+
 /** Injective deterministic UTF-8 JSON for the admitted durable-value domain. */
 export function serializeDurableAuthority(value: unknown): Uint8Array {
+  if (containsProxy(value)) throw new Error("Proxy input denied");
   return new TextEncoder().encode(canonicalValue(value, new Set()));
+}
+
+function nullPrototypeFrozen(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => nullPrototypeFrozen(item)));
+  }
+  if (value && typeof value === "object") {
+    const output = Object.create(null) as Record<string, unknown>;
+    for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new Error("authoritative input denied");
+      }
+      output[name] = nullPrototypeFrozen(descriptor.value);
+    }
+    return Object.freeze(output);
+  }
+  return value;
+}
+
+/**
+ * Detaches one caller-owned input before semantic or asynchronous reads. Structured clone rejects
+ * Proxy values; canonical validation rejects accessors/exotics; the authoritative result is a
+ * recursively frozen null-prototype graph.
+ */
+export function snapshotDurableInput<T>(value: T): T {
+  let detached: unknown;
+  try {
+    // The captured same-realm predicate rejects nested proxies before any reflective clone/read.
+    if (containsProxy(value)) throw new Error("Proxy input denied");
+    detached = structuredClone(value);
+  } catch {
+    throw new Error("authoritative input denied");
+  }
+  serializeDurableAuthority(detached);
+  return nullPrototypeFrozen(detached) as T;
+}
+
+/** Returns a detached, recursively frozen null-prototype inspection/export snapshot. */
+export function frozenDurableSnapshot<T>(value: T): T {
+  return snapshotDurableInput(value);
 }
 
 const text = (value: unknown): string => new TextDecoder().decode(serializeDurableAuthority(value));
 
-export async function hashDispatchPermit(value: {
+export async function hashDispatchPermit(input: {
   attemptId: string;
   claimVersion: number;
   authorityGeneration: number;
   token: string;
 }): Promise<string> {
+  const value = snapshotDurableInput(input);
   ownData(value, ["attemptId", "claimVersion", "authorityGeneration", "token"]);
   if (
     !clean(value.attemptId) || !safe(value.claimVersion, 1) ||
@@ -238,7 +308,47 @@ function assertIdentity(
     ) {
       throw new Error("durable identity denied");
     }
-  } else if (identity !== null) throw new Error("durable identity denied");
+  } else if (kind === "grant") {
+    if (!plain(identity)) throw new Error("durable grant metadata denied");
+    ownData(identity, [
+      "id",
+      "tenantId",
+      "userId",
+      "agentId",
+      "deviceId",
+      "connectionId",
+      "operation",
+      "status",
+      "version",
+      "expiresAt",
+    ]);
+    if (
+      identity.id !== id || identity.tenantId !== tenantId || identity.userId !== userId ||
+      !clean(identity.agentId) || !clean(identity.deviceId) || !clean(identity.connectionId) ||
+      identity.operation !== "github.user.read" ||
+      !["active", "disabled", "revoked"].includes(String(identity.status)) ||
+      !safe(identity.version, 1) || !safe(identity.expiresAt, 1)
+    ) throw new Error("durable grant metadata denied");
+  } else if (kind === "connection") {
+    if (!plain(identity)) throw new Error("durable connection metadata denied");
+    ownData(identity, [
+      "id",
+      "tenantId",
+      "userId",
+      "provider",
+      "adapter",
+      "custodyReferenceHash",
+      "status",
+      "epoch",
+    ]);
+    if (
+      identity.id !== id || identity.tenantId !== tenantId || identity.userId !== userId ||
+      identity.provider !== "github" || identity.adapter !== "fixture" ||
+      !clean(identity.custodyReferenceHash) ||
+      !["active", "disabled", "revoked"].includes(String(identity.status)) ||
+      !safe(identity.epoch, 1)
+    ) throw new Error("durable connection metadata denied");
+  } else throw new Error("durable identity denied");
   serializeDurableAuthority(identity);
 }
 
@@ -278,7 +388,7 @@ export function assertAuthorityEnvelope(
   value: unknown,
   requireCurrent = true,
 ): asserts value is DurableAuthorityEnvelope {
-  if (!plain(value)) throw new Error("durable authority schema denied");
+  if (containsProxy(value) || !plain(value)) throw new Error("durable authority schema denied");
   ownData(value, [
     "schemaVersion",
     "authorityGeneration",
@@ -332,6 +442,7 @@ export function assertAuthorityEnvelope(
   const subjects = new Map<string, Record<string, unknown>>();
   const enrollments: Array<{ tenantId: string; userId: string; request: Record<string, unknown> }> =
     [];
+  const attempts: Array<{ tenantId: string; userId: string; value: Record<string, unknown> }> = [];
   const owners = new Set<string>();
   const thumbprints = new Map<string, string>();
 
@@ -352,8 +463,13 @@ export function assertAuthorityEnvelope(
         throw new Error("durable subject denied");
       }
       assertIdentity(String(v.kind), v.identity, tenantId, userId, id);
-      if (plain(v.identity) && (v.identity.status !== v.status || v.identity.epoch !== v.version)) {
-        throw new Error("durable subject identity denied");
+      const metadataVersion = v.kind === "grant"
+        ? (v.identity as Record<string, unknown>).version
+        : (v.identity as Record<string, unknown>).epoch;
+      if (
+        !plain(v.identity) || v.identity.status !== v.status || metadataVersion !== v.version
+      ) {
+        throw new Error("durable subject metadata denied");
       }
       subjects.set(`${tenantId}/${userId}/${v.kind}/${id}`, v);
       if (plain(v.identity) && clean(v.identity.thumbprint)) {
@@ -424,6 +540,7 @@ export function assertAuthorityEnvelope(
         (v.state === "dispatch_unknown" && !hasPermit) ||
         (v.state === "failed_safe" && !(noPermit || hasPermit))
       ) throw new Error("durable attempt state denied");
+      attempts.push({ tenantId, userId, value: v });
       if (["reserved", "dispatching"].includes(String(v.state))) {
         if (v.result !== null) throw new Error("durable attempt result denied");
       } else {
@@ -467,7 +584,7 @@ export function assertAuthorityEnvelope(
         throw new Error("durable ceremony challenge denied");
       }
     } else if (kind === "enrollment") {
-      ownData(v, ["request"]);
+      ownData(v, ["request", "approvedDeviceId"]);
       if (!plain(v.request)) throw new Error("durable enrollment denied");
       ownData(v.request, [
         "id",
@@ -484,7 +601,9 @@ export function assertAuthorityEnvelope(
         !clean(v.request.agentId) ||
         !plain(v.request.candidateJwk) || !clean(v.request.thumbprint) ||
         !["pending", "approved", "rejected"].includes(String(v.request.status)) ||
-        !safe(v.request.expiresAt, 1)
+        !safe(v.request.expiresAt, 1) ||
+        !(v.approvedDeviceId === null || clean(v.approvedDeviceId)) ||
+        (v.request.status === "approved") !== (v.approvedDeviceId !== null)
       ) {
         throw new Error("durable enrollment denied");
       }
@@ -513,7 +632,13 @@ export function assertAuthorityEnvelope(
     if (custody.get(custodyHash) !== connectionKey) {
       throw new Error("connection custody relation denied");
     }
-    if (!subjects.has(`${item.tenantId}/${item.userId}/connection/${item.id}`)) {
+    const connectionSubject = subjects.get(
+      `${item.tenantId}/${item.userId}/connection/${item.id}`,
+    );
+    if (
+      !connectionSubject || !plain(connectionSubject.identity) ||
+      connectionSubject.identity.custodyReferenceHash !== custodyHash
+    ) {
       throw new Error("connection subject denied");
     }
   }
@@ -530,26 +655,54 @@ export function assertAuthorityEnvelope(
       }
     }
   }
+  for (const { tenantId, userId, value } of attempts) {
+    const binding = value.binding as Record<string, unknown>;
+    const principal = subjects.get(`${tenantId}/${userId}/principal/${binding.principalId}`);
+    const agent = subjects.get(`${tenantId}/${userId}/agent/${binding.agentId}`);
+    const device = subjects.get(`${tenantId}/${userId}/device/${binding.deviceId}`);
+    const grant = subjects.get(`${tenantId}/${userId}/grant/${binding.grantId}`);
+    const connection = subjects.get(`${tenantId}/${userId}/connection/${binding.connectionId}`);
+    if (
+      !principal || !agent || !device || !grant || !connection ||
+      !plain(device.identity) || device.identity.agentId !== binding.agentId ||
+      !plain(grant.identity) || grant.identity.agentId !== binding.agentId ||
+      grant.identity.deviceId !== binding.deviceId ||
+      grant.identity.connectionId !== binding.connectionId ||
+      grant.identity.operation !== binding.operation ||
+      !plain(connection.identity) ||
+      Number(binding.principalEpoch) > Number(principal.version) ||
+      Number(binding.agentEpoch) > Number(agent.version) ||
+      Number(binding.deviceEpoch) > Number(device.version) ||
+      Number(binding.grantVersion) > Number(grant.version) ||
+      Number(binding.connectionEpoch) > Number(connection.version)
+    ) throw new Error("durable attempt authority graph denied");
+  }
   for (const owner of owners) {
     const userId = owner.split("/")[1]!;
-    if (
-      !subjects.has(`${owner}/principal/${userId}`) ||
-      ![...subjects.keys()].some((item) => item.startsWith(`${owner}/agent/`))
-    ) {
-      throw new Error("owner identity relation denied");
-    }
+    const hasIdentity = subjects.has(`${owner}/principal/${userId}`) &&
+      [...subjects.keys()].some((item) => item.startsWith(`${owner}/agent/`));
+    const pendingBootstrap = parsed.some((item) =>
+      `${item.tenantId}/${item.userId}` === owner && item.kind === "challenge" &&
+      (item.record.value as Record<string, unknown>).purpose === "bootstrap" &&
+      (item.record.value as Record<string, unknown>).used === false
+    );
+    if (!hasIdentity && !pendingBootstrap) throw new Error("owner identity relation denied");
   }
   for (const { tenantId, userId, request } of enrollments) {
     const agent = subjects.get(`${tenantId}/${userId}/agent/${request.agentId}`);
     if (!agent || agent.status !== "active") throw new Error("enrollment agent relation denied");
     if (request.status === "approved") {
-      const approved = [...subjects.values()].find((item) =>
-        item.kind === "device" &&
-        plain(item.identity) && item.identity.tenantId === tenantId &&
-        item.identity.userId === userId &&
-        item.identity.thumbprint === request.thumbprint && item.status === "active"
+      const enrollment = parsed.find((item) =>
+        item.kind === "enrollment" && item.tenantId === tenantId && item.id === request.id
+      )!.record.value as Record<string, unknown>;
+      const approved = subjects.get(
+        `${tenantId}/${userId}/device/${String(enrollment.approvedDeviceId)}`,
       );
-      if (!approved) throw new Error("approved enrollment device relation denied");
+      if (
+        !approved || !plain(approved.identity) || approved.identity.tenantId !== tenantId ||
+        approved.identity.userId !== userId || approved.identity.agentId !== request.agentId ||
+        approved.identity.thumbprint !== request.thumbprint
+      ) throw new Error("approved enrollment device relation denied");
     }
   }
   serializeDurableAuthority(envelope);
@@ -558,6 +711,30 @@ export function assertAuthorityEnvelope(
 export function assertCurrentEnvelope(value: DurableAuthorityEnvelope): void {
   assertAuthorityEnvelope(value, true);
 }
+
+/** Verifies persisted agent/device/enrollment thumbprints against their public JWKs. */
+export async function assertAuthorityCryptography(value: DurableAuthorityEnvelope): Promise<void> {
+  assertAuthorityEnvelope(value, false);
+  for (const record of Object.values(value.records)) {
+    const item = record.value as Record<string, unknown>;
+    if (
+      item.kind === "agent" || item.kind === "device"
+    ) {
+      const identity = item.identity as unknown as AgentIdentity;
+      if (await jwkThumbprint(identity.publicJwk) !== identity.thumbprint) {
+        throw new Error("durable identity thumbprint denied");
+      }
+    }
+    if (plain(item.request)) {
+      const request = item.request as Record<string, unknown>;
+      if (
+        await jwkThumbprint(request.candidateJwk as JsonWebKey) !== request.thumbprint
+      ) throw new Error("durable enrollment thumbprint denied");
+    }
+  }
+}
+
+type AgentIdentity = { publicJwk: JsonWebKey; thumbprint: string };
 
 export const sameDurableValue = (left: unknown, right: unknown): boolean =>
   text(left) === text(right);

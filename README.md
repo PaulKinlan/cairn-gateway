@@ -18,8 +18,11 @@ and named clients, callback topology, revocation promise, and retention remain u
 blockers. Stage 1A qualifies an opaque durable `reserved` → `dispatching` permit claim followed by
 adapter-neutral atomic `startDispatch` consumption; only that one-use result authorizes dispatch.
 The same neutral envelope and maintenance interface cover export, inspection, restore, migration,
-and recovery. This is not filesystem power-loss durability or external exactly-once execution;
-`unknown_commit` and `dispatch_unknown` are durable ambiguity states and are never automatically
-retried. Concrete seed/view helpers and write-fault configuration are test-fixture behavior only.
+and recovery behind explicit privileged maintenance context. The candidate-factory conformance path
+also exercises abrupt worker death while holding the logical file lock and bounded stale-lock
+recovery. This remains test-only logical commit evidence, not filesystem fsync/power-loss durability
+or external exactly-once execution; `unknown_commit` and `dispatch_unknown` are durable ambiguity
+states and are never automatically retried. Concrete seed/view helpers are isolated behind the
+fixture driver.
 
 Requires exact Deno 2.9.0. No network or package changes are needed.

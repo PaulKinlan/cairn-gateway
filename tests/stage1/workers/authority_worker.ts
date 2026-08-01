@@ -1,5 +1,6 @@
 import type {
   AttemptFinalization,
+  AuthorityMaintenanceContext,
   AuthorityTransition,
   ChallengeCreationTransaction,
   ChallengeTransaction,
@@ -15,11 +16,7 @@ import type {
 import { ids, type TenantContext } from "../../../packages/core/src/domain/types.ts";
 import type { DurableAuthorityEnvelope } from "../../../packages/core/src/store/schema.ts";
 import { serializeDurableAuthority } from "../../../packages/core/src/store/schema.ts";
-import {
-  InjectedFault,
-  OfflineReferenceAuthority,
-  type Owner,
-} from "../fixtures/offline_reference_adapter.ts";
+import { createCandidateAdapter, type Owner } from "../fixtures/candidate_adapter_factory.ts";
 
 type Input = {
   action: string;
@@ -33,12 +30,15 @@ type Input = {
 };
 const input = JSON.parse(Deno.args[0] ?? "null") as Input;
 if (!input?.root || !input.action) throw new Error("worker input denied");
-const injectedFault = ["before_rename", "after_commit_before_reply"].includes(input.fault ?? "")
-  ? input.fault as "before_rename" | "after_commit_before_reply"
+const fault = input.fault === "abrupt_before_commit"
+  ? "abrupt_before_commit"
+  : input.fault === "abrupt_after_commit" || input.fault === "ambiguous"
+  ? "abrupt_after_commit"
   : undefined;
-const fixture = new OfflineReferenceAuthority(input.root, injectedFault);
-const transactions: DurableAuthorityTransactions = fixture;
-const maintenance: DurableAuthorityMaintenance = fixture;
+const candidate = createCandidateAdapter(input.root, { fault });
+const fixture = candidate.fixture;
+const transactions: DurableAuthorityTransactions = candidate.transactions;
+const maintenance: DurableAuthorityMaintenance = candidate.maintenance;
 const owner = (): Owner => {
   if (!input.owner) throw new Error("owner required");
   return input.owner;
@@ -47,6 +47,13 @@ const ctx = (): TenantContext => ({
   tenantId: ids.tenant(owner().tenantId),
   userId: ids.user(owner().userId),
 });
+const maintenanceCtx = (): AuthorityMaintenanceContext => {
+  const value = input.owner ?? { tenantId: "tenant_a", userId: "user" };
+  return {
+    tenant: { tenantId: ids.tenant(value.tenantId), userId: ids.user(value.userId) },
+    privilege: "offline_authority_maintenance",
+  };
+};
 const envelopeFromPath = async (): Promise<DurableAuthorityEnvelope> =>
   JSON.parse(await Deno.readTextFile(input.path!)) as DurableAuthorityEnvelope;
 let value: unknown;
@@ -64,10 +71,10 @@ try {
       break;
     case "inspectAuthority":
     case "raw":
-      value = await maintenance.inspectAuthority(input.transaction !== false);
+      value = await maintenance.inspectAuthority(maintenanceCtx(), input.transaction !== false);
       break;
     case "export":
-      value = await maintenance.exportAuthority();
+      value = await maintenance.exportAuthority(maintenanceCtx());
       break;
     case "consumeReplay":
       value = await transactions.consumeReplay(ctx(), input.transaction as ReplayTransaction);
@@ -102,9 +109,6 @@ try {
         ctx(),
         input.transaction as DispatchStartTransaction,
       );
-      if (input.fault === "ambiguous" && (value as { outcome: string }).outcome === "authorized") {
-        throw new InjectedFault("dispatch_start_ambiguity");
-      }
       break;
     case "finalize":
       value = await transactions.finalizeAttempt(ctx(), input.transaction as AttemptFinalization);
@@ -136,31 +140,36 @@ try {
       break;
     case "initializeAuthority":
       value = await maintenance.initializeAuthority(
+        maintenanceCtx(),
         input.path ? await envelopeFromPath() : input.transaction as DurableAuthorityEnvelope,
       );
       break;
     case "prepareMigration":
-      value = await maintenance.prepareMigration(input.transaction as MigrationPreparation);
+      value = await maintenance.prepareMigration(
+        maintenanceCtx(),
+        input.transaction as MigrationPreparation,
+      );
       break;
     case "advanceMigration":
-      value = await maintenance.advanceMigration();
+      value = await maintenance.advanceMigration(maintenanceCtx());
       break;
     case "failMigration":
-      value = await maintenance.failMigration();
+      value = await maintenance.failMigration(maintenanceCtx());
       break;
     case "recoverMigration":
     case "migrate":
-      value = await maintenance.recoverMigration();
+      value = await maintenance.recoverMigration(maintenanceCtx());
       break;
     case "snapshot":
       await Deno.writeFile(
         input.path!,
-        serializeDurableAuthority(await maintenance.exportAuthority()),
+        serializeDurableAuthority(await maintenance.exportAuthority(maintenanceCtx())),
       );
       value = true;
       break;
     case "restore":
       value = await maintenance.restoreAuthority(
+        maintenanceCtx(),
         input.path ? await envelopeFromPath() : input.transaction as DurableAuthorityEnvelope,
       );
       break;
@@ -188,7 +197,6 @@ try {
       throw new Error("worker action denied");
   }
   console.log(JSON.stringify({ outcome: "ok", value }));
-} catch (error) {
-  if (error instanceof InjectedFault) Deno.exit(75);
+} catch {
   console.log(JSON.stringify({ outcome: "denied" }));
 }

@@ -1,6 +1,7 @@
 import type {
   AtomicAuthorityResult,
   AttemptFinalization,
+  AuthorityMaintenanceContext,
   AuthorityMaintenanceResult,
   AuthorityTransition,
   ChallengeCreationTransaction,
@@ -21,39 +22,49 @@ import type {
 import type {
   Agent,
   Device,
+  EnrollmentRequest,
+  Grant,
   Principal,
   TenantContext,
 } from "../../../packages/core/src/domain/types.ts";
 import { ids } from "../../../packages/core/src/domain/types.ts";
+import { jwkThumbprint } from "../../../packages/core/src/crypto/thumbprint.ts";
+import { transactionHash } from "../../../packages/core/src/identity/transactions.ts";
 import { entityKey, replayKey } from "../../../packages/core/src/store/keys.ts";
 import { assertRestoreNotStale } from "../../../packages/core/src/store/migrations.ts";
 import {
+  assertAuthorityCryptography,
   assertAuthorityEnvelope,
   type DurableAuthorityEnvelope,
   type DurableRecord,
+  frozenDurableSnapshot,
   hashDispatchPermit,
   sameDurableValue,
   serializeDurableAuthority,
+  snapshotDurableInput,
 } from "../../../packages/core/src/store/schema.ts";
+import { FIXTURE_JWKS, FIXTURE_THUMBPRINTS, type Owner } from "./candidate_fixture_data.ts";
 
 /** Test machinery only: process contention and logical commits, never power-loss/fsync evidence. */
-export interface Owner {
+export type FaultPoint = "abrupt_before_commit" | "abrupt_after_commit";
+type Status = "active" | "disabled" | "revoked";
+type ConnectionMetadata = {
+  id: string;
   tenantId: string;
   userId: string;
-}
-export type FaultPoint = "before_rename" | "after_commit_before_reply";
-export class InjectedFault extends Error {
-  constructor(readonly point: string) {
-    super(`injected fault: ${point}`);
-  }
-}
-type Status = "active" | "disabled" | "revoked";
+  provider: "github";
+  adapter: "fixture";
+  custodyReferenceHash: string;
+  status: Status;
+  epoch: number;
+};
+type SubjectMetadata = Principal | Agent | Device | Grant | ConnectionMetadata;
 type SubjectValue = {
   kind: "principal" | "agent" | "device" | "grant" | "connection";
   id: string;
   status: Status;
   version: number;
-  identity: Principal | Agent | Device | null;
+  identity: SubjectMetadata;
 };
 type ReplayValue = { kind: "nonce" | "jti"; hash: string; expiresAt: number; generation: number };
 type AttemptValue = {
@@ -70,7 +81,8 @@ type AttemptValue = {
 };
 type ChallengeValue = ChallengeCreationTransaction["challenge"];
 type EnrollmentValue = {
-  request: ChallengeTransaction["mutation"] extends never ? never : Record<string, unknown>;
+  request: EnrollmentRequest;
+  approvedDeviceId: string | null;
 };
 
 const safe = (value: unknown, minimum = 0): value is number =>
@@ -112,6 +124,14 @@ const maintenanceDenied = (reason: string): AuthorityMaintenanceResult => ({
   outcome: "denied",
   reason,
 });
+function privileged(input: AuthorityMaintenanceContext): AuthorityMaintenanceContext {
+  const value = snapshotDurableInput(input);
+  if (value.privilege !== "offline_authority_maintenance") {
+    throw new Error("maintenance privilege denied");
+  }
+  context(value.tenant);
+  return value;
+}
 
 function nextVersion(state: DurableAuthorityEnvelope): number {
   return Math.max(0, ...Object.values(state.records).map((record) => record.recordVersion)) + 1;
@@ -189,8 +209,8 @@ function defaultIdentities(owner: Owner): { principal: Principal; agent: Agent; 
       id: ids.agent("agent"),
       tenantId: ids.tenant(owner.tenantId),
       userId: ids.user(owner.userId),
-      publicJwk: { kty: "OKP" },
-      thumbprint: "agent_thumb",
+      publicJwk: FIXTURE_JWKS.agent,
+      thumbprint: FIXTURE_THUMBPRINTS.agent,
       status: "active",
       epoch: 1,
     },
@@ -199,8 +219,8 @@ function defaultIdentities(owner: Owner): { principal: Principal; agent: Agent; 
       tenantId: ids.tenant(owner.tenantId),
       userId: ids.user(owner.userId),
       agentId: ids.agent("agent"),
-      publicJwk: { kty: "OKP" },
-      thumbprint: "device_thumb",
+      publicJwk: FIXTURE_JWKS.admin,
+      thumbprint: FIXTURE_THUMBPRINTS.admin,
       role: "admin",
       status: "active",
       epoch: 1,
@@ -211,18 +231,27 @@ function validBinding(
   state: DurableAuthorityEnvelope,
   ctx: TenantContext,
   tx: InvocationReservationTransaction,
+  now: number,
 ): boolean {
-  const values = [
-    [tx.principalId, "principal", tx.principalEpoch],
-    [tx.agentId, "agent", tx.agentEpoch],
-    [tx.deviceId, "device", tx.deviceEpoch],
-    [tx.grantId, "grant", tx.grantVersion],
-    [tx.connectionId, "connection", tx.connectionEpoch],
-  ] as const;
+  const principal = subject(state, ctx, tx.principalId)?.value;
+  const agent = subject(state, ctx, tx.agentId)?.value;
+  const device = subject(state, ctx, tx.deviceId)?.value;
+  const grant = subject(state, ctx, tx.grantId)?.value;
+  const connection = subject(state, ctx, tx.connectionId)?.value;
+  const deviceMetadata = device?.identity as Device | undefined;
+  const grantMetadata = grant?.identity as Grant | undefined;
+  const connectionMetadata = connection?.identity as ConnectionMetadata | undefined;
   return tx.operation === "github.user.read" &&
-    values.every(([id, kind, version]) =>
-      subjectActive(subject(state, ctx, id)?.value, kind, version)
-    );
+    subjectActive(principal, "principal", tx.principalEpoch) &&
+    subjectActive(agent, "agent", tx.agentEpoch) &&
+    subjectActive(device, "device", tx.deviceEpoch) &&
+    subjectActive(grant, "grant", tx.grantVersion) &&
+    subjectActive(connection, "connection", tx.connectionEpoch) &&
+    deviceMetadata?.agentId === tx.agentId &&
+    grantMetadata?.agentId === tx.agentId && grantMetadata.deviceId === tx.deviceId &&
+    grantMetadata.connectionId === tx.connectionId && grantMetadata.operation === tx.operation &&
+    grantMetadata.expiresAt > now && connectionMetadata?.provider === "github" &&
+    connectionMetadata.adapter === "fixture";
 }
 function ownerRecords(
   state: DurableAuthorityEnvelope,
@@ -260,17 +289,15 @@ export class OfflineReferenceAuthority
       throw new Error("record denied");
     }
     assertAuthorityEnvelope(value, requireCurrent);
+    await assertAuthorityCryptography(value);
     return value;
   }
   private async write(state: DurableAuthorityEnvelope, fault?: FaultPoint): Promise<void> {
     const temporary = `${this.statePath}.${Deno.pid}.${crypto.randomUUID()}.tmp`;
     await Deno.writeFile(temporary, serializeDurableAuthority(state), { createNew: true });
-    if (fault === "before_rename") {
-      await Deno.remove(temporary).catch(() => undefined);
-      throw new InjectedFault(fault);
-    }
+    if (fault === "abrupt_before_commit") Deno.exit(75);
     await Deno.rename(temporary, this.statePath);
-    if (fault === "after_commit_before_reply") throw new InjectedFault(fault);
+    if (fault === "abrupt_after_commit") Deno.exit(75);
   }
   private async locked<T>(
     operation: (state: DurableAuthorityEnvelope) => T | Promise<T>,
@@ -281,9 +308,31 @@ export class OfflineReferenceAuthority
     for (let attempt = 0;; attempt++) {
       try {
         await Deno.mkdir(this.lockPath);
+        await Deno.writeTextFile(
+          `${this.lockPath}/owner.json`,
+          JSON.stringify({ pid: Deno.pid, acquiredAt: Date.now() }),
+        );
         break;
       } catch (error) {
         if (!(error instanceof Deno.errors.AlreadyExists) || attempt >= 5000) throw error;
+        try {
+          const lockOwner = JSON.parse(
+            await Deno.readTextFile(`${this.lockPath}/owner.json`),
+          ) as { pid: number };
+          const alive = await new Deno.Command("kill", {
+            args: ["-0", String(lockOwner.pid)],
+            stdout: "null",
+            stderr: "null",
+          }).output();
+          if (!alive.success) {
+            await Deno.remove(this.lockPath, { recursive: true });
+            continue;
+          }
+        } catch (probeError) {
+          if (
+            !(probeError instanceof Deno.errors.NotFound) && !(probeError instanceof SyntaxError)
+          ) throw probeError;
+        }
         await new Promise((resolve) => setTimeout(resolve, 1 + attempt % 7));
       }
     }
@@ -294,15 +343,14 @@ export class OfflineReferenceAuthority
       await this.write(state, fault ?? this.injectedFault);
       return result;
     } finally {
-      await Deno.remove(this.lockPath).catch(() => undefined);
+      await Deno.remove(this.lockPath, { recursive: true }).catch(() => undefined);
     }
   }
 
   /** Concrete seed/view helpers exist only to arrange and display test fixtures. */
-  async seed(
-    owner: Owner,
-    custodyRef = `custody_${owner.tenantId}_${owner.userId}`,
-  ): Promise<boolean> {
+  async seed(ownerInput: Owner, custodyInput?: string): Promise<boolean> {
+    const owner = snapshotDurableInput(ownerInput);
+    const custodyRef = clean(custodyInput ?? `custody_${owner.tenantId}_${owner.userId}`);
     return await this.locked((state) => {
       const ctx = context(owner);
       if (
@@ -331,12 +379,37 @@ export class OfflineReferenceAuthority
         subjectKey(ctx, "device"),
         makeSubject("device", "device", "active", 1, identities.device),
       );
-      put(state, ctx, subjectKey(ctx, "grant"), makeSubject("grant", "grant", "active", 1, null));
+      put(
+        state,
+        ctx,
+        subjectKey(ctx, "grant"),
+        makeSubject("grant", "grant", "active", 1, {
+          id: "grant",
+          tenantId: ctx.tenantId,
+          userId: ctx.userId,
+          agentId: ids.agent("agent"),
+          deviceId: ids.device("device"),
+          connectionId: ids.connection("connection"),
+          operation: "github.user.read",
+          status: "active",
+          version: 1,
+          expiresAt: 1_000,
+        }),
+      );
       put(
         state,
         ctx,
         subjectKey(ctx, "connection"),
-        makeSubject("connection", "connection", "active", 1, null),
+        makeSubject("connection", "connection", "active", 1, {
+          id: "connection",
+          tenantId: ctx.tenantId,
+          userId: ctx.userId,
+          provider: "github",
+          adapter: "fixture",
+          custodyReferenceHash: clean(custodyRef),
+          status: "active",
+          epoch: 1,
+        }),
       );
       put(state, ctx, key(ctx, "connection", "connection"), {
         id: "connection",
@@ -350,7 +423,8 @@ export class OfflineReferenceAuthority
       return true;
     });
   }
-  async inspect(owner: Owner): Promise<Record<string, unknown>> {
+  async inspect(ownerInput: Owner): Promise<Record<string, unknown>> {
+    const owner = snapshotDurableInput(ownerInput);
     const state = await this.read();
     const ctx = context(owner);
     const all = ownerRecords(state, ctx);
@@ -404,7 +478,7 @@ export class OfflineReferenceAuthority
         connections[id] = { ...(item.value as object), recordVersion: item.recordVersion };
       }
     }
-    return structuredClone({
+    return frozenDurableSnapshot({
       exists: all.length > 0,
       tenant: all.length
         ? {
@@ -428,6 +502,8 @@ export class OfflineReferenceAuthority
   }
 
   async consumeReplay(ctx: TenantContext, tx: ReplayTransaction): Promise<AtomicAuthorityResult> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked((state) => {
       const now = effective(state, tx.now);
       if (!ownerRecords(state, ctx).length || !tx.records.length || tx.expiresAt <= now) {
@@ -466,10 +542,14 @@ export class OfflineReferenceAuthority
     ctx: TenantContext,
     tx: InvocationReservationTransaction,
   ): Promise<InvocationReservation> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked(
       (state) => {
         const now = effective(state, tx.now);
-        if (!validBinding(state, ctx, tx) || tx.nonceExpiresAt <= now || tx.jtiExpiresAt <= now) {
+        if (
+          !validBinding(state, ctx, tx, now) || tx.nonceExpiresAt <= now || tx.jtiExpiresAt <= now
+        ) {
           return { outcome: "denied", reason: "binding or expiry denied" };
         }
         const replayKeys = [
@@ -521,6 +601,8 @@ export class OfflineReferenceAuthority
     ctx: TenantContext,
     tx: DispatchClaimTransaction,
   ): Promise<DispatchPermitClaim> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked(
       async (state) => {
         const now = effective(state, tx.now);
@@ -531,8 +613,9 @@ export class OfflineReferenceAuthority
           item.value.permitHash !== null
         ) return { outcome: "already_consumed" };
         if (
-          item.value.binding.nonceExpiresAt <= now || item.value.binding.jtiExpiresAt <= now
-        ) return { outcome: "denied", reason: "reservation expired" };
+          item.value.binding.nonceExpiresAt <= now || item.value.binding.jtiExpiresAt <= now ||
+          !validBinding(state, ctx, item.value.binding, now)
+        ) return { outcome: "denied", reason: "reservation authority denied" };
         beginCommit(state);
         const permit: DurableDispatchPermit = {
           attemptId: tx.attemptId,
@@ -557,14 +640,20 @@ export class OfflineReferenceAuthority
     ctx: TenantContext,
     tx: DispatchStartTransaction,
   ): Promise<DispatchStartResult> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked(async (state) => {
-      effective(state, tx.now);
+      const now = effective(state, tx.now);
       const permit = tx.permit;
       const item = record<AttemptValue>(state, key(ctx, "attempt", clean(permit.attemptId)));
       if (!item || item.value.state !== "dispatching") {
         return { outcome: "denied", reason: "attempt state denied" };
       }
       if (item.value.dispatchStarted) return { outcome: "already_consumed" };
+      if (
+        item.value.binding.nonceExpiresAt <= now || item.value.binding.jtiExpiresAt <= now ||
+        !validBinding(state, ctx, item.value.binding, now)
+      ) return { outcome: "denied", reason: "dispatch authority denied" };
       if (
         permit.claimVersion !== item.value.claimVersion ||
         permit.authorityGeneration !== item.value.permitAuthorityGeneration ||
@@ -591,6 +680,8 @@ export class OfflineReferenceAuthority
     ctx: TenantContext,
     tx: AttemptFinalization,
   ): Promise<AtomicAuthorityResult> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked(async (state) => {
       effective(state, tx.now);
       const item = record<AttemptValue>(state, key(ctx, "attempt", clean(tx.attemptId)));
@@ -623,6 +714,8 @@ export class OfflineReferenceAuthority
     ctx: TenantContext,
     tx: DispatchRecoveryTransaction,
   ): Promise<AtomicAuthorityResult> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked((state) => {
       effective(state, tx.now);
       const item = record<AttemptValue>(state, key(ctx, "attempt", clean(tx.attemptId)));
@@ -648,12 +741,15 @@ export class OfflineReferenceAuthority
     ctx: TenantContext,
     tx: ChallengeCreationTransaction,
   ): Promise<AtomicAuthorityResult> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked((state) => {
       const now = effective(state, tx.now);
       const challenge = tx.challenge;
       const challengeKey = key(ctx, "challenge", challenge.id);
       if (
-        !ownerRecords(state, ctx).length || challenge.tenantId !== ctx.tenantId ||
+        (challenge.purpose !== "bootstrap" && !ownerRecords(state, ctx).length) ||
+        challenge.tenantId !== ctx.tenantId ||
         challenge.userId !== ctx.userId ||
         challenge.expiresAt <= now || challenge.used || tx.expectedAbsent !== true ||
         state.records[challengeKey]
@@ -668,12 +764,12 @@ export class OfflineReferenceAuthority
     });
   }
 
-  private ceremonyValid(
+  private async ceremonyValid(
     state: DurableAuthorityEnvelope,
     ctx: TenantContext,
     tx: ChallengeTransaction,
     now: number,
-  ): boolean {
+  ): Promise<boolean> {
     const mutation = tx.mutation;
     if (
       (tx.purpose === "bootstrap" && mutation.kind !== "bootstrap") ||
@@ -684,13 +780,16 @@ export class OfflineReferenceAuthority
     const principal = subject(state, ctx, ctx.userId)?.value;
     if (mutation.kind === "bootstrap") {
       const { principal: p, agent: a, device: d } = mutation.value;
-      return p.id === ctx.userId && p.tenantId === ctx.tenantId && p.kind === "cryptographic" &&
-        p.emailRequired === false && p.status === "active" && safe(p.epoch, 1) &&
+      return ownerRecords(state, ctx, "subject").length === 0 &&
+        ownerRecords(state, ctx, "enrollment").length === 0 &&
+        p.id === ctx.userId && p.tenantId === ctx.tenantId && p.kind === "cryptographic" &&
+        p.emailRequired === false && p.status === "active" && p.epoch === 1 &&
         a.tenantId === ctx.tenantId && a.userId === ctx.userId && a.status === "active" &&
-        safe(a.epoch, 1) && clean(a.id) === a.id && clean(a.thumbprint) === a.thumbprint &&
+        a.epoch === 1 && clean(a.id) === a.id &&
+        await jwkThumbprint(a.publicJwk) === a.thumbprint &&
         d.tenantId === ctx.tenantId && d.userId === ctx.userId && d.agentId === a.id &&
-        d.status === "active" && d.role === "admin" && safe(d.epoch, 1) && clean(d.id) === d.id &&
-        clean(d.thumbprint) === d.thumbprint && String(a.id) !== String(d.id) &&
+        d.status === "active" && d.role === "admin" && d.epoch === 1 && clean(d.id) === d.id &&
+        await jwkThumbprint(d.publicJwk) === d.thumbprint && String(a.id) !== String(d.id) &&
         a.thumbprint !== d.thumbprint;
     }
     if (mutation.kind === "enrollment") {
@@ -702,7 +801,9 @@ export class OfflineReferenceAuthority
       ).filter(Boolean);
       return subjectActive(principal, "principal", value.principalEpoch) &&
         subjectActive(agent, "agent", value.agentEpoch) &&
-        identityThumbprint(agent) === value.agentThumbprint && request.tenantId === ctx.tenantId &&
+        identityThumbprint(agent) === value.agentThumbprint &&
+        await jwkThumbprint(request.candidateJwk) === request.thumbprint &&
+        request.tenantId === ctx.tenantId &&
         request.userId === ctx.userId && request.agentId === agent!.id &&
         request.status === "pending" && request.expiresAt > now &&
         clean(request.id) === request.id && clean(request.thumbprint) === request.thumbprint &&
@@ -725,10 +826,12 @@ export class OfflineReferenceAuthority
         subjectActive(approver, "device", value.approverEpoch) &&
         identityThumbprint(approver) === value.approverThumbprint &&
         (approver!.identity as Device).role === "admin" &&
+        (approver!.identity as Device).agentId === agent!.id &&
         Boolean(enrollment) && enrollment!.status === "pending" && safe(enrollment!.expiresAt, 1) &&
         Number(enrollment!.expiresAt) > now &&
         enrollment!.agentId === agent!.id && enrollment!.id === value.requestId &&
         enrollment!.thumbprint === device.thumbprint &&
+        await jwkThumbprint(device.publicJwk) === device.thumbprint &&
         sameDurableValue(enrollment!.candidateJwk, device.publicJwk) &&
         device.id !== value.approverId && device.tenantId === ctx.tenantId &&
         device.userId === ctx.userId && device.agentId === agent!.id &&
@@ -746,23 +849,28 @@ export class OfflineReferenceAuthority
       subjectActive(approver, "device", value.approverEpoch) &&
       identityThumbprint(approver) === value.approverThumbprint &&
       (approver!.identity as Device).role === "admin" &&
+      (approver!.identity as Device).agentId === removalAgent!.id &&
       subjectActive(target, "device", value.targetEpoch) &&
       identityThumbprint(target) === value.targetThumbprint &&
-      (target!.identity as Device).role === value.targetRole;
+      (target!.identity as Device).agentId === removalAgent!.id &&
+      (target!.identity as Device).role === value.targetRole && target!.id !== approver!.id;
   }
 
   async commitChallenge(
     ctx: TenantContext,
     tx: ChallengeTransaction,
   ): Promise<AtomicAuthorityResult> {
-    return await this.locked((state) => {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
+    const mutationHash = await transactionHash(tx.mutation);
+    return await this.locked(async (state) => {
       const now = effective(state, tx.now);
       const challengeKey = key(ctx, "challenge", tx.challengeId);
       const challenge = record<ChallengeValue>(state, challengeKey);
       if (
         !challenge || challenge.value.used || challenge.value.expiresAt <= now ||
-        challenge.value.transactionHash !== tx.transactionHash ||
-        challenge.value.purpose !== tx.purpose || !this.ceremonyValid(state, ctx, tx, now)
+        challenge.value.transactionHash !== mutationHash ||
+        challenge.value.purpose !== tx.purpose || !await this.ceremonyValid(state, ctx, tx, now)
       ) return denied("challenge commit denied");
       beginCommit(state);
       if (tx.mutation.kind === "bootstrap") {
@@ -798,16 +906,28 @@ export class OfflineReferenceAuthority
           ),
         );
       } else if (tx.mutation.kind === "enrollment") {
-        put(state, ctx, key(ctx, "enrollment", tx.mutation.value.request.id), {
-          request: tx.mutation.value.request,
-        });
+        put(
+          state,
+          ctx,
+          key(ctx, "enrollment", tx.mutation.value.request.id),
+          {
+            request: tx.mutation.value.request,
+            approvedDeviceId: null,
+          } satisfies EnrollmentValue,
+        );
       } else if (tx.mutation.kind === "approval") {
         const value = tx.mutation.value;
         const enrollmentKey = key(ctx, "enrollment", value.requestId);
-        const stored = record<{ request: Record<string, unknown> }>(state, enrollmentKey)!;
-        put(state, ctx, enrollmentKey, {
-          request: { ...stored.value.request, status: "approved" },
-        });
+        const stored = record<EnrollmentValue>(state, enrollmentKey)!;
+        put(
+          state,
+          ctx,
+          enrollmentKey,
+          {
+            request: { ...stored.value.request, status: "approved" },
+            approvedDeviceId: value.device.id,
+          } satisfies EnrollmentValue,
+        );
         put(
           state,
           ctx,
@@ -854,6 +974,8 @@ export class OfflineReferenceAuthority
     ctx: TenantContext,
     tx: AuthorityTransition,
   ): Promise<AtomicAuthorityResult> {
+    ctx = snapshotDurableInput(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked((state) => {
       effective(state, tx.now);
       const recordKey = subjectKey(ctx, tx.subjectId);
@@ -865,13 +987,11 @@ export class OfflineReferenceAuthority
         item.value.status === "disabled" && tx.nextStatus === "active"
       ) return denied("authority transition denied");
       beginCommit(state);
-      const identity = item.value.identity
-        ? {
-          ...item.value.identity,
-          status: tx.nextStatus,
-          epoch: tx.nextVersion,
-        } as SubjectValue["identity"]
-        : null;
+      const identity = {
+        ...item.value.identity,
+        status: tx.nextStatus,
+        ...(item.value.kind === "grant" ? { version: tx.nextVersion } : { epoch: tx.nextVersion }),
+      } as SubjectValue["identity"];
       const version = put(state, ctx, recordKey, {
         ...item.value,
         status: tx.nextStatus,
@@ -887,17 +1007,24 @@ export class OfflineReferenceAuthority
     });
   }
 
-  async exportAuthority(): Promise<DurableAuthorityEnvelope> {
-    const value = await this.read(false);
-    return structuredClone(value);
+  async exportAuthority(ctx: AuthorityMaintenanceContext): Promise<DurableAuthorityEnvelope> {
+    privileged(ctx);
+    return frozenDurableSnapshot(await this.read(false));
   }
-  async inspectAuthority(requireCurrent = true): Promise<DurableAuthorityEnvelope> {
-    return structuredClone(await this.read(requireCurrent));
+  async inspectAuthority(
+    ctx: AuthorityMaintenanceContext,
+    requireCurrent = true,
+  ): Promise<DurableAuthorityEnvelope> {
+    privileged(ctx);
+    return frozenDurableSnapshot(await this.read(requireCurrent));
   }
   async initializeAuthority(
+    ctx: AuthorityMaintenanceContext,
     candidate: DurableAuthorityEnvelope,
   ): Promise<AuthorityMaintenanceResult> {
-    return await this.locked((current) => {
+    privileged(ctx);
+    candidate = snapshotDurableInput(candidate);
+    return await this.locked(async (current) => {
       if (
         Object.keys(current.records).length || current.authorityGeneration !== 1 ||
         current.effectiveNow !== 0
@@ -906,6 +1033,7 @@ export class OfflineReferenceAuthority
       }
       try {
         assertAuthorityEnvelope(candidate, false);
+        await assertAuthorityCryptography(candidate);
       } catch {
         return maintenanceDenied("authority import denied");
       }
@@ -916,10 +1044,16 @@ export class OfflineReferenceAuthority
       return { outcome: "committed", authorityGeneration: current.authorityGeneration };
     }, false);
   }
-  async restoreAuthority(candidate: DurableAuthorityEnvelope): Promise<AuthorityMaintenanceResult> {
-    return await this.locked((current) => {
+  async restoreAuthority(
+    ctx: AuthorityMaintenanceContext,
+    candidate: DurableAuthorityEnvelope,
+  ): Promise<AuthorityMaintenanceResult> {
+    privileged(ctx);
+    candidate = snapshotDurableInput(candidate);
+    return await this.locked(async (current) => {
       try {
         assertRestoreNotStale(candidate, current);
+        await assertAuthorityCryptography(candidate);
       } catch {
         return maintenanceDenied("stale or corrupt restore denied");
       }
@@ -930,7 +1064,12 @@ export class OfflineReferenceAuthority
       return { outcome: "committed", authorityGeneration: current.authorityGeneration };
     });
   }
-  async prepareMigration(tx: MigrationPreparation): Promise<AuthorityMaintenanceResult> {
+  async prepareMigration(
+    ctx: AuthorityMaintenanceContext,
+    tx: MigrationPreparation,
+  ): Promise<AuthorityMaintenanceResult> {
+    privileged(ctx);
+    tx = snapshotDurableInput(tx);
     return await this.locked((state) => {
       if (
         state.schemaVersion !== tx.expectedSchemaVersion || state.migration.status !== "idle" ||
@@ -947,7 +1086,8 @@ export class OfflineReferenceAuthority
       return { outcome: "committed", authorityGeneration: state.authorityGeneration };
     }, false);
   }
-  async advanceMigration(): Promise<AuthorityMaintenanceResult> {
+  async advanceMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
+    privileged(ctx);
     return await this.locked((state) => {
       if (state.migration.status === "preparing") {
         beginCommit(state);
@@ -961,7 +1101,8 @@ export class OfflineReferenceAuthority
       return { outcome: "committed", authorityGeneration: state.authorityGeneration };
     }, false);
   }
-  async failMigration(): Promise<AuthorityMaintenanceResult> {
+  async failMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
+    privileged(ctx);
     return await this.locked((state) => {
       if (!["preparing", "committing"].includes(state.migration.status)) {
         return maintenanceDenied("migration failure mark denied");
@@ -971,7 +1112,8 @@ export class OfflineReferenceAuthority
       return { outcome: "committed", authorityGeneration: state.authorityGeneration };
     }, false);
   }
-  async recoverMigration(): Promise<AuthorityMaintenanceResult> {
+  async recoverMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
+    ctx = privileged(ctx);
     for (;;) {
       const state = await this.read(false);
       if (state.schemaVersion === 2 && state.migration.status === "idle") {
@@ -985,16 +1127,17 @@ export class OfflineReferenceAuthority
           }
         }, false);
       } else if (state.migration.status === "idle") {
-        await this.prepareMigration({
+        await this.prepareMigration(ctx, {
           expectedSchemaVersion: state.schemaVersion,
           targetSchemaVersion: state.schemaVersion + 1,
         });
-      } else await this.advanceMigration();
+      } else await this.advanceMigration(ctx);
     }
   }
 
   /** Test-only preparation of an old neutral envelope; migration itself uses the neutral contract. */
   async writeLegacy(owner: Owner): Promise<void> {
+    owner = snapshotDurableInput(owner);
     await this.locked((state) => {
       state.schemaVersion = 1;
       state.highWatermarks.schemaVersion = 1;

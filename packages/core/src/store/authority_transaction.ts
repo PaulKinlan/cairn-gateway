@@ -20,7 +20,6 @@ export interface ChallengeCreationTransaction {
 
 export interface ChallengeTransaction {
   challengeId: string;
-  transactionHash: string;
   purpose: "bootstrap" | "enroll_candidate" | "approve_enrollment" | "remove_device";
   now: number;
   mutation:
@@ -134,6 +133,12 @@ export interface DispatchRecoveryTransaction {
   now: number;
 }
 
+/** Explicit privilege presented for whole-authority offline maintenance operations. */
+export interface AuthorityMaintenanceContext {
+  tenant: TenantContext;
+  privilege: "offline_authority_maintenance";
+}
+
 /** Adapter-neutral maintenance result; no concrete storage handle crosses the boundary. */
 export type AuthorityMaintenanceResult =
   | { outcome: "committed"; authorityGeneration: number }
@@ -186,15 +191,27 @@ export interface DurableAuthorityTransactions {
 
 /** Neutral export/restore/migration/recovery/inspection boundary used by conformance scenarios. */
 export interface DurableAuthorityMaintenance {
-  exportAuthority(): Promise<DurableAuthorityEnvelope>;
-  inspectAuthority(requireCurrent?: boolean): Promise<DurableAuthorityEnvelope>;
+  exportAuthority(ctx: AuthorityMaintenanceContext): Promise<DurableAuthorityEnvelope>;
+  inspectAuthority(
+    ctx: AuthorityMaintenanceContext,
+    requireCurrent?: boolean,
+  ): Promise<DurableAuthorityEnvelope>;
   /** Installs a validated envelope only into a pristine authority store (offline recovery/bootstrap). */
-  initializeAuthority(candidate: DurableAuthorityEnvelope): Promise<AuthorityMaintenanceResult>;
-  restoreAuthority(candidate: DurableAuthorityEnvelope): Promise<AuthorityMaintenanceResult>;
-  prepareMigration(transaction: MigrationPreparation): Promise<AuthorityMaintenanceResult>;
-  advanceMigration(): Promise<AuthorityMaintenanceResult>;
-  failMigration(): Promise<AuthorityMaintenanceResult>;
-  recoverMigration(): Promise<AuthorityMaintenanceResult>;
+  initializeAuthority(
+    ctx: AuthorityMaintenanceContext,
+    candidate: DurableAuthorityEnvelope,
+  ): Promise<AuthorityMaintenanceResult>;
+  restoreAuthority(
+    ctx: AuthorityMaintenanceContext,
+    candidate: DurableAuthorityEnvelope,
+  ): Promise<AuthorityMaintenanceResult>;
+  prepareMigration(
+    ctx: AuthorityMaintenanceContext,
+    transaction: MigrationPreparation,
+  ): Promise<AuthorityMaintenanceResult>;
+  advanceMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult>;
+  failMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult>;
+  recoverMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult>;
 }
 
 /** Only the one-time durable permit claim can subsequently be consumed at dispatch start. */

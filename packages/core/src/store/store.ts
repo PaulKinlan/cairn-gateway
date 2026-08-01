@@ -158,6 +158,7 @@ export type {
   AttemptFinalization,
   AttemptState,
   AttemptTerminalResult,
+  AuthorityMaintenanceContext,
   AuthorityMaintenanceResult,
   AuthorityTransition,
   ChallengeCreationTransaction,

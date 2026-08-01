@@ -26,7 +26,7 @@ try {
   const execution = await new Deno.Command(Deno.execPath(), {
     args: [
       "test",
-      "--allow-read=.",
+      "--allow-read",
       "--allow-write",
       "--allow-run",
       `--junit-path=${report}`,
