@@ -27,14 +27,16 @@
     nonce, timestamp, and (when present) the independently hashed capability.
 14. Reusable bearer values are never carried in URLs or WebSockets. No public-key reclaim occurs
     without a fresh challenge and proof of possession; agent and device keys remain distinct.
-15. Bootstrap, enrollment request, and approval commits reconstruct and hash the complete canonical
-    transaction inside the authoritative critical section. They never accept a caller-computed hash;
-    they recompute every stored RFC 7638 thumbprint, enforce exact IDs/expiry/epochs and distinct
-    agent/admin/candidate roles, then consume the matching challenge immediately before mutation.
-    Raw identity puts validate JWK/thumbprint equality and updates cannot rotate keys in Stage 0.
+15. Bootstrap, enrollment request, approval, and removal commits reconstruct and hash the complete
+    canonical transaction inside the authoritative critical section. They never accept a
+    caller-computed hash; they recompute every stored RFC 7638 thumbprint, enforce exact
+    IDs/expiry/epochs and distinct agent/admin/candidate roles, then consume the matching challenge
+    immediately before mutation. Device role and agent relationship are immutable in Stage 0, and
+    every owner-wide agent/device key pairing remains distinct.
 16. The policy-core trust brand and mint are private to a zero-argument composition root that
-    creates and closes over one store, invocation service, signer set, custody fixture, and system
-    clock. Public fixture operations can revoke/query that authority but cannot supply, replace, or
-    switch stores, clocks, signers, services, authentication time, or trust mints.
+    creates and closes over one store, invocation service, signer set, custody fixture, and captured
+    system clock. A frozen null-prototype closure facade composes authorization and MCP handling in
+    one dispatch; no authority, core, mint, constructor, or mutable clock handle crosses the public
+    boundary.
 17. The committed MCP contract gate consumes every immutable fixture leaf and validates the actual
     lifecycle and call-result envelope rules; any new or mutated unconsumed constraint fails CI.

@@ -15,6 +15,7 @@ import {
   approvalTransaction,
   bootstrapTransaction,
   enrollmentTransaction,
+  removalTransaction,
   transactionHash,
 } from "../identity/transactions.ts";
 import { entityKey, ownerPrefix, replayKey } from "./keys.ts";
@@ -25,6 +26,7 @@ import type {
   InvocationBinding,
   InvocationDecision,
   MetadataStore,
+  RemovalCommit,
 } from "./store.ts";
 
 /** Authoritative fixture backend. Multiple service/store facades must share this object. */
@@ -71,14 +73,14 @@ export class MemoryStore implements MetadataStore {
     this.#owned(ctx, value);
     const thumbprint = await jwkThumbprint(value.publicJwk);
     if (thumbprint !== value.thumbprint) throw new Error("agent key denied");
-    await this.backend.exclusive(() => {
+    await this.backend.exclusive(async () => {
       const key = entityKey(ctx, "agent", value.id);
       if (this.backend.agents.has(key)) throw new Error("agent exists");
       for (const device of this.backend.devices.values()) {
-        if (
-          device.tenantId === ctx.tenantId && device.userId === ctx.userId &&
-          device.agentId === value.id && device.thumbprint === thumbprint
-        ) throw new Error("agent and device keys must differ");
+        if (device.tenantId !== ctx.tenantId || device.userId !== ctx.userId) continue;
+        const deviceThumbprint = await jwkThumbprint(device.publicJwk);
+        if (deviceThumbprint !== device.thumbprint) throw new Error("device key denied");
+        if (deviceThumbprint === thumbprint) throw new Error("agent and device keys must differ");
       }
       this.backend.agents.set(key, structuredClone(value));
     });
@@ -93,14 +95,15 @@ export class MemoryStore implements MetadataStore {
     await this.backend.exclusive(async () => {
       const key = entityKey(ctx, "device", value.id);
       if (this.backend.devices.has(key)) throw new Error("device exists");
-      const agent = this.backend.agents.get(entityKey(ctx, "agent", value.agentId));
-      const agentThumbprint = agent ? await jwkThumbprint(agent.publicJwk) : undefined;
-      if (
-        !agent || agentThumbprint !== agent.thumbprint ||
-        agentThumbprint === thumbprint
-      ) {
-        throw new Error("agent and device keys must differ");
+      let referencedAgent: Agent | undefined;
+      for (const agent of this.backend.agents.values()) {
+        if (agent.tenantId !== ctx.tenantId || agent.userId !== ctx.userId) continue;
+        const agentThumbprint = await jwkThumbprint(agent.publicJwk);
+        if (agentThumbprint !== agent.thumbprint) throw new Error("agent key denied");
+        if (agentThumbprint === thumbprint) throw new Error("agent and device keys must differ");
+        if (agent.id === value.agentId) referencedAgent = agent;
       }
+      if (!referencedAgent) throw new Error("device agent denied");
       this.backend.devices.set(key, structuredClone(value));
     });
   }
@@ -230,11 +233,20 @@ export class MemoryStore implements MetadataStore {
       const agentThumbprint = await jwkThumbprint(agent.publicJwk);
       const transaction = await enrollmentTransaction(ctx, value.request, principal, agent);
       const hash = await transactionHash(transaction);
+      let ownerAgentKeyDenied = false;
+      for (const ownerAgent of this.backend.agents.values()) {
+        if (ownerAgent.tenantId !== ctx.tenantId || ownerAgent.userId !== ctx.userId) continue;
+        const ownerAgentThumbprint = await jwkThumbprint(ownerAgent.publicJwk);
+        if (
+          ownerAgentThumbprint !== ownerAgent.thumbprint ||
+          ownerAgentThumbprint === transaction.candidate_jkt
+        ) ownerAgentKeyDenied = true;
+      }
       if (
         principal.status !== "active" || principal.epoch !== value.principalEpoch ||
         agent.status !== "active" || agent.epoch !== value.agentEpoch ||
         agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
-        transaction.candidate_jkt !== value.request.thumbprint ||
+        transaction.candidate_jkt !== value.request.thumbprint || ownerAgentKeyDenied ||
         transaction.candidate_jkt === agentThumbprint || value.request.status !== "pending" ||
         value.request.expiresAt <= now || value.request.expiresAt > now + 600 ||
         transaction.request_id !== value.request.id || transaction.agent_id !== agent.id ||
@@ -270,6 +282,15 @@ export class MemoryStore implements MetadataStore {
       const deviceThumbprint = await jwkThumbprint(value.device.publicJwk);
       const agentThumbprint = await jwkThumbprint(agent.publicJwk);
       const approverThumbprint = await jwkThumbprint(approver.publicJwk);
+      let ownerAgentKeyDenied = false;
+      for (const ownerAgent of this.backend.agents.values()) {
+        if (ownerAgent.tenantId !== ctx.tenantId || ownerAgent.userId !== ctx.userId) continue;
+        const ownerAgentThumbprint = await jwkThumbprint(ownerAgent.publicJwk);
+        if (
+          ownerAgentThumbprint !== ownerAgent.thumbprint ||
+          ownerAgentThumbprint === deviceThumbprint
+        ) ownerAgentKeyDenied = true;
+      }
       const transaction = approvalTransaction(
         ctx,
         principal,
@@ -285,7 +306,8 @@ export class MemoryStore implements MetadataStore {
         agent.status !== "active" || agent.epoch !== value.agentEpoch ||
         agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
         requestThumbprint !== request.thumbprint || deviceThumbprint !== value.device.thumbprint ||
-        requestThumbprint !== deviceThumbprint || deviceThumbprint === agentThumbprint ||
+        requestThumbprint !== deviceThumbprint || ownerAgentKeyDenied ||
+        deviceThumbprint === agentThumbprint ||
         approver.status !== "active" || approver.role !== "admin" ||
         approver.agentId !== request.agentId || approver.epoch !== value.approverEpoch ||
         approverThumbprint !== approver.thumbprint ||
@@ -306,16 +328,53 @@ export class MemoryStore implements MetadataStore {
       return true;
     });
   }
-  async consumeChallenge(
+  async commitRemoval(
     ctx: TenantContext,
     challengeId: string,
-    hash: string,
-    purpose: EnrollmentChallenge["purpose"],
+    value: RemovalCommit,
     now: number,
   ): Promise<boolean> {
-    return await this.backend.exclusive(() =>
-      !!this.#consumeChallenge(ctx, challengeId, hash, purpose, now)
-    );
+    return await this.backend.exclusive(async () => {
+      const agent = this.backend.agents.get(entityKey(ctx, "agent", value.agentId));
+      const approver = this.backend.devices.get(entityKey(ctx, "device", value.approverId));
+      const targetKey = entityKey(ctx, "device", value.targetId);
+      const target = this.backend.devices.get(targetKey);
+      if (!agent || !approver || !target) return false;
+      const agentThumbprint = await jwkThumbprint(agent.publicJwk);
+      const approverThumbprint = await jwkThumbprint(approver.publicJwk);
+      const targetThumbprint = await jwkThumbprint(target.publicJwk);
+      const transaction = removalTransaction(ctx, agent, approver, target);
+      const hash = await transactionHash(transaction);
+      if (
+        agent.tenantId !== ctx.tenantId || agent.userId !== ctx.userId ||
+        agent.status !== "active" || agent.epoch !== value.agentEpoch ||
+        agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
+        approver.tenantId !== ctx.tenantId || approver.userId !== ctx.userId ||
+        approver.status !== "active" || approver.role !== "admin" ||
+        approver.agentId !== agent.id || approver.epoch !== value.approverEpoch ||
+        approverThumbprint !== approver.thumbprint ||
+        approver.thumbprint !== value.approverThumbprint ||
+        approverThumbprint === agentThumbprint ||
+        target.tenantId !== ctx.tenantId || target.userId !== ctx.userId ||
+        target.status !== "active" || target.agentId !== agent.id ||
+        target.epoch !== value.targetEpoch || target.role !== value.targetRole ||
+        targetThumbprint !== target.thumbprint || target.thumbprint !== value.targetThumbprint ||
+        targetThumbprint === agentThumbprint
+      ) return false;
+      if (!this.#consumeChallenge(ctx, challengeId, hash, "remove_device", now)) return false;
+      const revoked = { ...target, status: "revoked" as const, epoch: target.epoch + 1 };
+      this.backend.devices.set(targetKey, structuredClone(revoked));
+      this.backend.revocations.push({
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        subjectType: "device",
+        subjectId: target.id,
+        version: revoked.epoch,
+        reason: "operator",
+        at: now,
+      });
+      return true;
+    });
   }
   async #update<T extends { tenantId: string; userId?: string; id: string; status: string }>(
     ctx: TenantContext,
@@ -346,6 +405,33 @@ export class MemoryStore implements MetadataStore {
           nextIdentity.thumbprint !== priorIdentity.thumbprint ||
           JSON.stringify(nextIdentity.publicJwk) !== JSON.stringify(priorIdentity.publicJwk)
         ) throw new Error("identity key rotation denied");
+        if (kind === "agent") {
+          for (const device of this.backend.devices.values()) {
+            if (device.tenantId !== ctx.tenantId || device.userId !== ctx.userId) continue;
+            const deviceThumbprint = await jwkThumbprint(device.publicJwk);
+            if (deviceThumbprint !== device.thumbprint) throw new Error("device key denied");
+            if (deviceThumbprint === nextThumbprint) {
+              throw new Error("agent and device keys must differ");
+            }
+          }
+        } else {
+          const priorDevice = priorIdentity as Device;
+          const nextDevice = nextIdentity as Device;
+          if (nextDevice.agentId !== priorDevice.agentId || nextDevice.role !== priorDevice.role) {
+            throw new Error("device relationship mutation denied");
+          }
+          let referencedAgent = false;
+          for (const agent of this.backend.agents.values()) {
+            if (agent.tenantId !== ctx.tenantId || agent.userId !== ctx.userId) continue;
+            const agentThumbprint = await jwkThumbprint(agent.publicJwk);
+            if (agentThumbprint !== agent.thumbprint) throw new Error("agent key denied");
+            if (agentThumbprint === nextThumbprint) {
+              throw new Error("agent and device keys must differ");
+            }
+            if (agent.id === nextDevice.agentId) referencedAgent = true;
+          }
+          if (!referencedAgent) throw new Error("device agent denied");
+        }
       }
       const oldVersion = "epoch" in previous
         ? Number(previous.epoch)

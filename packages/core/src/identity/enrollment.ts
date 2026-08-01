@@ -13,6 +13,7 @@ import {
   approvalTransaction,
   bootstrapTransaction,
   enrollmentTransaction,
+  removalTransaction,
   transactionHash,
 } from "./transactions.ts";
 
@@ -309,41 +310,35 @@ export class DeviceEnrollmentService {
   ): Promise<void> {
     const tx = await this.#removalTransaction(ctx, approverId, targetId);
     const approver = await this.store.getDevice(ctx, approverId),
-      target = await this.store.getDevice(ctx, targetId);
-    if (!approver || !target) throw new Error("device removal denied");
+      target = await this.store.getDevice(ctx, targetId),
+      agent = approver ? await this.store.getAgent(ctx, approver.agentId) : undefined;
+    if (!approver || !target || !agent) throw new Error("device removal denied");
     await verifyPossession(approver.publicJwk, { ...tx, challenge: proof.challenge }, proof);
     if (
-      !await this.store.consumeChallenge(
-        ctx,
-        proof.challenge,
-        await transactionHash(tx),
-        "remove_device",
-        now,
-      )
-    ) throw new Error("removal challenge replay");
-    await this.store.updateDevice(
-      ctx,
-      { ...target, status: "revoked", epoch: target.epoch + 1 },
-      "operator",
-      now,
-    );
+      !await this.store.commitRemoval(ctx, proof.challenge, {
+        agentId: agent.id,
+        agentEpoch: agent.epoch,
+        agentThumbprint: agent.thumbprint,
+        approverId: approver.id,
+        approverEpoch: approver.epoch,
+        approverThumbprint: approver.thumbprint,
+        targetId: target.id,
+        targetEpoch: target.epoch,
+        targetThumbprint: target.thumbprint,
+        targetRole: target.role,
+      }, now)
+    ) throw new Error("device removal denied or consumed");
   }
   async #removalTransaction(ctx: TenantContext, approverId: DeviceId, targetId: DeviceId) {
     const approver = await this.store.getDevice(ctx, approverId),
-      target = await this.store.getDevice(ctx, targetId);
+      target = await this.store.getDevice(ctx, targetId),
+      agent = approver ? await this.store.getAgent(ctx, approver.agentId) : undefined;
     if (
       !approver || approver.status !== "active" || approver.role !== "admin" || !target ||
-      target.status !== "active"
+      target.status !== "active" || !agent || agent.status !== "active" ||
+      target.agentId !== agent.id
     ) throw new Error("device removal denied");
-    return {
-      action: "remove_device" as const,
-      tenant_id: ctx.tenantId,
-      user_id: ctx.userId,
-      approver_id: approverId,
-      approver_jkt: approver.thumbprint,
-      target_id: targetId,
-      target_epoch: target.epoch,
-    };
+    return removalTransaction(ctx, agent, approver, target);
   }
   async #issue(
     ctx: TenantContext,

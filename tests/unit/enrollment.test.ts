@@ -231,6 +231,7 @@ Deno.test("candidate and approval challenges bind full tenant transaction and co
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -276,6 +277,7 @@ Deno.test("approval proof cannot replay across tenant", async () => {
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -307,14 +309,20 @@ Deno.test("approval proof cannot replay across tenant", async () => {
 Deno.test("device removal requires admin proof and consumes server challenge", async () => {
   const { store, service, device } = await boot();
   const target = (await store.getDevice(ctx, "device_a"))!,
+    agent = (await store.getAgent(ctx, target.agentId))!,
     tx = {
       action: "remove_device",
       tenant_id: ctx.tenantId,
       user_id: ctx.userId,
+      agent_id: agent.id,
+      agent_epoch: agent.epoch,
+      agent_jkt: agent.thumbprint,
       approver_id: target.id,
+      approver_epoch: target.epoch,
       approver_jkt: target.thumbprint,
       target_id: target.id,
-      target_epoch: 1,
+      target_epoch: target.epoch,
+      target_jkt: target.thumbprint,
     };
   const challenge = await service.removalChallenge(ctx, target.id, target.id, now),
     signed = await proof(device, tx, challenge);
@@ -372,6 +380,7 @@ Deno.test("approval commit denies revoked agent before linearization", async () 
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -413,6 +422,7 @@ Deno.test("approval commit denies revoked principal before linearization", async
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -454,6 +464,7 @@ Deno.test("approval commit atomically denies admin revocation race", async () =>
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -502,6 +513,7 @@ Deno.test("approval commit denies candidate transaction mutation at linearizatio
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -676,6 +688,7 @@ Deno.test("approval recomputes stored candidate JWK thumbprint", async () => {
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -726,6 +739,7 @@ Deno.test("approval authoritatively recomputes the admin JWK thumbprint", async 
     action: "approve_enrollment",
     principal_epoch: 1,
     agent_epoch: 1,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, "agent_a"))!.thumbprint,
     approver_epoch: 1,
     candidate_epoch: 1,
     tenant_id: ctx.tenantId,
@@ -762,6 +776,118 @@ Deno.test("approval authoritatively recomputes the admin JWK thumbprint", async 
     "denied",
   );
   equals(await store.getDevice(ctx, candidateId), undefined);
+});
+
+Deno.test("approval challenge binds coherent authoritative agent key substitution", async () => {
+  const backend = new MemoryAuthorityBackend();
+  const { store, service, device: admin } = await boot(backend);
+  const { candidateJkt, result } = await pending(service);
+  const approver = (await store.getDevice(ctx, "device_a"))!;
+  const agent = (await store.getAgent(ctx, "agent_a"))!;
+  const candidateId = ids.device("device_agent_jkt_negative");
+  const tx = {
+    action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: agent.epoch,
+    agent_jkt: agent.thumbprint,
+    approver_epoch: approver.epoch,
+    candidate_epoch: 1,
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    request_id: "enroll_b",
+    approver_id: approver.id,
+    approver_jkt: approver.thumbprint,
+    agent_id: agent.id,
+    candidate_id: candidateId,
+    candidate_jkt: candidateJkt,
+    fingerprint: result.fingerprint,
+    expires_at: now + 600,
+  };
+  const challenge = await service.approvalChallenge(
+    ctx,
+    "enroll_b",
+    approver.id,
+    candidateId,
+    result.fingerprint,
+    now,
+  );
+  const signed = await proof(admin, tx, challenge);
+  const replacementPair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const replacementJwk = await crypto.subtle.exportKey("jwk", replacementPair.publicKey);
+  const agentKey = [...backend.agents.keys()].find((key) => key.endsWith("/agent_a"))!;
+  backend.agents.set(agentKey, {
+    ...agent,
+    publicJwk: replacementJwk,
+    thumbprint: await jwkThumbprint(replacementJwk),
+  });
+  await rejects(
+    () =>
+      service.approve(
+        ctx,
+        "enroll_b",
+        approver.id,
+        candidateId,
+        result.fingerprint,
+        signed,
+        now,
+      ),
+    "proof",
+  );
+  equals(await store.getDevice(ctx, candidateId), undefined);
+});
+
+Deno.test("authoritative removal denies admin revocation at linearization", async () => {
+  const backend = new MemoryAuthorityBackend();
+  const { store, service, device: admin } = await boot(backend);
+  const memberSigner = await fixtureDeviceSigner(1);
+  const memberJwk = await memberSigner.publicJwk();
+  const agent = (await store.getAgent(ctx, "agent_a"))!;
+  const approver = (await store.getDevice(ctx, "device_a"))!;
+  const target = {
+    id: ids.device("device_member"),
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    agentId: agent.id,
+    publicJwk: memberJwk,
+    thumbprint: await jwkThumbprint(memberJwk),
+    role: "member" as const,
+    status: "active" as const,
+    epoch: 1,
+  };
+  await store.putDevice(ctx, target);
+  const tx = {
+    action: "remove_device",
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    agent_id: agent.id,
+    agent_epoch: agent.epoch,
+    agent_jkt: agent.thumbprint,
+    approver_id: approver.id,
+    approver_epoch: approver.epoch,
+    approver_jkt: approver.thumbprint,
+    target_id: target.id,
+    target_epoch: target.epoch,
+    target_jkt: target.thumbprint,
+  };
+  const challenge = await service.removalChallenge(ctx, approver.id, target.id, now);
+  const signed = await proof(admin, tx, challenge);
+  class RevokingRemovalStore extends MemoryStore {
+    override async commitRemoval(...args: Parameters<MemoryStore["commitRemoval"]>) {
+      const current = (await this.getDevice(ctx, approver.id))!;
+      await this.updateDevice(ctx, { ...current, status: "revoked", epoch: current.epoch + 1 });
+      return await super.commitRemoval(...args);
+    }
+  }
+  const racing = new DeviceEnrollmentService(new RevokingRemovalStore(backend));
+  await rejects(
+    () => racing.remove(ctx, approver.id, target.id, signed, now),
+    "denied",
+  );
+  equals((await store.getDevice(ctx, target.id))!.status, "active");
 });
 
 Deno.test("authoritative bootstrap recomputes both key thumbprints and roles", async () => {

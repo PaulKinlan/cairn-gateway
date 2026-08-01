@@ -26,7 +26,7 @@ import {
   signRequestProof,
 } from "../../packages/core/src/crypto/request_proof.ts";
 import { encoder, sha256 } from "../../packages/core/src/crypto/encoding.ts";
-import { handleFixtureMcp, MCP_CURRENT } from "../../apps/gateway/mcp.ts";
+import { MCP_CURRENT } from "../../apps/gateway/mcp.ts";
 import { createFixtureGatewayHarness } from "../../apps/gateway/local_bridge.ts";
 const now = 2_000_000_000,
   ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("user_a") };
@@ -414,8 +414,7 @@ Deno.test("actual MCP boundary authenticates and executes typed policy flow", as
   };
   const bytes = encoder.encode(JSON.stringify(request));
   const harness = await createFixtureGatewayHarness();
-  const { auth, core } = await harness.authorize(bytes);
-  const response = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core),
+  const response = await harness.dispatch(bytes),
     structured = (response!.result as { structuredContent: { outcome: string } }).structuredContent;
   equals(structured.outcome, "success");
   assert(!JSON.stringify(response).includes("custody_ref"));
@@ -437,14 +436,8 @@ Deno.test("MCP stale discovery is denied at call time after revocation", async (
   };
   const bytes = encoder.encode(JSON.stringify(request));
   const harness = await createFixtureGatewayHarness();
-  const { auth, core } = await harness.authorize(bytes);
   await harness.revoke("connection");
-  const response = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core);
-  equals((response!.result as { isError: boolean }).isError, true);
-  equals(
-    (response!.result as { structuredContent: { category: string } }).structuredContent.category,
-    "policy_denied",
-  );
+  await rejects(() => harness.dispatch(bytes));
 });
 Deno.test("fixture bridge acquires capability, dual-signs and binds exact authenticated core", async () => {
   const request = {
@@ -463,8 +456,7 @@ Deno.test("fixture bridge acquires capability, dual-signs and binds exact authen
   };
   const bytes = encoder.encode(JSON.stringify(request));
   const harness = await createFixtureGatewayHarness();
-  const { auth, core } = await harness.authorize(bytes);
-  const response = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core);
+  const response = await harness.dispatch(bytes);
   equals(
     (response!.result as { structuredContent: { status: string } }).structuredContent.status,
     "active",

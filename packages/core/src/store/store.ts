@@ -51,6 +51,18 @@ export interface ApprovalCommit {
   approverEpoch: number;
   approverThumbprint: string;
 }
+export interface RemovalCommit {
+  agentId: string;
+  agentEpoch: number;
+  agentThumbprint: string;
+  approverId: string;
+  approverEpoch: number;
+  approverThumbprint: string;
+  targetId: string;
+  targetEpoch: number;
+  targetThumbprint: string;
+  targetRole: Device["role"];
+}
 
 export interface MetadataStore {
   putPrincipal(ctx: TenantContext, value: Principal): Promise<void>;
@@ -85,11 +97,10 @@ export interface MetadataStore {
     value: ApprovalCommit,
     now: number,
   ): Promise<boolean>;
-  consumeChallenge(
+  commitRemoval(
     ctx: TenantContext,
     challengeId: string,
-    transactionHash: string,
-    purpose: EnrollmentChallenge["purpose"],
+    value: RemovalCommit,
     now: number,
   ): Promise<boolean>;
   updatePrincipal(

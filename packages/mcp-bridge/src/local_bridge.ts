@@ -19,6 +19,10 @@ import { type DualProof, InvocationService } from "../../core/src/policy/invocat
 import { GITHUB_USER_READ } from "../../core/src/connectors/github_user.ts";
 import { jwkThumbprint } from "../../core/src/crypto/thumbprint.ts";
 import { type VerifiedMcpAuth, verifyMcpAuth } from "../../../apps/gateway/mcp_auth.ts";
+import type { LegacyMcpSession } from "../../../apps/gateway/mcp.ts";
+
+const capturedDateNow = Date.now.bind(Date);
+const systemClock = () => Math.floor(capturedDateNow() / 1000);
 
 interface PolicySession {
   capability: string;
@@ -265,133 +269,132 @@ class BoundFixtureBridge {
 
 export type FixtureSubject = "principal" | "agent" | "device" | "grant" | "connection";
 export interface FixtureGatewayHarness {
-  authorize(
+  dispatch(
     receivedBody: Uint8Array,
     path?: "/mcp" | "/mcp/legacy",
-  ): Promise<{ auth: VerifiedMcpAuth; core: object }>;
+  ): Promise<Record<string, unknown> | undefined>;
   revoke(subject: FixtureSubject): Promise<void>;
   revokeAndReactivate(subject: FixtureSubject): Promise<void>;
   setGrantLifetime(seconds: number): Promise<void>;
   status(subject: FixtureSubject): Promise<string>;
 }
 
-class InternalFixtureGatewayHarness implements FixtureGatewayHarness {
-  constructor(
-    private readonly store: MemoryStore,
-    private readonly bridge: BoundFixtureBridge,
-    private readonly context: TenantContext,
-  ) {}
-  authorize(receivedBody: Uint8Array, path: "/mcp" | "/mcp/legacy" = "/mcp") {
-    return this.bridge.authorize(receivedBody, path);
-  }
-  async revoke(subject: FixtureSubject): Promise<void> {
-    await this.#transition(subject, false);
-  }
-  async revokeAndReactivate(subject: FixtureSubject): Promise<void> {
-    await this.#transition(subject, false);
-    await this.#transition(subject, true);
-  }
-  async setGrantLifetime(seconds: number): Promise<void> {
-    if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 300) {
-      throw new Error("fixture lifetime denied");
-    }
-    const grant = (await this.store.getGrant(this.context, "grant_a"))!;
-    await this.store.updateGrant(this.context, {
-      ...grant,
-      status: "active",
-      version: grant.version + 1,
-      expiresAt: Math.floor(Date.now() / 1000) + seconds,
-    });
-  }
-  async status(subject: FixtureSubject): Promise<string> {
-    switch (subject) {
-      case "principal":
-        return (await this.store.getPrincipal(this.context, this.context.userId))?.status ??
-          "missing";
-      case "agent":
-        return (await this.store.getAgent(this.context, "agent_a"))?.status ?? "missing";
-      case "device":
-        return (await this.store.getDevice(this.context, "device_a"))?.status ?? "missing";
-      case "grant":
-        return (await this.store.getGrant(this.context, "grant_a"))?.status ?? "missing";
-      case "connection":
-        return (await this.store.getConnection(this.context, "connection_a"))?.status ?? "missing";
-    }
-  }
-  async #transition(subject: FixtureSubject, active: boolean): Promise<void> {
-    const at = Math.floor(Date.now() / 1000);
+function closedFixtureFacade(
+  store: MemoryStore,
+  bridge: BoundFixtureBridge,
+  context: TenantContext,
+  clock: () => number,
+): FixtureGatewayHarness {
+  let legacySession: LegacyMcpSession | undefined;
+  const dispatch = async (
+    receivedBody: Uint8Array,
+    path: "/mcp" | "/mcp/legacy" = "/mcp",
+  ) => {
+    const mcp = await import("../../../apps/gateway/mcp.ts");
+    const { auth, core } = await bridge.authorize(receivedBody, path);
+    const session = path === "/mcp/legacy"
+      ? (legacySession ??= new mcp.LegacyMcpSession())
+      : undefined;
+    return await mcp.handleFixtureMcp(
+      receivedBody,
+      path === "/mcp" ? mcp.MCP_CURRENT : mcp.MCP_LEGACY,
+      path,
+      auth,
+      core,
+      session,
+    );
+  };
+  const transition = async (subject: FixtureSubject, active: boolean): Promise<void> => {
+    const at = clock();
     switch (subject) {
       case "principal": {
-        const value = (await this.store.getPrincipal(this.context, this.context.userId))!;
-        await this.store.updatePrincipal(
-          this.context,
-          {
-            ...value,
-            status: active ? "active" : "revoked",
-            epoch: value.epoch + 1,
-          },
+        const value = (await store.getPrincipal(context, context.userId))!;
+        await store.updatePrincipal(
+          context,
+          { ...value, status: active ? "active" : "revoked", epoch: value.epoch + 1 },
           "operator",
           at,
         );
         break;
       }
       case "agent": {
-        const value = (await this.store.getAgent(this.context, "agent_a"))!;
-        await this.store.updateAgent(
-          this.context,
-          {
-            ...value,
-            status: active ? "active" : "revoked",
-            epoch: value.epoch + 1,
-          },
+        const value = (await store.getAgent(context, "agent_a"))!;
+        await store.updateAgent(
+          context,
+          { ...value, status: active ? "active" : "revoked", epoch: value.epoch + 1 },
           "operator",
           at,
         );
         break;
       }
       case "device": {
-        const value = (await this.store.getDevice(this.context, "device_a"))!;
-        await this.store.updateDevice(
-          this.context,
-          {
-            ...value,
-            status: active ? "active" : "revoked",
-            epoch: value.epoch + 1,
-          },
+        const value = (await store.getDevice(context, "device_a"))!;
+        await store.updateDevice(
+          context,
+          { ...value, status: active ? "active" : "revoked", epoch: value.epoch + 1 },
           "operator",
           at,
         );
         break;
       }
       case "grant": {
-        const value = (await this.store.getGrant(this.context, "grant_a"))!;
-        await this.store.updateGrant(
-          this.context,
-          {
-            ...value,
-            status: active ? "active" : "revoked",
-            version: value.version + 1,
-          },
+        const value = (await store.getGrant(context, "grant_a"))!;
+        await store.updateGrant(
+          context,
+          { ...value, status: active ? "active" : "revoked", version: value.version + 1 },
           "operator",
           at,
         );
         break;
       }
       case "connection": {
-        const value = (await this.store.getConnection(this.context, "connection_a"))!;
-        await this.store.updateConnection(
-          this.context,
-          {
-            ...value,
-            status: active ? "active" : "revoked",
-            epoch: value.epoch + 1,
-          },
+        const value = (await store.getConnection(context, "connection_a"))!;
+        await store.updateConnection(
+          context,
+          { ...value, status: active ? "active" : "revoked", epoch: value.epoch + 1 },
           "operator",
           at,
         );
       }
     }
+  };
+  const revoke = async (subject: FixtureSubject) => await transition(subject, false);
+  const revokeAndReactivate = async (subject: FixtureSubject) => {
+    await transition(subject, false);
+    await transition(subject, true);
+  };
+  const setGrantLifetime = async (seconds: number) => {
+    if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 300) {
+      throw new Error("fixture lifetime denied");
+    }
+    const grant = (await store.getGrant(context, "grant_a"))!;
+    await store.updateGrant(context, {
+      ...grant,
+      status: "active",
+      version: grant.version + 1,
+      expiresAt: clock() + seconds,
+    });
+  };
+  const status = async (subject: FixtureSubject): Promise<string> => {
+    switch (subject) {
+      case "principal":
+        return (await store.getPrincipal(context, context.userId))?.status ?? "missing";
+      case "agent":
+        return (await store.getAgent(context, "agent_a"))?.status ?? "missing";
+      case "device":
+        return (await store.getDevice(context, "device_a"))?.status ?? "missing";
+      case "grant":
+        return (await store.getGrant(context, "grant_a"))?.status ?? "missing";
+      case "connection":
+        return (await store.getConnection(context, "connection_a"))?.status ?? "missing";
+    }
+  };
+  const capabilities = { dispatch, revoke, revokeAndReactivate, setGrantLifetime, status };
+  for (const capability of Object.values(capabilities)) {
+    Object.setPrototypeOf(capability, null);
+    Object.freeze(capability);
   }
+  return Object.freeze(Object.assign(Object.create(null), capabilities));
 }
 
 /**
@@ -446,7 +449,7 @@ export async function createFixtureGatewayHarness(): Promise<FixtureGatewayHarne
     status: "active",
     epoch: 1,
   });
-  const clock = () => Math.floor(Date.now() / 1000);
+  const clock = systemClock;
   await store.putGrant(context, {
     id: "grant_a",
     tenantId: context.tenantId,
@@ -498,5 +501,5 @@ export async function createFixtureGatewayHarness(): Promise<FixtureGatewayHarne
     "fixture.cairn.invalid",
     clock,
   );
-  return new InternalFixtureGatewayHarness(store, bridge, context);
+  return closedFixtureFacade(store, bridge, context, clock);
 }

@@ -25,11 +25,12 @@ assumptions. No account, credential, live endpoint, package install, or provider
 
 Stage 0's executable MCP fixture is created only by a zero-argument composition root. It internally
 constructs one authoritative memory backend/store, invocation service, signer set, custody fixture,
-and system clock. No exported constructor or factory accepts those dependencies. Its public harness
-exposes only bounded authorization, revocation/reactivation, lifetime, and status operations; these
-cannot replace the dependency graph or mint a core over external state. Enrollment commits likewise
-reconstruct canonical transactions and JWK thumbprints inside the authority lock, and Stage 0
-rejects identity-key mutation rather than simulating an unaudited rotation ceremony.
+and captured system clock. No exported constructor or factory accepts those dependencies. Its frozen
+null-prototype public facade exposes only composed dispatch, revocation/reactivation, lifetime, and
+status operations; authentication and policy-core handles never cross that boundary. Enrollment and
+removal commits reconstruct canonical transactions and JWK thumbprints inside the authority lock,
+and Stage 0 rejects identity-key, device-role, and device-agent mutation rather than simulating an
+unaudited ceremony.
 
 ## Dependency decision
 

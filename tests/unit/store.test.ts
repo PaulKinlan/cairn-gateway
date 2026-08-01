@@ -253,3 +253,55 @@ Deno.test("raw identity writes cannot drift or rotate JWK thumbprints", async ()
     "keys must differ",
   );
 });
+
+Deno.test("device role, parent agent, and owner-wide agent/device key roles are immutable", async () => {
+  const store = new MemoryStore();
+  const { agent } = await seed(store);
+  const memberSigner = await fixtureDeviceSigner(1);
+  const memberJwk = await memberSigner.publicJwk();
+  const member: Device = {
+    id: ids.device("device_member"),
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    agentId: agent.id,
+    publicJwk: memberJwk,
+    thumbprint: await jwkThumbprint(memberJwk),
+    role: "member",
+    status: "active",
+    epoch: 1,
+  };
+  await store.putDevice(ctx, member);
+  await rejects(
+    () => store.updateDevice(ctx, { ...member, role: "admin", epoch: 2 }),
+    "relationship mutation denied",
+  );
+  const otherAgentPair = await crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    true,
+    ["sign", "verify"],
+  );
+  const otherAgentJwk = await crypto.subtle.exportKey("jwk", otherAgentPair.publicKey);
+  const otherAgent = {
+    ...agent,
+    id: ids.agent("agent_b"),
+    publicJwk: otherAgentJwk,
+    thumbprint: await jwkThumbprint(otherAgentJwk),
+  };
+  await store.putAgent(ctx, otherAgent);
+  await rejects(
+    () => store.updateDevice(ctx, { ...member, agentId: otherAgent.id, epoch: 2 }),
+    "relationship mutation denied",
+  );
+  await rejects(
+    () =>
+      store.putAgent(ctx, {
+        ...agent,
+        id: ids.agent("agent_collapse"),
+        publicJwk: member.publicJwk,
+        thumbprint: member.thumbprint,
+      }),
+    "keys must differ",
+  );
+  equals((await store.getDevice(ctx, member.id))!.role, "member");
+  equals((await store.getDevice(ctx, member.id))!.agentId, agent.id);
+});

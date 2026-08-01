@@ -1,7 +1,6 @@
 import { assert, equals, rejects } from "../assert.ts";
 import {
   handleFixtureMcp,
-  LegacyMcpSession,
   MCP_CURRENT,
   MCP_LEGACY,
   OUTPUT_SCHEMAS,
@@ -124,13 +123,13 @@ async function environment(expiresAt = now + 600) {
   );
   return { store, service, device, agent };
 }
-async function authorized(
+async function dispatched(
   body: unknown,
   path: "/mcp" | "/mcp/legacy" = "/mcp",
 ) {
   const harness = await createFixtureGatewayHarness();
   const bytes = encoder.encode(JSON.stringify(body));
-  return { harness, bytes, ...(await harness.authorize(bytes, path)) };
+  return { harness, bytes, response: await harness.dispatch(bytes, path) };
 }
 Deno.test("vendored official SDK fixture and all closed schemas are executable", () => {
   equals(sdkFixture.provenance.version, "1.30.0");
@@ -154,96 +153,29 @@ Deno.test("unverified auth and arbitrary fake core cannot reach MCP", async () =
   const bytes = encoder.encode(JSON.stringify(request));
   const unverified = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", {} as never, {});
   equals((unverified!.error as { code: number }).code, -32600);
-  const bound = await authorized(request);
-  const fake = await handleFixtureMcp(bound.bytes, MCP_CURRENT, "/mcp", bound.auth, {
+  const fake = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", {} as never, {
     search: () => Promise.resolve({ operations: [], count: 0 }),
   });
   equals((fake!.error as { code: number }).code, -32600);
 });
-Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
-  const search = modern("search_capabilities", { query: "github" });
-  const bound = await authorized(search);
-  const substituted = modern("connection_status", { connection: "connection_a" });
-  const substitutedBytes = encoder.encode(JSON.stringify(substituted));
-  const denied = await handleFixtureMcp(
-    substitutedBytes,
-    MCP_CURRENT,
-    "/mcp",
-    bound.auth,
-    bound.core,
-  );
-  equals((denied!.error as { code: number }).code, -32600);
-  const first = await handleFixtureMcp(
-    bound.bytes,
-    MCP_CURRENT,
-    "/mcp",
-    bound.auth,
-    bound.core,
-  );
-  assert("result" in first!); // a mismatch does not burn the exact authorization
-  const replay = await handleFixtureMcp(
-    bound.bytes,
-    MCP_CURRENT,
-    "/mcp",
-    bound.auth,
-    bound.core,
-  );
-  equals((replay!.error as { code: number }).code, -32600);
-  const route = await authorized(search);
-  const wrongRoute = await handleFixtureMcp(
-    route.bytes,
-    MCP_LEGACY,
-    "/mcp/legacy",
-    route.auth,
-    route.core,
-    new LegacyMcpSession(),
-  );
-  equals((wrongRoute!.error as { code: number }).code, -32600);
-  const legacySearch = {
-    jsonrpc: "2.0" as const,
-    id: 4,
-    method: "tools/call",
-    params: { name: "search_capabilities", arguments: { query: "github" } },
-  };
-  const legacy = await authorized(legacySearch, "/mcp/legacy");
-  const legacySession = new LegacyMcpSession();
-  legacySession.begin();
-  legacySession.complete();
-  const legacySubstitution = {
-    ...legacySearch,
-    params: { name: "connection_status", arguments: { connection: "connection_a" } },
-  };
-  const legacySubstitutionBytes = encoder.encode(JSON.stringify(legacySubstitution));
-  const legacyDenied = await handleFixtureMcp(
-    legacySubstitutionBytes,
-    MCP_LEGACY,
-    "/mcp/legacy",
-    legacy.auth,
-    legacy.core,
-    legacySession,
-  );
-  equals((legacyDenied!.error as { code: number }).code, -32600);
-  const legacyOk = await handleFixtureMcp(
-    legacy.bytes,
-    MCP_LEGACY,
-    "/mcp/legacy",
-    legacy.auth,
-    legacy.core,
-    legacySession,
-  );
-  assert("result" in legacyOk!);
-  const legacyReplay = await handleFixtureMcp(
-    legacy.bytes,
-    MCP_LEGACY,
-    "/mcp/legacy",
-    legacy.auth,
-    legacy.core,
-    legacySession,
-  );
-  equals((legacyReplay!.error as { code: number }).code, -32600);
+Deno.test("public dispatch keeps exact-body authorization and core behind one operation", async () => {
+  const search = await dispatched(modern("search_capabilities", { query: "github" }));
+  assert("result" in search.response!);
+  assert(!("auth" in search.response!));
+  assert(!("core" in search.response!));
+  const malformedDispatch = search.harness.dispatch as unknown as (
+    ...args: unknown[]
+  ) => Promise<unknown>;
+  const denied = await malformedDispatch({ forged: true }, search.bytes, MCP_CURRENT, "/mcp");
+  equals(denied, {
+    jsonrpc: "2.0",
+    id: null,
+    error: { code: -32700, message: "parse denied" },
+  });
+  assert(!("result" in (denied as Record<string, unknown>)));
 });
-Deno.test("legacy lifecycle requires initialized notification with per-request auth", async () => {
-  const session = new LegacyMcpSession();
+Deno.test("legacy lifecycle requires initialized notification with internal per-request auth", async () => {
+  const harness = await createFixtureGatewayHarness();
   const init = {
     jsonrpc: "2.0" as const,
     id: 1,
@@ -254,35 +186,18 @@ Deno.test("legacy lifecycle requires initialized notification with per-request a
       clientInfo: { name: "fixture", version: "1" },
     },
   };
-  const a = await authorized(init, "/mcp/legacy");
-  const initialized = await handleFixtureMcp(
-    a.bytes,
-    MCP_LEGACY,
-    "/mcp/legacy",
-    a.auth,
-    a.core,
-    session,
-  );
+  const initialized = await harness.dispatch(encoder.encode(JSON.stringify(init)), "/mcp/legacy");
   equals((initialized!.result as { protocolVersion: string }).protocolVersion, MCP_LEGACY);
   const notice = { jsonrpc: "2.0" as const, method: "notifications/initialized" };
-  const b = await authorized(notice, "/mcp/legacy");
   equals(
-    await handleFixtureMcp(b.bytes, MCP_LEGACY, "/mcp/legacy", b.auth, b.core, session),
+    await harness.dispatch(encoder.encode(JSON.stringify(notice)), "/mcp/legacy"),
     undefined,
   );
   const list = { jsonrpc: "2.0" as const, id: 2, method: "tools/list" };
-  const c = await authorized(list, "/mcp/legacy");
-  const listed = await handleFixtureMcp(
-    c.bytes,
-    MCP_LEGACY,
-    "/mcp/legacy",
-    c.auth,
-    c.core,
-    session,
-  );
+  const listed = await harness.dispatch(encoder.encode(JSON.stringify(list)), "/mcp/legacy");
   assert(Array.isArray((listed!.result as { tools: unknown[] }).tools));
 });
-Deno.test("every tool uses operation-time expiry and epoch snapshots", async () => {
+Deno.test("every tool rejects revoked state and Date.now cannot bypass real expiry", async () => {
   const requests = [
     modern("search_capabilities", { query: "github" }),
     modern("describe_operation", { operation: "github.user.read@v1" }),
@@ -297,42 +212,45 @@ Deno.test("every tool uses operation-time expiry and epoch snapshots", async () 
   for (const request of requests) {
     const harness = await createFixtureGatewayHarness();
     await harness.setGrantLifetime(1);
-    const bytes = encoder.encode(JSON.stringify(request));
-    expiring.push({ harness, bytes, ...(await harness.authorize(bytes)) });
+    expiring.push({ harness, bytes: encoder.encode(JSON.stringify(request)) });
   }
   await new Promise((resolve) => setTimeout(resolve, 1_100));
-  for (const expired of expiring) {
-    const denied = await handleFixtureMcp(
-      expired.bytes,
-      MCP_CURRENT,
-      "/mcp",
-      expired.auth,
-      expired.core,
-    );
-    equals(
-      (denied!.result as { structuredContent: { category: string } }).structuredContent.category,
-      "policy_denied",
-    );
+  const originalDateNow = Date.now;
+  Date.now = () => 0;
+  try {
+    for (const expired of expiring) {
+      await rejects(() => expired.harness.dispatch(expired.bytes), "grant denied");
+    }
+  } finally {
+    Date.now = originalDateNow;
   }
-  const request = modern("search_capabilities", { query: "github" });
+  const bytes = encoder.encode(JSON.stringify(requests[0]));
   for (const subject of ["principal", "agent", "device", "grant", "connection"] as const) {
-    const stale = await authorized(request);
-    await stale.harness.revokeAndReactivate(subject);
-    const denied = await handleFixtureMcp(
-      stale.bytes,
-      MCP_CURRENT,
-      "/mcp",
-      stale.auth,
-      stale.core,
-    );
-    equals(
-      (denied!.result as { structuredContent: { category: string } }).structuredContent.category,
-      "policy_denied",
-    );
+    const harness = await createFixtureGatewayHarness();
+    await harness.revoke(subject);
+    await rejects(() => harness.dispatch(bytes));
   }
 });
 Deno.test("modern and legacy executable bridge invoke the fixed operation", async () => {
   for (const path of ["/mcp", "/mcp/legacy"] as const) {
+    const harness = await createFixtureGatewayHarness();
+    if (path === "/mcp/legacy") {
+      const init = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: MCP_LEGACY,
+          capabilities: {},
+          clientInfo: { name: "fixture", version: "1" },
+        },
+      };
+      await harness.dispatch(encoder.encode(JSON.stringify(init)), path);
+      await harness.dispatch(
+        encoder.encode(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })),
+        path,
+      );
+    }
     const request = path === "/mcp"
       ? modern("invoke_operation", {
         operation: "github.user.read@v1",
@@ -352,70 +270,29 @@ Deno.test("modern and legacy executable bridge invoke the fixed operation", asyn
           },
         },
       };
-    const bound = await authorized(request, path);
-    const session = path === "/mcp/legacy" ? new LegacyMcpSession() : undefined;
-    if (session) {
-      session.begin();
-      session.complete();
-    }
-    const response = await handleFixtureMcp(
-      bound.bytes,
-      path === "/mcp" ? MCP_CURRENT : MCP_LEGACY,
-      path,
-      bound.auth,
-      bound.core,
-      session,
-    );
+    const response = await harness.dispatch(encoder.encode(JSON.stringify(request)), path);
     equals(
       (response!.result as { structuredContent: { outcome: string } }).structuredContent.outcome,
       "success",
     );
   }
 });
-Deno.test("MCP parses only signed received bytes and has no split body dispatch", async () => {
-  for (const path of ["/mcp", "/mcp/legacy"] as const) {
-    const signedSearch = path === "/mcp" ? modern("search_capabilities", { query: "github" }) : {
-      jsonrpc: "2.0" as const,
-      id: 12,
-      method: "tools/call",
-      params: { name: "search_capabilities", arguments: { query: "github" } },
-    };
-    const bound = await authorized(signedSearch, path);
-    const forgedInvoke = path === "/mcp"
-      ? modern("invoke_operation", {
-        operation: "github.user.read@v1",
-        connection: "connection_a",
-        arguments: {},
-      })
-      : {
-        jsonrpc: "2.0" as const,
-        id: 12,
-        method: "tools/call",
-        params: {
-          name: "invoke_operation",
-          arguments: {
-            operation: "github.user.read@v1",
-            connection: "connection_a",
-            arguments: {},
-          },
-        },
-      };
-    // Exercise the rejected old split-input calling convention. The independent
-    // object is now treated as invalid raw bytes and can never drive dispatch.
-    const oldSplitCall = handleFixtureMcp as unknown as (
-      ...args: unknown[]
-    ) => Promise<Record<string, unknown> | undefined>;
-    const denied = await oldSplitCall(
-      forgedInvoke,
-      bound.bytes,
-      path === "/mcp" ? MCP_CURRENT : MCP_LEGACY,
-      path,
-      bound.auth,
-      bound.core,
-      path === "/mcp/legacy" ? new LegacyMcpSession() : undefined,
-    );
-    equals((denied!.error as { code: number }).code, -32700);
-  }
+Deno.test("MCP public dispatch has no split body or direct core calling convention", async () => {
+  const harness = await createFixtureGatewayHarness();
+  const signedSearch = modern("search_capabilities", { query: "github" });
+  const bytes = encoder.encode(JSON.stringify(signedSearch));
+  const oldSplitCall = harness.dispatch as unknown as (
+    ...args: unknown[]
+  ) => Promise<Record<string, unknown> | undefined>;
+  const denied = await oldSplitCall(signedSearch, bytes, MCP_CURRENT, "/mcp");
+  equals(denied, {
+    jsonrpc: "2.0",
+    id: null,
+    error: { code: -32700, message: "parse denied" },
+  });
+  assert(!("result" in denied!));
+  assert(!("authorize" in harness));
+  assert(!("core" in harness));
 });
 Deno.test("device and agent proof nonces are independently atomic", async () => {
   const env = await environment();
@@ -466,8 +343,15 @@ Deno.test("trusted policy brand has no public mint", async () => {
   assert(!("FixtureLocalMcpBridge" in bridgeExports));
   assert(!("BoundFixtureBridge" in bridgeExports));
 });
-Deno.test("public composition root cannot substitute authority dependencies after revocation", async () => {
+Deno.test("frozen closure facade defeats reflection, recovered constructors, and stale rollback", async () => {
   equals(createFixtureGatewayHarness.length, 0);
+  const expectedKeys = [
+    "dispatch",
+    "revoke",
+    "revokeAndReactivate",
+    "setGrantLifetime",
+    "status",
+  ];
   const requests = [
     modern("search_capabilities", { query: "github" }),
     modern("describe_operation", { operation: "github.user.read@v1" }),
@@ -480,26 +364,45 @@ Deno.test("public composition root cannot substitute authority dependencies afte
   ];
   for (const request of requests) {
     const harness = await createFixtureGatewayHarness();
-    const bytes = encoder.encode(JSON.stringify(request));
-    const { auth, core } = await harness.authorize(bytes);
+    equals(Reflect.ownKeys(harness), expectedKeys);
+    equals(Reflect.getPrototypeOf(harness), null);
+    assert(Object.isFrozen(harness));
+    const reflected = harness as unknown as Record<PropertyKey, unknown>;
+    for (
+      const forbidden of [
+        "store",
+        "backend",
+        "bridge",
+        "context",
+        "core",
+        "mint",
+        "authority",
+        "constructor",
+        "authorize",
+      ]
+    ) equals(reflected[forbidden], undefined);
+    for (const key of expectedKeys) {
+      const capability = reflected[key] as object;
+      equals(Reflect.getPrototypeOf(capability), null);
+      assert(Object.isFrozen(capability));
+      equals((capability as { constructor?: unknown }).constructor, undefined);
+    }
+    assert(!Reflect.set(reflected, "store", new MemoryStore()));
     await harness.revoke("grant");
-    const ignoredExternalDependencies = {
-      store: new MemoryStore(),
-      service: {},
-      clock: () => 0,
-      now: 0,
-      authority: {},
-    };
-    const attemptedFactory = createFixtureGatewayHarness as unknown as (
-      ...values: unknown[]
-    ) => Promise<unknown>;
-    await attemptedFactory(ignoredExternalDependencies);
-    const denied = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core);
-    equals(
-      (denied!.result as { structuredContent: { category: string } }).structuredContent.category,
-      "policy_denied",
-    );
+    const bytes = encoder.encode(JSON.stringify(request));
+    await rejects(() => harness.dispatch(bytes), "grant denied");
   }
+});
+
+Deno.test("public dispatch returns no replayable authorization or policy core", async () => {
+  const request = modern("search_capabilities", { query: "github" });
+  const harness = await createFixtureGatewayHarness();
+  const response = await harness.dispatch(encoder.encode(JSON.stringify(request)));
+  assert("result" in response!);
+  const publicResult = response as Record<string, unknown>;
+  equals(publicResult.auth, undefined);
+  equals(publicResult.core, undefined);
+  equals((harness as unknown as Record<string, unknown>).authorize, undefined);
 });
 
 Deno.test("MCP contract gate consumes notification and call-result fixture fields", () => {
@@ -529,5 +432,5 @@ Deno.test("revoked grant cannot authenticate", async () => {
   const harness = await createFixtureGatewayHarness();
   await harness.revoke("grant");
   const bytes = encoder.encode(JSON.stringify(request));
-  await rejects(() => harness.authorize(bytes), "grant denied");
+  await rejects(() => harness.dispatch(bytes), "grant denied");
 });

@@ -56,7 +56,7 @@ export async function enrollmentTransaction(
 export function approvalTransaction(
   ctx: TenantContext,
   principal: Pick<Principal, "epoch">,
-  agent: Pick<Agent, "epoch">,
+  agent: Pick<Agent, "epoch" | "thumbprint">,
   request: Pick<EnrollmentRequest, "id" | "agentId" | "thumbprint" | "expiresAt">,
   approver: Pick<Device, "id" | "thumbprint" | "epoch">,
   candidateId: Device["id"],
@@ -66,6 +66,7 @@ export function approvalTransaction(
     tenant_id: ctx.tenantId,
     principal_epoch: principal.epoch,
     agent_epoch: agent.epoch,
+    agent_jkt: agent.thumbprint,
     approver_epoch: approver.epoch,
     candidate_epoch: 1,
     user_id: ctx.userId,
@@ -77,5 +78,27 @@ export function approvalTransaction(
     candidate_jkt: request.thumbprint,
     fingerprint: shortFingerprint(request.thumbprint),
     expires_at: request.expiresAt,
+  };
+}
+
+export function removalTransaction(
+  ctx: TenantContext,
+  agent: Pick<Agent, "id" | "epoch" | "thumbprint">,
+  approver: Pick<Device, "id" | "epoch" | "thumbprint">,
+  target: Pick<Device, "id" | "epoch" | "thumbprint">,
+) {
+  return {
+    action: "remove_device" as const,
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    agent_id: agent.id,
+    agent_epoch: agent.epoch,
+    agent_jkt: agent.thumbprint,
+    approver_id: approver.id,
+    approver_epoch: approver.epoch,
+    approver_jkt: approver.thumbprint,
+    target_id: target.id,
+    target_epoch: target.epoch,
+    target_jkt: target.thumbprint,
   };
 }
