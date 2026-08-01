@@ -27,7 +27,7 @@ import {
 } from "../../packages/core/src/crypto/request_proof.ts";
 import { encoder, sha256 } from "../../packages/core/src/crypto/encoding.ts";
 import { handleFixtureMcp, MCP_CURRENT } from "../../apps/gateway/mcp.ts";
-import { FixtureLocalMcpBridge } from "../../apps/gateway/local_bridge.ts";
+import { createFixtureGatewayHarness } from "../../apps/gateway/local_bridge.ts";
 const now = 2_000_000_000,
   ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("user_a") };
 const githubBody = encoder.encode(JSON.stringify({
@@ -398,7 +398,6 @@ Deno.test("callback flow IDs and fixture material are owner-composite", async ()
   });
 });
 Deno.test("actual MCP boundary authenticates and executes typed policy flow", async () => {
-  const env = await setup();
   const request = {
     jsonrpc: "2.0" as const,
     id: 7,
@@ -414,24 +413,14 @@ Deno.test("actual MCP boundary authenticates and executes typed policy flow", as
     },
   };
   const bytes = encoder.encode(JSON.stringify(request));
-  const bridge = new FixtureLocalMcpBridge(
-    env.store,
-    env.service,
-    ctx,
-    "grant_0",
-    env.signers[0]!,
-    env.agentSigner,
-    "fixture.cairn.invalid",
-    () => now,
-  );
-  const { auth, core } = await bridge.authorize(bytes, now);
+  const harness = await createFixtureGatewayHarness();
+  const { auth, core } = await harness.authorize(bytes);
   const response = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core),
     structured = (response!.result as { structuredContent: { outcome: string } }).structuredContent;
   equals(structured.outcome, "success");
   assert(!JSON.stringify(response).includes("custody_ref"));
 });
 Deno.test("MCP stale discovery is denied at call time after revocation", async () => {
-  const env = await setup();
   const request = {
     jsonrpc: "2.0" as const,
     id: 8,
@@ -447,19 +436,9 @@ Deno.test("MCP stale discovery is denied at call time after revocation", async (
     },
   };
   const bytes = encoder.encode(JSON.stringify(request));
-  const bridge = new FixtureLocalMcpBridge(
-    env.store,
-    env.service,
-    ctx,
-    "grant_0",
-    env.signers[0]!,
-    env.agentSigner,
-    "fixture.cairn.invalid",
-    () => now,
-  );
-  const { auth, core } = await bridge.authorize(bytes, now);
-  const connection = (await env.store.getConnection(ctx, "connection_a"))!;
-  await env.store.updateConnection(ctx, { ...connection, status: "revoked", epoch: 2 });
+  const harness = await createFixtureGatewayHarness();
+  const { auth, core } = await harness.authorize(bytes);
+  await harness.revoke("connection");
   const response = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core);
   equals((response!.result as { isError: boolean }).isError, true);
   equals(
@@ -468,7 +447,6 @@ Deno.test("MCP stale discovery is denied at call time after revocation", async (
   );
 });
 Deno.test("fixture bridge acquires capability, dual-signs and binds exact authenticated core", async () => {
-  const env = await setup();
   const request = {
     jsonrpc: "2.0" as const,
     id: 9,
@@ -484,23 +462,14 @@ Deno.test("fixture bridge acquires capability, dual-signs and binds exact authen
     },
   };
   const bytes = encoder.encode(JSON.stringify(request));
-  const bridge = new FixtureLocalMcpBridge(
-    env.store,
-    env.service,
-    ctx,
-    "grant_0",
-    env.signers[0]!,
-    env.agentSigner,
-    "fixture.cairn.invalid",
-    () => now,
-  );
-  const { auth, core } = await bridge.authorize(bytes, now);
+  const harness = await createFixtureGatewayHarness();
+  const { auth, core } = await harness.authorize(bytes);
   const response = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core);
   equals(
     (response!.result as { structuredContent: { status: string } }).structuredContent.status,
     "active",
   );
-  assert(!("capability" in (bridge as unknown as Record<string, unknown>)));
+  assert(!("capability" in (harness as unknown as Record<string, unknown>)));
 });
 Deno.test("malformed custody values map closed with exactly one sanitized error receipt", async () => {
   const variants: Array<() => unknown> = [

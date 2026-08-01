@@ -27,10 +27,14 @@
     nonce, timestamp, and (when present) the independently hashed capability.
 14. Reusable bearer values are never carried in URLs or WebSockets. No public-key reclaim occurs
     without a fresh challenge and proof of possession; agent and device keys remain distinct.
-15. Bootstrap, enrollment request, and approval commits recompute RFC 7638 thumbprints from the
-    authoritative JWK values, enforce distinct agent/device signing roles, and atomically recheck
-    active principal, agent, approving admin, epochs, and the exact candidate transaction.
-16. The policy-core trust brand and mint are private to the executable bridge; callers cannot bind
-    genuine authentication to substituted stores, clocks, or invocation services.
+15. Bootstrap, enrollment request, and approval commits reconstruct and hash the complete canonical
+    transaction inside the authoritative critical section. They never accept a caller-computed hash;
+    they recompute every stored RFC 7638 thumbprint, enforce exact IDs/expiry/epochs and distinct
+    agent/admin/candidate roles, then consume the matching challenge immediately before mutation.
+    Raw identity puts validate JWK/thumbprint equality and updates cannot rotate keys in Stage 0.
+16. The policy-core trust brand and mint are private to a zero-argument composition root that
+    creates and closes over one store, invocation service, signer set, custody fixture, and system
+    clock. Public fixture operations can revoke/query that authority but cannot supply, replace, or
+    switch stores, clocks, signers, services, authentication time, or trust mints.
 17. The committed MCP contract gate consumes every immutable fixture leaf and validates the actual
     lifecycle and call-result envelope rules; any new or mutated unconsumed constraint fails CI.

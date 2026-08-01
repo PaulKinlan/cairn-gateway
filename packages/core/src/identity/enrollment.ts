@@ -7,8 +7,14 @@ import type {
   TenantContext,
 } from "../domain/types.ts";
 import type { MetadataStore } from "../store/store.ts";
-import { base64url, canonical, encoder, sha256, unbase64url } from "../crypto/encoding.ts";
+import { base64url, canonical, encoder, unbase64url } from "../crypto/encoding.ts";
 import { importPublicP256, jwkThumbprint, shortFingerprint } from "../crypto/thumbprint.ts";
+import {
+  approvalTransaction,
+  bootstrapTransaction,
+  enrollmentTransaction,
+  transactionHash,
+} from "./transactions.ts";
 
 export interface PossessionProof {
   challenge: string;
@@ -34,10 +40,6 @@ function randomChallenge(): string {
   crypto.getRandomValues(bytes);
   return base64url(bytes);
 }
-async function transactionHash(value: unknown): Promise<string> {
-  return await sha256(encoder.encode(canonical(value)));
-}
-
 export class DeviceEnrollmentService {
   constructor(private readonly store: MetadataStore) {}
   async bootstrapChallenge(
@@ -99,7 +101,6 @@ export class DeviceEnrollmentService {
     const ok = await this.store.commitBootstrap(
       ctx,
       deviceProof.challenge,
-      await transactionHash(tx),
       {
         principal: { ...principal, epoch: 1 },
         agent: {
@@ -130,19 +131,16 @@ export class DeviceEnrollmentService {
       principal.id !== ctx.userId || principal.tenantId !== ctx.tenantId ||
       principal.emailRequired !== false || principal.status !== "active"
     ) throw new Error("principal ownership denied");
-    const deviceJkt = await jwkThumbprint(devicePublicJwk),
-      agentJkt = await jwkThumbprint(agentPublicJwk);
-    if (deviceJkt === agentJkt) throw new Error("agent and device keys must differ");
-    return {
-      action: "bootstrap" as const,
-      tenant_id: ctx.tenantId,
-      user_id: ctx.userId,
-      principal_id: principal.id,
-      agent_id: agentId,
-      agent_jkt: agentJkt,
-      device_id: deviceId,
-      device_jkt: deviceJkt,
-    };
+    const transaction = await bootstrapTransaction(
+      ctx,
+      principal,
+      { id: agentId, publicJwk: agentPublicJwk },
+      { id: deviceId, publicJwk: devicePublicJwk },
+    );
+    if (transaction.device_jkt === transaction.agent_jkt) {
+      throw new Error("agent and device keys must differ");
+    }
+    return transaction;
   }
   async requestChallenge(
     ctx: TenantContext,
@@ -172,7 +170,6 @@ export class DeviceEnrollmentService {
       !await this.store.commitEnrollmentRequest(
         ctx,
         proof.challenge,
-        await transactionHash(tx),
         {
           request,
           principalEpoch: principal.epoch,
@@ -193,23 +190,17 @@ export class DeviceEnrollmentService {
       value.tenantId !== ctx.tenantId || value.userId !== ctx.userId || value.expiresAt <= now ||
       value.expiresAt > now + 600
     ) throw new Error("invalid enrollment request");
+    const principal = await this.store.getPrincipal(ctx, ctx.userId);
     const agent = await this.store.getAgent(ctx, value.agentId);
-    if (!agent || agent.status !== "active") throw new Error("agent denied");
+    if (!principal || principal.status !== "active" || !agent || agent.status !== "active") {
+      throw new Error("agent denied");
+    }
     const jkt = await jwkThumbprint(value.candidateJwk);
     if (jkt === agent.thumbprint) throw new Error("agent and device keys must differ");
     if ((await this.store.listDevices(ctx)).some((d) => d.thumbprint === jkt)) {
       throw new Error("duplicate device key");
     }
-    return {
-      action: "enroll" as const,
-      tenant_id: ctx.tenantId,
-      user_id: ctx.userId,
-      request_id: value.id,
-      agent_id: value.agentId,
-      agent_jkt: agent.thumbprint,
-      candidate_jkt: jkt,
-      expires_at: value.expiresAt,
-    };
+    return await enrollmentTransaction(ctx, value, principal, agent);
   }
   async approvalChallenge(
     ctx: TenantContext,
@@ -266,7 +257,7 @@ export class DeviceEnrollmentService {
       epoch: 1,
     };
     if (
-      !await this.store.commitApproval(ctx, proof.challenge, await transactionHash(tx), {
+      !await this.store.commitApproval(ctx, proof.challenge, {
         requestId,
         device,
         principalEpoch: principal.epoch,
@@ -289,25 +280,16 @@ export class DeviceEnrollmentService {
   ) {
     if (approverId === candidateId) throw new Error("self approval denied");
     const request = await this.store.getEnrollment(ctx, requestId),
-      approver = await this.store.getDevice(ctx, approverId);
+      approver = await this.store.getDevice(ctx, approverId),
+      principal = await this.store.getPrincipal(ctx, ctx.userId),
+      agent = request ? await this.store.getAgent(ctx, request.agentId) : undefined;
     if (
       !request || request.status !== "pending" || request.expiresAt <= now || !approver ||
-      approver.status !== "active" || approver.role !== "admin" ||
+      approver.status !== "active" || approver.role !== "admin" || !principal ||
+      principal.status !== "active" || !agent || agent.status !== "active" ||
       shortFingerprint(request.thumbprint) !== fingerprint || approver.agentId !== request.agentId
     ) throw new Error("enrollment approval denied");
-    return {
-      action: "approve_enrollment" as const,
-      tenant_id: ctx.tenantId,
-      user_id: ctx.userId,
-      request_id: requestId,
-      approver_id: approverId,
-      approver_jkt: approver.thumbprint,
-      agent_id: request.agentId,
-      candidate_id: candidateId,
-      candidate_jkt: request.thumbprint,
-      fingerprint,
-      expires_at: request.expiresAt,
-    };
+    return approvalTransaction(ctx, principal, agent, request, approver, candidateId);
   }
   async removalChallenge(
     ctx: TenantContext,

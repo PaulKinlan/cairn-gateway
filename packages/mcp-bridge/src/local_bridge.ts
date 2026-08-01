@@ -1,13 +1,21 @@
-import type { TenantContext } from "../../core/src/domain/types.ts";
+import { ids, type TenantContext } from "../../core/src/domain/types.ts";
 import type { MetadataStore } from "../../core/src/store/store.ts";
 import type { DeviceSigner } from "../../core/src/crypto/device_signer.ts";
+import { MemoryStore } from "../../core/src/store/memory_store.ts";
+import {
+  fixtureAgentSigner,
+  fixtureCapabilityKeyring,
+  fixtureDeviceSigner,
+} from "../../core/src/crypto/fixture_keys.ts";
+import { MemoryCustodyFixture } from "../../core/src/custody/memory_fixture.ts";
+import { MemorySafeLogger } from "../../core/src/logging/safe_logger.ts";
 import {
   bodyHash,
   type RequestProofPayload,
   signRequestProof,
 } from "../../core/src/crypto/request_proof.ts";
 import { encoder, sha256 } from "../../core/src/crypto/encoding.ts";
-import type { DualProof, InvocationService } from "../../core/src/policy/invocation.ts";
+import { type DualProof, InvocationService } from "../../core/src/policy/invocation.ts";
 import { GITHUB_USER_READ } from "../../core/src/connectors/github_user.ts";
 import { jwkThumbprint } from "../../core/src/crypto/thumbprint.ts";
 import { type VerifiedMcpAuth, verifyMcpAuth } from "../../../apps/gateway/mcp_auth.ts";
@@ -153,8 +161,8 @@ function createPolicyMcpCore(
   return core;
 }
 
-/** Fixture-only executable bridge; private keys and capabilities never cross its boundary. */
-export class FixtureLocalMcpBridge {
+/** Internal bridge; only the zero-argument composition root below can construct it. */
+class BoundFixtureBridge {
   #store: MetadataStore;
   #service: InvocationService;
   #context: TenantContext;
@@ -170,8 +178,8 @@ export class FixtureLocalMcpBridge {
     grantId: string,
     deviceSigner: DeviceSigner,
     agentSigner: DeviceSigner,
-    authority = "fixture.cairn.invalid",
-    clock: () => number = () => Math.floor(Date.now() / 1000),
+    authority: string,
+    clock: () => number,
   ) {
     this.#store = store;
     this.#service = service;
@@ -184,9 +192,9 @@ export class FixtureLocalMcpBridge {
   }
   async authorize(
     receivedBody: Uint8Array,
-    now: number,
     path: "/mcp" | "/mcp/legacy" = "/mcp",
   ): Promise<{ auth: VerifiedMcpAuth; core: object }> {
+    const now = this.#clock();
     const grant = await this.#store.getGrant(this.#context, this.#grantId);
     if (!grant) throw new Error("bridge denied");
     const issueBody = encoder.encode(JSON.stringify({ grant_id: this.#grantId }));
@@ -253,4 +261,242 @@ export class FixtureLocalMcpBridge {
       }),
     };
   }
+}
+
+export type FixtureSubject = "principal" | "agent" | "device" | "grant" | "connection";
+export interface FixtureGatewayHarness {
+  authorize(
+    receivedBody: Uint8Array,
+    path?: "/mcp" | "/mcp/legacy",
+  ): Promise<{ auth: VerifiedMcpAuth; core: object }>;
+  revoke(subject: FixtureSubject): Promise<void>;
+  revokeAndReactivate(subject: FixtureSubject): Promise<void>;
+  setGrantLifetime(seconds: number): Promise<void>;
+  status(subject: FixtureSubject): Promise<string>;
+}
+
+class InternalFixtureGatewayHarness implements FixtureGatewayHarness {
+  constructor(
+    private readonly store: MemoryStore,
+    private readonly bridge: BoundFixtureBridge,
+    private readonly context: TenantContext,
+  ) {}
+  authorize(receivedBody: Uint8Array, path: "/mcp" | "/mcp/legacy" = "/mcp") {
+    return this.bridge.authorize(receivedBody, path);
+  }
+  async revoke(subject: FixtureSubject): Promise<void> {
+    await this.#transition(subject, false);
+  }
+  async revokeAndReactivate(subject: FixtureSubject): Promise<void> {
+    await this.#transition(subject, false);
+    await this.#transition(subject, true);
+  }
+  async setGrantLifetime(seconds: number): Promise<void> {
+    if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 300) {
+      throw new Error("fixture lifetime denied");
+    }
+    const grant = (await this.store.getGrant(this.context, "grant_a"))!;
+    await this.store.updateGrant(this.context, {
+      ...grant,
+      status: "active",
+      version: grant.version + 1,
+      expiresAt: Math.floor(Date.now() / 1000) + seconds,
+    });
+  }
+  async status(subject: FixtureSubject): Promise<string> {
+    switch (subject) {
+      case "principal":
+        return (await this.store.getPrincipal(this.context, this.context.userId))?.status ??
+          "missing";
+      case "agent":
+        return (await this.store.getAgent(this.context, "agent_a"))?.status ?? "missing";
+      case "device":
+        return (await this.store.getDevice(this.context, "device_a"))?.status ?? "missing";
+      case "grant":
+        return (await this.store.getGrant(this.context, "grant_a"))?.status ?? "missing";
+      case "connection":
+        return (await this.store.getConnection(this.context, "connection_a"))?.status ?? "missing";
+    }
+  }
+  async #transition(subject: FixtureSubject, active: boolean): Promise<void> {
+    const at = Math.floor(Date.now() / 1000);
+    switch (subject) {
+      case "principal": {
+        const value = (await this.store.getPrincipal(this.context, this.context.userId))!;
+        await this.store.updatePrincipal(
+          this.context,
+          {
+            ...value,
+            status: active ? "active" : "revoked",
+            epoch: value.epoch + 1,
+          },
+          "operator",
+          at,
+        );
+        break;
+      }
+      case "agent": {
+        const value = (await this.store.getAgent(this.context, "agent_a"))!;
+        await this.store.updateAgent(
+          this.context,
+          {
+            ...value,
+            status: active ? "active" : "revoked",
+            epoch: value.epoch + 1,
+          },
+          "operator",
+          at,
+        );
+        break;
+      }
+      case "device": {
+        const value = (await this.store.getDevice(this.context, "device_a"))!;
+        await this.store.updateDevice(
+          this.context,
+          {
+            ...value,
+            status: active ? "active" : "revoked",
+            epoch: value.epoch + 1,
+          },
+          "operator",
+          at,
+        );
+        break;
+      }
+      case "grant": {
+        const value = (await this.store.getGrant(this.context, "grant_a"))!;
+        await this.store.updateGrant(
+          this.context,
+          {
+            ...value,
+            status: active ? "active" : "revoked",
+            version: value.version + 1,
+          },
+          "operator",
+          at,
+        );
+        break;
+      }
+      case "connection": {
+        const value = (await this.store.getConnection(this.context, "connection_a"))!;
+        await this.store.updateConnection(
+          this.context,
+          {
+            ...value,
+            status: active ? "active" : "revoked",
+            epoch: value.epoch + 1,
+          },
+          "operator",
+          at,
+        );
+      }
+    }
+  }
+}
+
+/**
+ * Zero-argument Stage 0 composition root. It owns one immutable authority graph;
+ * callers cannot provide or replace stores, services, signers, clocks, or trust mints.
+ */
+export async function createFixtureGatewayHarness(): Promise<FixtureGatewayHarness> {
+  const context: TenantContext = {
+    tenantId: ids.tenant("tenant_a"),
+    userId: ids.user("user_a"),
+  };
+  const store = new MemoryStore();
+  const deviceSigner = await fixtureDeviceSigner(0);
+  const agentSigner = await fixtureAgentSigner();
+  const deviceJwk = await deviceSigner.publicJwk();
+  const agentJwk = await agentSigner.publicJwk();
+  await store.putPrincipal(context, {
+    id: context.userId,
+    tenantId: context.tenantId,
+    kind: "cryptographic",
+    status: "active",
+    emailRequired: false,
+    epoch: 1,
+  });
+  await store.putAgent(context, {
+    id: ids.agent("agent_a"),
+    tenantId: context.tenantId,
+    userId: context.userId,
+    publicJwk: agentJwk,
+    thumbprint: await jwkThumbprint(agentJwk),
+    status: "active",
+    epoch: 1,
+  });
+  await store.putDevice(context, {
+    id: ids.device("device_a"),
+    tenantId: context.tenantId,
+    userId: context.userId,
+    agentId: ids.agent("agent_a"),
+    publicJwk: deviceJwk,
+    thumbprint: await jwkThumbprint(deviceJwk),
+    role: "admin",
+    status: "active",
+    epoch: 1,
+  });
+  await store.putConnection(context, {
+    id: ids.connection("connection_a"),
+    tenantId: context.tenantId,
+    userId: context.userId,
+    provider: "github",
+    adapter: "fixture",
+    custodyRef: "ref_a",
+    status: "active",
+    epoch: 1,
+  });
+  const clock = () => Math.floor(Date.now() / 1000);
+  await store.putGrant(context, {
+    id: "grant_a",
+    tenantId: context.tenantId,
+    userId: context.userId,
+    agentId: ids.agent("agent_a"),
+    deviceId: ids.device("device_a"),
+    connectionId: ids.connection("connection_a"),
+    operation: "github.user.read",
+    status: "active",
+    version: 1,
+    expiresAt: clock() + 600,
+  });
+  const custody = new MemoryCustodyFixture(encoder.encode(JSON.stringify({
+    id: 1,
+    login: "fixture",
+    name: null,
+    html_url: "https:" + "//github.com/fixture",
+    avatar_url: "https:" + "//avatars.githubusercontent.com/u/1",
+  })));
+  const binding = {
+    context,
+    connectionId: "connection_a",
+    connectionRef: "ref_a",
+    integration: "github-cairn-v1" as const,
+    redirectUri: "https://fixture.cairn.invalid/oauth/github/callback" as const,
+  };
+  const startedAt = clock();
+  await custody.beginAuthorization({ flowId: "flow_a", binding, now: startedAt });
+  await custody.completeAuthorization({
+    flowId: "flow_a",
+    binding,
+    ...custody.fixtureCallbackMaterial(binding, "flow_a"),
+    code: "fixture_authorization_code",
+    now: startedAt,
+  });
+  const service = new InvocationService(
+    store,
+    await fixtureCapabilityKeyring(),
+    custody,
+    new MemorySafeLogger(),
+  );
+  const bridge = new BoundFixtureBridge(
+    store,
+    service,
+    context,
+    "grant_a",
+    deviceSigner,
+    agentSigner,
+    "fixture.cairn.invalid",
+    clock,
+  );
+  return new InternalFixtureGatewayHarness(store, bridge, context);
 }

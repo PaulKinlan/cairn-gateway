@@ -70,21 +70,18 @@ export interface MetadataStore {
   commitBootstrap(
     ctx: TenantContext,
     challengeId: string,
-    transactionHash: string,
     value: BootstrapCommit,
     now: number,
   ): Promise<boolean>;
   commitEnrollmentRequest(
     ctx: TenantContext,
     challengeId: string,
-    transactionHash: string,
     value: EnrollmentRequestCommit,
     now: number,
   ): Promise<boolean>;
   commitApproval(
     ctx: TenantContext,
     challengeId: string,
-    transactionHash: string,
     value: ApprovalCommit,
     now: number,
   ): Promise<boolean>;

@@ -11,6 +11,12 @@ import type {
   TenantContext,
 } from "../domain/types.ts";
 import { jwkThumbprint } from "../crypto/thumbprint.ts";
+import {
+  approvalTransaction,
+  bootstrapTransaction,
+  enrollmentTransaction,
+  transactionHash,
+} from "../identity/transactions.ts";
 import { entityKey, ownerPrefix, replayKey } from "./keys.ts";
 import type {
   ApprovalCommit,
@@ -63,14 +69,40 @@ export class MemoryStore implements MetadataStore {
   }
   async putAgent(ctx: TenantContext, value: Agent): Promise<void> {
     this.#owned(ctx, value);
-    this.backend.agents.set(entityKey(ctx, "agent", value.id), structuredClone(value));
+    const thumbprint = await jwkThumbprint(value.publicJwk);
+    if (thumbprint !== value.thumbprint) throw new Error("agent key denied");
+    await this.backend.exclusive(() => {
+      const key = entityKey(ctx, "agent", value.id);
+      if (this.backend.agents.has(key)) throw new Error("agent exists");
+      for (const device of this.backend.devices.values()) {
+        if (
+          device.tenantId === ctx.tenantId && device.userId === ctx.userId &&
+          device.agentId === value.id && device.thumbprint === thumbprint
+        ) throw new Error("agent and device keys must differ");
+      }
+      this.backend.agents.set(key, structuredClone(value));
+    });
   }
   async getAgent(ctx: TenantContext, id: string): Promise<Agent | undefined> {
     return structuredClone(this.backend.agents.get(entityKey(ctx, "agent", id)));
   }
   async putDevice(ctx: TenantContext, value: Device): Promise<void> {
     this.#owned(ctx, value);
-    this.backend.devices.set(entityKey(ctx, "device", value.id), structuredClone(value));
+    const thumbprint = await jwkThumbprint(value.publicJwk);
+    if (thumbprint !== value.thumbprint) throw new Error("device key denied");
+    await this.backend.exclusive(async () => {
+      const key = entityKey(ctx, "device", value.id);
+      if (this.backend.devices.has(key)) throw new Error("device exists");
+      const agent = this.backend.agents.get(entityKey(ctx, "agent", value.agentId));
+      const agentThumbprint = agent ? await jwkThumbprint(agent.publicJwk) : undefined;
+      if (
+        !agent || agentThumbprint !== agent.thumbprint ||
+        agentThumbprint === thumbprint
+      ) {
+        throw new Error("agent and device keys must differ");
+      }
+      this.backend.devices.set(key, structuredClone(value));
+    });
   }
   async getDevice(ctx: TenantContext, id: string): Promise<Device | undefined> {
     return structuredClone(this.backend.devices.get(entityKey(ctx, "device", id)));
@@ -138,7 +170,6 @@ export class MemoryStore implements MetadataStore {
   async commitBootstrap(
     ctx: TenantContext,
     challengeId: string,
-    hash: string,
     value: BootstrapCommit,
     now: number,
   ): Promise<boolean> {
@@ -146,13 +177,25 @@ export class MemoryStore implements MetadataStore {
     this.#owned(ctx, value.agent);
     this.#owned(ctx, value.device);
     return await this.backend.exclusive(async () => {
-      const agentThumbprint = await jwkThumbprint(value.agent.publicJwk);
-      const deviceThumbprint = await jwkThumbprint(value.device.publicJwk);
+      const transaction = await bootstrapTransaction(
+        ctx,
+        value.principal,
+        value.agent,
+        value.device,
+      );
+      const hash = await transactionHash(transaction);
       if (
-        agentThumbprint !== value.agent.thumbprint ||
-        deviceThumbprint !== value.device.thumbprint ||
-        agentThumbprint === deviceThumbprint ||
+        value.principal.id !== ctx.userId || value.principal.tenantId !== ctx.tenantId ||
+        value.principal.kind !== "cryptographic" || value.principal.emailRequired !== false ||
+        value.principal.status !== "active" || value.principal.epoch !== 1 ||
+        value.agent.status !== "active" || value.agent.epoch !== 1 ||
+        value.agent.thumbprint !== transaction.agent_jkt ||
+        value.device.agentId !== value.agent.id || value.device.role !== "admin" ||
+        value.device.status !== "active" || value.device.epoch !== 1 ||
+        value.device.thumbprint !== transaction.device_jkt ||
+        transaction.agent_jkt === transaction.device_jkt ||
         this.backend.principals.has(entityKey(ctx, "principal", ctx.userId)) ||
+        this.backend.agents.has(entityKey(ctx, "agent", value.agent.id)) ||
         [...this.backend.devices.keys()].some((key) =>
           key.startsWith(`${ownerPrefix(ctx)}/device/`)
         )
@@ -176,32 +219,33 @@ export class MemoryStore implements MetadataStore {
   async commitEnrollmentRequest(
     ctx: TenantContext,
     challengeId: string,
-    hash: string,
     value: EnrollmentRequestCommit,
     now: number,
   ): Promise<boolean> {
     this.#owned(ctx, value.request);
     return await this.backend.exclusive(async () => {
       const principal = this.backend.principals.get(entityKey(ctx, "principal", ctx.userId));
-      const agent = this.backend.agents.get(
-        entityKey(ctx, "agent", value.request.agentId),
-      );
-      const candidateThumbprint = await jwkThumbprint(value.request.candidateJwk);
+      const agent = this.backend.agents.get(entityKey(ctx, "agent", value.request.agentId));
+      if (!principal || !agent) return false;
+      const agentThumbprint = await jwkThumbprint(agent.publicJwk);
+      const transaction = await enrollmentTransaction(ctx, value.request, principal, agent);
+      const hash = await transactionHash(transaction);
       if (
-        !principal || principal.status !== "active" ||
-        principal.epoch !== value.principalEpoch || !agent || agent.status !== "active" ||
-        agent.epoch !== value.agentEpoch || agent.thumbprint !== value.agentThumbprint ||
-        candidateThumbprint !== value.request.thumbprint ||
-        candidateThumbprint === agent.thumbprint ||
-        value.request.status !== "pending" || value.request.expiresAt <= now ||
+        principal.status !== "active" || principal.epoch !== value.principalEpoch ||
+        agent.status !== "active" || agent.epoch !== value.agentEpoch ||
+        agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
+        transaction.candidate_jkt !== value.request.thumbprint ||
+        transaction.candidate_jkt === agentThumbprint || value.request.status !== "pending" ||
+        value.request.expiresAt <= now || value.request.expiresAt > now + 600 ||
+        transaction.request_id !== value.request.id || transaction.agent_id !== agent.id ||
         [...this.backend.devices.values()].some((device) =>
           device.tenantId === ctx.tenantId && device.userId === ctx.userId &&
           device.thumbprint === value.request.thumbprint
         )
       ) return false;
-      if (!this.#consumeChallenge(ctx, challengeId, hash, "enroll_candidate", now)) return false;
       const key = entityKey(ctx, "enrollment", value.request.id);
       if (this.backend.enrollments.has(key)) return false;
+      if (!this.#consumeChallenge(ctx, challengeId, hash, "enroll_candidate", now)) return false;
       this.backend.enrollments.set(key, structuredClone(value.request));
       return true;
     });
@@ -209,13 +253,11 @@ export class MemoryStore implements MetadataStore {
   async commitApproval(
     ctx: TenantContext,
     challengeId: string,
-    hash: string,
     value: ApprovalCommit,
     now: number,
   ): Promise<boolean> {
     this.#owned(ctx, value.device);
     return await this.backend.exclusive(async () => {
-      if (!this.#consumeChallenge(ctx, challengeId, hash, "approve_enrollment", now)) return false;
       const requestKey = entityKey(ctx, "enrollment", value.requestId);
       const request = this.backend.enrollments.get(requestKey);
       const principal = this.backend.principals.get(entityKey(ctx, "principal", ctx.userId));
@@ -223,25 +265,39 @@ export class MemoryStore implements MetadataStore {
         ? this.backend.agents.get(entityKey(ctx, "agent", request.agentId))
         : undefined;
       const approver = this.backend.devices.get(entityKey(ctx, "device", value.approverId));
-      const requestThumbprint = request ? await jwkThumbprint(request.candidateJwk) : undefined;
+      if (!request || !principal || !agent || !approver) return false;
+      const requestThumbprint = await jwkThumbprint(request.candidateJwk);
       const deviceThumbprint = await jwkThumbprint(value.device.publicJwk);
+      const agentThumbprint = await jwkThumbprint(agent.publicJwk);
+      const approverThumbprint = await jwkThumbprint(approver.publicJwk);
+      const transaction = approvalTransaction(
+        ctx,
+        principal,
+        agent,
+        request,
+        approver,
+        value.device.id,
+      );
+      const hash = await transactionHash(transaction);
       if (
-        !request || request.status !== "pending" || request.expiresAt <= now ||
-        !principal || principal.status !== "active" ||
-        principal.epoch !== value.principalEpoch || !agent || agent.status !== "active" ||
-        agent.epoch !== value.agentEpoch || agent.thumbprint !== value.agentThumbprint ||
+        request.status !== "pending" || request.expiresAt <= now ||
+        principal.status !== "active" || principal.epoch !== value.principalEpoch ||
+        agent.status !== "active" || agent.epoch !== value.agentEpoch ||
+        agentThumbprint !== agent.thumbprint || agent.thumbprint !== value.agentThumbprint ||
         requestThumbprint !== request.thumbprint || deviceThumbprint !== value.device.thumbprint ||
-        requestThumbprint !== deviceThumbprint || deviceThumbprint === agent.thumbprint ||
-        !approver || approver.status !== "active" || approver.role !== "admin" ||
+        requestThumbprint !== deviceThumbprint || deviceThumbprint === agentThumbprint ||
+        approver.status !== "active" || approver.role !== "admin" ||
         approver.agentId !== request.agentId || approver.epoch !== value.approverEpoch ||
+        approverThumbprint !== approver.thumbprint ||
         approver.thumbprint !== value.approverThumbprint ||
-        value.device.agentId !== request.agentId ||
-        value.device.thumbprint !== request.thumbprint ||
-        value.device.role !== "member" || value.device.status !== "active" ||
-        value.device.epoch !== 1 ||
+        approverThumbprint === agentThumbprint ||
+        approverThumbprint === deviceThumbprint || value.device.agentId !== request.agentId ||
+        value.device.thumbprint !== request.thumbprint || value.device.role !== "member" ||
+        value.device.status !== "active" || value.device.epoch !== 1 ||
         JSON.stringify(value.device.publicJwk) !== JSON.stringify(request.candidateJwk) ||
         this.backend.devices.has(entityKey(ctx, "device", value.device.id))
       ) return false;
+      if (!this.#consumeChallenge(ctx, challengeId, hash, "approve_enrollment", now)) return false;
       this.backend.devices.set(
         entityKey(ctx, "device", value.device.id),
         structuredClone(value.device),
@@ -270,7 +326,7 @@ export class MemoryStore implements MetadataStore {
     reason: RevocationEvent["reason"] = "operator",
     at = 0,
   ): Promise<void> {
-    await this.backend.exclusive(() => {
+    await this.backend.exclusive(async () => {
       this.#owned(ctx, {
         tenantId: value.tenantId,
         userId: kind === "principal" ? value.id : value.userId ?? "",
@@ -278,6 +334,19 @@ export class MemoryStore implements MetadataStore {
       const key = entityKey(ctx, kind, value.id);
       const previous = map.get(key);
       if (!previous) throw new Error(`${kind} not found`);
+      if (kind === "agent" || kind === "device") {
+        const priorIdentity = previous as unknown as Agent | Device;
+        const nextIdentity = value as unknown as Agent | Device;
+        const priorThumbprint = await jwkThumbprint(priorIdentity.publicJwk);
+        const nextThumbprint = await jwkThumbprint(nextIdentity.publicJwk);
+        if (
+          priorThumbprint !== priorIdentity.thumbprint ||
+          nextThumbprint !== nextIdentity.thumbprint ||
+          nextThumbprint !== priorThumbprint ||
+          nextIdentity.thumbprint !== priorIdentity.thumbprint ||
+          JSON.stringify(nextIdentity.publicJwk) !== JSON.stringify(priorIdentity.publicJwk)
+        ) throw new Error("identity key rotation denied");
+      }
       const oldVersion = "epoch" in previous
         ? Number(previous.epoch)
         : Number((previous as unknown as Grant).version);

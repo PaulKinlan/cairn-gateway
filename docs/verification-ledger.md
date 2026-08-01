@@ -21,6 +21,16 @@ assumptions. No account, credential, live endpoint, package install, or provider
 | GitHub issuer / tokens        | https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps                               | Reviewed documentation does not establish an RFC 9207 `iss` response parameter guarantee. Token expiry/refresh behavior depends on app settings/features.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | **BLOCKER:** do not assume `iss` or refresh behavior; compensate with one compiled provider/integration and verify before activation.                                                                                                    |
 | GitHub user endpoint          | https://docs.github.com/en/rest/users/users#get-the-authenticated-user                                              | Authenticated-user endpoint is `GET /user`; response contains more data than Cairn should expose.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Verified connector target; Stage 0 projects only five allowlisted fields and never performs the call.                                                                                                                                    |
 
+## Offline authority boundary
+
+Stage 0's executable MCP fixture is created only by a zero-argument composition root. It internally
+constructs one authoritative memory backend/store, invocation service, signer set, custody fixture,
+and system clock. No exported constructor or factory accepts those dependencies. Its public harness
+exposes only bounded authorization, revocation/reactivation, lifetime, and status operations; these
+cannot replace the dependency graph or mint a core over external state. Enrollment commits likewise
+reconstruct canonical transactions and JWK thumbprints inside the authority lock, and Stage 0
+rejects identity-key mutation rather than simulating an unaudited rotation ceremony.
+
 ## Dependency decision
 
 Runtime and tests use only pinned **Deno 2.9.0** Web APIs and local modules. There are no

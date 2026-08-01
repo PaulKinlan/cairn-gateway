@@ -49,6 +49,9 @@ async function boot(backend = new MemoryAuthorityBackend()) {
     deviceId = ids.device("device_a");
   const tx = {
     action: "bootstrap",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    device_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     principal_id: principal.id,
@@ -93,6 +96,8 @@ async function pending(service: DeviceEnrollmentService) {
   };
   const tx = {
     action: "enroll",
+    principal_epoch: 1,
+    agent_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: value.id,
@@ -128,6 +133,9 @@ Deno.test("two service instances sharing authority cannot race bootstrap", async
     did = ids.device("device_a");
   const tx = {
     action: "bootstrap",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    device_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     principal_id: principal.id,
@@ -175,6 +183,9 @@ Deno.test("bootstrap signature rejects substituted agent identity and key", asyn
     rj = await replacement.publicJwk();
   const tx = {
     action: "bootstrap",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    device_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     principal_id: principal.id,
@@ -218,6 +229,10 @@ Deno.test("candidate and approval challenges bind full tenant transaction and co
     approver = (await store.getDevice(ctx, "device_a"))!;
   const tx = {
     action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: "enroll_b",
@@ -259,6 +274,10 @@ Deno.test("approval proof cannot replay across tenant", async () => {
   );
   const tx = {
     action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: "enroll_b",
@@ -329,6 +348,8 @@ Deno.test("enrollment request commit denies agent revocation at linearization", 
   const agent = (await serviceStore(service).getAgent(ctx, value.agentId))!;
   const tx = {
     action: "enroll",
+    principal_epoch: 1,
+    agent_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: value.id,
@@ -349,6 +370,10 @@ Deno.test("approval commit denies revoked agent before linearization", async () 
   const approver = (await store.getDevice(ctx, "device_a"))!, candidateId = ids.device("device_b");
   const tx = {
     action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: "enroll_b",
@@ -386,6 +411,10 @@ Deno.test("approval commit denies revoked principal before linearization", async
   const candidateId = ids.device("device_b");
   const tx = {
     action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: "enroll_b",
@@ -423,6 +452,10 @@ Deno.test("approval commit atomically denies admin revocation race", async () =>
   const approver = (await store.getDevice(ctx, "device_a"))!, candidateId = ids.device("device_b");
   const tx = {
     action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: "enroll_b",
@@ -467,6 +500,10 @@ Deno.test("approval commit denies candidate transaction mutation at linearizatio
   const candidateId = ids.device("device_b");
   const tx = {
     action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: "enroll_b",
@@ -512,11 +549,10 @@ Deno.test("authoritative request recomputes candidate JWK thumbprint", async () 
     override async commitEnrollmentRequest(
       context: TenantContext,
       challengeId: string,
-      hash: string,
       value: EnrollmentRequestCommit,
       at: number,
     ) {
-      return await super.commitEnrollmentRequest(context, challengeId, hash, {
+      return await super.commitEnrollmentRequest(context, challengeId, {
         ...value,
         request: { ...value.request, candidateJwk: replacementJwk },
       }, at);
@@ -535,6 +571,8 @@ Deno.test("authoritative request recomputes candidate JWK thumbprint", async () 
   const candidateJkt = await jwkThumbprint(candidateJwk);
   const tx = {
     action: "enroll",
+    principal_epoch: 1,
+    agent_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: value.id,
@@ -550,6 +588,61 @@ Deno.test("authoritative request recomputes candidate JWK thumbprint", async () 
     "denied",
   );
   equals(await serviceStore(service).getEnrollment(ctx, value.id), undefined);
+});
+
+Deno.test("authoritative request reconstructs signed expiry and request id", async () => {
+  for (const mutation of ["expiry", "request-id"] as const) {
+    const backend = new MemoryAuthorityBackend();
+    await boot(backend);
+    class MutatingSignedRequestStore extends MemoryStore {
+      override async commitEnrollmentRequest(
+        context: TenantContext,
+        challengeId: string,
+        value: EnrollmentRequestCommit,
+        at: number,
+      ) {
+        return await super.commitEnrollmentRequest(context, challengeId, {
+          ...value,
+          request: {
+            ...value.request,
+            ...(mutation === "expiry"
+              ? { expiresAt: value.request.expiresAt + 50 }
+              : { id: `${value.request.id}_substituted` }),
+          },
+        }, at);
+      }
+    }
+    const service = new DeviceEnrollmentService(new MutatingSignedRequestStore(backend));
+    const candidate = await fixtureDeviceSigner(1), candidateJwk = await candidate.publicJwk();
+    const value = {
+      id: `signed_${mutation}`,
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentId: ids.agent("agent_a"),
+      candidateJwk,
+      expiresAt: now + 500,
+    };
+    const candidateJkt = await jwkThumbprint(candidateJwk);
+    const tx = {
+      action: "enroll",
+      principal_epoch: 1,
+      agent_epoch: 1,
+      tenant_id: ctx.tenantId,
+      user_id: ctx.userId,
+      request_id: value.id,
+      agent_id: value.agentId,
+      agent_jkt: (await serviceStore(service).getAgent(ctx, value.agentId))!.thumbprint,
+      candidate_jkt: candidateJkt,
+      expires_at: value.expiresAt,
+    };
+    const challenge = await service.requestChallenge(ctx, value, now);
+    const signed = await proof(candidate, tx, challenge);
+    await rejects(
+      () => service.request(ctx, value, signed, now),
+      "denied",
+    );
+    equals(await serviceStore(service).getEnrollment(ctx, value.id), undefined);
+  }
 });
 
 Deno.test("agent key cannot be enrolled as a device key", async () => {
@@ -581,6 +674,10 @@ Deno.test("approval recomputes stored candidate JWK thumbprint", async () => {
   const candidateId = ids.device("device_b");
   const tx = {
     action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: "enroll_b",
@@ -617,6 +714,56 @@ Deno.test("approval recomputes stored candidate JWK thumbprint", async () => {
   equals(await store.getDevice(ctx, candidateId), undefined);
 });
 
+Deno.test("approval authoritatively recomputes the admin JWK thumbprint", async () => {
+  const backend = new MemoryAuthorityBackend();
+  const { store, service, agent } = await boot(backend);
+  const { candidateJkt, result } = await pending(service);
+  const approver = (await store.getDevice(ctx, "device_a"))!;
+  const approverKey = [...backend.devices.keys()].find((key) => key.endsWith("/device_a"))!;
+  backend.devices.set(approverKey, { ...approver, publicJwk: await agent.publicJwk() });
+  const candidateId = ids.device("device_admin_jwk_negative");
+  const tx = {
+    action: "approve_enrollment",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    approver_epoch: 1,
+    candidate_epoch: 1,
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    request_id: "enroll_b",
+    approver_id: approver.id,
+    approver_jkt: approver.thumbprint,
+    agent_id: ids.agent("agent_a"),
+    candidate_id: candidateId,
+    candidate_jkt: candidateJkt,
+    fingerprint: result.fingerprint,
+    expires_at: now + 600,
+  };
+  const challenge = await service.approvalChallenge(
+    ctx,
+    "enroll_b",
+    approver.id,
+    candidateId,
+    result.fingerprint,
+    now,
+  );
+  const signed = await proof(agent, tx, challenge);
+  await rejects(
+    () =>
+      service.approve(
+        ctx,
+        "enroll_b",
+        approver.id,
+        candidateId,
+        result.fingerprint,
+        signed,
+        now,
+      ),
+    "denied",
+  );
+  equals(await store.getDevice(ctx, candidateId), undefined);
+});
+
 Deno.test("authoritative bootstrap recomputes both key thumbprints and roles", async () => {
   const agent = await fixtureAgentSigner();
   const agentJwk = await agent.publicJwk();
@@ -624,11 +771,10 @@ Deno.test("authoritative bootstrap recomputes both key thumbprints and roles", a
     override async commitBootstrap(
       context: TenantContext,
       challengeId: string,
-      hash: string,
       value: BootstrapCommit,
       at: number,
     ) {
-      return await super.commitBootstrap(context, challengeId, hash, {
+      return await super.commitBootstrap(context, challengeId, {
         ...value,
         device: { ...value.device, publicJwk: agentJwk },
       }, at);
@@ -641,6 +787,9 @@ Deno.test("authoritative bootstrap recomputes both key thumbprints and roles", a
   const agentId = ids.agent("agent_a"), deviceId = ids.device("device_a");
   const tx = {
     action: "bootstrap",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    device_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     principal_id: principal.id,
@@ -687,11 +836,10 @@ Deno.test("authoritative candidate commit denies agent thumbprint role collapse"
     override async commitEnrollmentRequest(
       context: TenantContext,
       challengeId: string,
-      hash: string,
       value: EnrollmentRequestCommit,
       at: number,
     ) {
-      return await super.commitEnrollmentRequest(context, challengeId, hash, {
+      return await super.commitEnrollmentRequest(context, challengeId, {
         ...value,
         request: {
           ...value.request,
@@ -713,6 +861,8 @@ Deno.test("authoritative candidate commit denies agent thumbprint role collapse"
   };
   const tx = {
     action: "enroll",
+    principal_epoch: 1,
+    agent_epoch: 1,
     tenant_id: ctx.tenantId,
     user_id: ctx.userId,
     request_id: value.id,

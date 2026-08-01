@@ -23,7 +23,7 @@ import { runMcpContractGate } from "../../scripts/mcp_contract_gate.ts";
 import { MemoryCustodyFixture } from "../../packages/core/src/custody/memory_fixture.ts";
 import { MemorySafeLogger } from "../../packages/core/src/logging/safe_logger.ts";
 import { InvocationService } from "../../packages/core/src/policy/invocation.ts";
-import { FixtureLocalMcpBridge } from "../../packages/mcp-bridge/mod.ts";
+import { createFixtureGatewayHarness } from "../../packages/mcp-bridge/mod.ts";
 import sdkFixture from "../fixtures/mcp-sdk-1.30.0-minimal-schema.json" with { type: "json" };
 
 const now = 2_000_000_000;
@@ -40,7 +40,7 @@ const modern = (name: string, args: Record<string, unknown> = {}) => ({
     capabilities: {},
   },
 });
-async function environment(expiresAt = now + 600, clock = { value: now }) {
+async function environment(expiresAt = now + 600) {
   const store = new MemoryStore();
   const device = await fixtureDeviceSigner(0), agent = await fixtureAgentSigner();
   const dj = await device.publicJwk(), aj = await agent.publicJwk();
@@ -122,32 +122,15 @@ async function environment(expiresAt = now + 600, clock = { value: now }) {
     custody,
     new MemorySafeLogger(),
   );
-  return {
-    store,
-    service,
-    device,
-    agent,
-    bridge: new FixtureLocalMcpBridge(
-      store,
-      service,
-      ctx,
-      "grant_a",
-      device,
-      agent,
-      "fixture.cairn.invalid",
-      () => clock.value,
-    ),
-  };
+  return { store, service, device, agent };
 }
 async function authorized(
   body: unknown,
   path: "/mcp" | "/mcp/legacy" = "/mcp",
-  expiresAt = now + 600,
-  clock = { value: now },
 ) {
-  const env = await environment(expiresAt, clock);
+  const harness = await createFixtureGatewayHarness();
   const bytes = encoder.encode(JSON.stringify(body));
-  return { ...env, bytes, ...(await env.bridge.authorize(bytes, now, path)) };
+  return { harness, bytes, ...(await harness.authorize(bytes, path)) };
 }
 Deno.test("vendored official SDK fixture and all closed schemas are executable", () => {
   equals(sdkFixture.provenance.version, "1.30.0");
@@ -310,10 +293,15 @@ Deno.test("every tool uses operation-time expiry and epoch snapshots", async () 
       arguments: {},
     }),
   ];
+  const expiring = [];
   for (const request of requests) {
-    const clock = { value: now };
-    const expired = await authorized(request, "/mcp", now + 1, clock);
-    clock.value = now + 1;
+    const harness = await createFixtureGatewayHarness();
+    await harness.setGrantLifetime(1);
+    const bytes = encoder.encode(JSON.stringify(request));
+    expiring.push({ harness, bytes, ...(await harness.authorize(bytes)) });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+  for (const expired of expiring) {
     const denied = await handleFixtureMcp(
       expired.bytes,
       MCP_CURRENT,
@@ -327,36 +315,9 @@ Deno.test("every tool uses operation-time expiry and epoch snapshots", async () 
     );
   }
   const request = modern("search_capabilities", { query: "github" });
-  const mutations = [
-    async (env: Awaited<ReturnType<typeof authorized>>) => {
-      const value = (await env.store.getPrincipal(ctx, ctx.userId))!;
-      await env.store.updatePrincipal(ctx, { ...value, status: "revoked", epoch: 2 });
-      await env.store.updatePrincipal(ctx, { ...value, status: "active", epoch: 3 });
-    },
-    async (env: Awaited<ReturnType<typeof authorized>>) => {
-      const value = (await env.store.getAgent(ctx, "agent_a"))!;
-      await env.store.updateAgent(ctx, { ...value, status: "revoked", epoch: 2 });
-      await env.store.updateAgent(ctx, { ...value, status: "active", epoch: 3 });
-    },
-    async (env: Awaited<ReturnType<typeof authorized>>) => {
-      const value = (await env.store.getDevice(ctx, "device_a"))!;
-      await env.store.updateDevice(ctx, { ...value, status: "revoked", epoch: 2 });
-      await env.store.updateDevice(ctx, { ...value, status: "active", epoch: 3 });
-    },
-    async (env: Awaited<ReturnType<typeof authorized>>) => {
-      const value = (await env.store.getGrant(ctx, "grant_a"))!;
-      await env.store.updateGrant(ctx, { ...value, status: "revoked", version: 2 });
-      await env.store.updateGrant(ctx, { ...value, status: "active", version: 3 });
-    },
-    async (env: Awaited<ReturnType<typeof authorized>>) => {
-      const value = (await env.store.getConnection(ctx, "connection_a"))!;
-      await env.store.updateConnection(ctx, { ...value, status: "revoked", epoch: 2 });
-      await env.store.updateConnection(ctx, { ...value, status: "active", epoch: 3 });
-    },
-  ];
-  for (const mutate of mutations) {
+  for (const subject of ["principal", "agent", "device", "grant", "connection"] as const) {
     const stale = await authorized(request);
-    await mutate(stale);
+    await stale.harness.revokeAndReactivate(subject);
     const denied = await handleFixtureMcp(
       stale.bytes,
       MCP_CURRENT,
@@ -502,7 +463,45 @@ Deno.test("trusted policy brand has no public mint", async () => {
   assert(!("PolicyMcpCore" in policyExports));
   assert(!("createPolicyMcpCore" in bridgeExports));
   assert(!("PolicyMcpCore" in bridgeExports));
+  assert(!("FixtureLocalMcpBridge" in bridgeExports));
+  assert(!("BoundFixtureBridge" in bridgeExports));
 });
+Deno.test("public composition root cannot substitute authority dependencies after revocation", async () => {
+  equals(createFixtureGatewayHarness.length, 0);
+  const requests = [
+    modern("search_capabilities", { query: "github" }),
+    modern("describe_operation", { operation: "github.user.read@v1" }),
+    modern("connection_status", { connection: "connection_a" }),
+    modern("invoke_operation", {
+      operation: "github.user.read@v1",
+      connection: "connection_a",
+      arguments: {},
+    }),
+  ];
+  for (const request of requests) {
+    const harness = await createFixtureGatewayHarness();
+    const bytes = encoder.encode(JSON.stringify(request));
+    const { auth, core } = await harness.authorize(bytes);
+    await harness.revoke("grant");
+    const ignoredExternalDependencies = {
+      store: new MemoryStore(),
+      service: {},
+      clock: () => 0,
+      now: 0,
+      authority: {},
+    };
+    const attemptedFactory = createFixtureGatewayHarness as unknown as (
+      ...values: unknown[]
+    ) => Promise<unknown>;
+    await attemptedFactory(ignoredExternalDependencies);
+    const denied = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", auth, core);
+    equals(
+      (denied!.result as { structuredContent: { category: string } }).structuredContent.category,
+      "policy_denied",
+    );
+  }
+});
+
 Deno.test("MCP contract gate consumes notification and call-result fixture fields", () => {
   runMcpContractGate(structuredClone(sdkFixture), true);
   for (
@@ -525,7 +524,10 @@ Deno.test("MCP contract gate consumes notification and call-result fixture field
     assert(rejected);
   }
 });
-Deno.test("expired grant cannot authenticate", async () => {
+Deno.test("revoked grant cannot authenticate", async () => {
   const request = modern("search_capabilities", { query: "github" });
-  await rejects(() => authorized(request, "/mcp", now), "grant denied");
+  const harness = await createFixtureGatewayHarness();
+  await harness.revoke("grant");
+  const bytes = encoder.encode(JSON.stringify(request));
+  await rejects(() => harness.authorize(bytes), "grant denied");
 });

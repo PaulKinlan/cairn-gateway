@@ -211,3 +211,45 @@ Deno.test("epochs and versions cannot roll back or reactivate stale state", asyn
     "increase",
   );
 });
+
+Deno.test("raw identity writes cannot drift or rotate JWK thumbprints", async () => {
+  const store = new MemoryStore();
+  const { agent, device } = await seed(store);
+  const replacement = await fixtureDeviceSigner(1), replacementJwk = await replacement.publicJwk();
+  const replacementThumbprint = await jwkThumbprint(replacementJwk);
+  await rejects(
+    () =>
+      store.updateAgent(ctx, {
+        ...agent,
+        publicJwk: replacementJwk,
+        thumbprint: replacementThumbprint,
+        epoch: 2,
+      }),
+    "rotation denied",
+  );
+  await rejects(
+    () =>
+      store.updateDevice(ctx, {
+        ...device,
+        publicJwk: replacementJwk,
+        thumbprint: replacementThumbprint,
+        epoch: 2,
+      }),
+    "rotation denied",
+  );
+  const malformed = new MemoryStore();
+  await rejects(
+    () => malformed.putAgent(ctx, { ...agent, publicJwk: replacementJwk }),
+    "agent key denied",
+  );
+  await rejects(
+    () =>
+      store.putDevice(ctx, {
+        ...device,
+        id: ids.device("device_role_collapse"),
+        publicJwk: agent.publicJwk,
+        thumbprint: agent.thumbprint,
+      }),
+    "keys must differ",
+  );
+});
