@@ -14,6 +14,7 @@ import { entityKey, ownerPrefix, replayKey } from "./keys.ts";
 import type {
   ApprovalCommit,
   BootstrapCommit,
+  EnrollmentRequestCommit,
   InvocationBinding,
   InvocationDecision,
   MetadataStore,
@@ -127,7 +128,7 @@ export class MemoryStore implements MetadataStore {
     const challenge = this.backend.challenges.get(key);
     if (
       !challenge || challenge.used || challenge.purpose !== purpose ||
-      challenge.transactionHash !== hash || challenge.expiresAt < now
+      challenge.transactionHash !== hash || challenge.expiresAt <= now
     ) return undefined;
     challenge.used = true;
     this.backend.challenges.set(key, challenge);
@@ -170,15 +171,29 @@ export class MemoryStore implements MetadataStore {
     ctx: TenantContext,
     challengeId: string,
     hash: string,
-    value: EnrollmentRequest,
+    value: EnrollmentRequestCommit,
     now: number,
   ): Promise<boolean> {
-    this.#owned(ctx, value);
+    this.#owned(ctx, value.request);
     return await this.backend.exclusive(() => {
+      const principal = this.backend.principals.get(entityKey(ctx, "principal", ctx.userId));
+      const agent = this.backend.agents.get(
+        entityKey(ctx, "agent", value.request.agentId),
+      );
+      if (
+        !principal || principal.status !== "active" ||
+        principal.epoch !== value.principalEpoch || !agent || agent.status !== "active" ||
+        agent.epoch !== value.agentEpoch || agent.thumbprint !== value.agentThumbprint ||
+        value.request.status !== "pending" || value.request.expiresAt <= now ||
+        [...this.backend.devices.values()].some((device) =>
+          device.tenantId === ctx.tenantId && device.userId === ctx.userId &&
+          device.thumbprint === value.request.thumbprint
+        )
+      ) return false;
       if (!this.#consumeChallenge(ctx, challengeId, hash, "enroll_candidate", now)) return false;
-      const key = entityKey(ctx, "enrollment", value.id);
+      const key = entityKey(ctx, "enrollment", value.request.id);
       if (this.backend.enrollments.has(key)) return false;
-      this.backend.enrollments.set(key, structuredClone(value));
+      this.backend.enrollments.set(key, structuredClone(value.request));
       return true;
     });
   }
@@ -194,8 +209,24 @@ export class MemoryStore implements MetadataStore {
       if (!this.#consumeChallenge(ctx, challengeId, hash, "approve_enrollment", now)) return false;
       const requestKey = entityKey(ctx, "enrollment", value.requestId);
       const request = this.backend.enrollments.get(requestKey);
+      const principal = this.backend.principals.get(entityKey(ctx, "principal", ctx.userId));
+      const agent = request
+        ? this.backend.agents.get(entityKey(ctx, "agent", request.agentId))
+        : undefined;
+      const approver = this.backend.devices.get(entityKey(ctx, "device", value.approverId));
       if (
-        !request || request.status !== "pending" || request.expiresAt < now ||
+        !request || request.status !== "pending" || request.expiresAt <= now ||
+        !principal || principal.status !== "active" ||
+        principal.epoch !== value.principalEpoch || !agent || agent.status !== "active" ||
+        agent.epoch !== value.agentEpoch || agent.thumbprint !== value.agentThumbprint ||
+        !approver || approver.status !== "active" || approver.role !== "admin" ||
+        approver.agentId !== request.agentId || approver.epoch !== value.approverEpoch ||
+        approver.thumbprint !== value.approverThumbprint ||
+        value.device.agentId !== request.agentId ||
+        value.device.thumbprint !== request.thumbprint ||
+        value.device.role !== "member" || value.device.status !== "active" ||
+        value.device.epoch !== 1 ||
+        JSON.stringify(value.device.publicJwk) !== JSON.stringify(request.candidateJwk) ||
         this.backend.devices.has(entityKey(ctx, "device", value.device.id))
       ) return false;
       this.backend.devices.set(
@@ -366,7 +397,7 @@ export class MemoryStore implements MetadataStore {
         !grant || grant.status !== "active" || grant.version !== b.grantVersion ||
         grant.agentId !== b.agentId || grant.deviceId !== b.deviceId ||
         grant.connectionId !== b.connectionId || grant.operation !== b.operation ||
-        grant.expiresAt < b.now
+        grant.expiresAt <= b.now
       ) return { ok: false, reason: "grant inactive" };
       if (!connection || connection.status !== "active" || connection.epoch !== b.connectionEpoch) {
         return { ok: false, reason: "connection inactive" };

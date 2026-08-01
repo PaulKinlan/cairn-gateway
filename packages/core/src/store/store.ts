@@ -34,9 +34,21 @@ export interface BootstrapCommit {
   agent: Agent;
   device: Device;
 }
+export interface EnrollmentRequestCommit {
+  request: EnrollmentRequest;
+  principalEpoch: number;
+  agentEpoch: number;
+  agentThumbprint: string;
+}
 export interface ApprovalCommit {
   requestId: string;
   device: Device;
+  principalEpoch: number;
+  agentEpoch: number;
+  agentThumbprint: string;
+  approverId: string;
+  approverEpoch: number;
+  approverThumbprint: string;
 }
 
 export interface MetadataStore {
@@ -65,7 +77,7 @@ export interface MetadataStore {
     ctx: TenantContext,
     challengeId: string,
     transactionHash: string,
-    value: EnrollmentRequest,
+    value: EnrollmentRequestCommit,
     now: number,
   ): Promise<boolean>;
   commitApproval(

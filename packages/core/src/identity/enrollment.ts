@@ -165,12 +165,20 @@ export class DeviceEnrollmentService {
       thumbprint: tx.candidate_jkt,
       status: "pending",
     };
+    const principal = await this.store.getPrincipal(ctx, ctx.userId);
+    const agent = await this.store.getAgent(ctx, request.agentId);
+    if (!principal || !agent) throw new Error("enrollment authority denied");
     if (
       !await this.store.commitEnrollmentRequest(
         ctx,
         proof.challenge,
         await transactionHash(tx),
-        request,
+        {
+          request,
+          principalEpoch: principal.epoch,
+          agentEpoch: agent.epoch,
+          agentThumbprint: agent.thumbprint,
+        },
         now,
       )
     ) throw new Error("enrollment challenge denied or consumed");
@@ -238,8 +246,12 @@ export class DeviceEnrollmentService {
       now,
     );
     const request = await this.store.getEnrollment(ctx, requestId),
-      approver = await this.store.getDevice(ctx, approverId);
-    if (!request || !approver) throw new Error("enrollment approval denied");
+      approver = await this.store.getDevice(ctx, approverId),
+      principal = await this.store.getPrincipal(ctx, ctx.userId),
+      agent = request ? await this.store.getAgent(ctx, request.agentId) : undefined;
+    if (!request || !approver || !principal || !agent) {
+      throw new Error("enrollment approval denied");
+    }
     await verifyPossession(approver.publicJwk, { ...tx, challenge: proof.challenge }, proof);
     const device: Device = {
       id: candidateId,
@@ -256,6 +268,12 @@ export class DeviceEnrollmentService {
       !await this.store.commitApproval(ctx, proof.challenge, await transactionHash(tx), {
         requestId,
         device,
+        principalEpoch: principal.epoch,
+        agentEpoch: agent.epoch,
+        agentThumbprint: agent.thumbprint,
+        approverId,
+        approverEpoch: approver.epoch,
+        approverThumbprint: approver.thumbprint,
       }, now)
     ) throw new Error("enrollment approval denied or consumed");
     return device;
@@ -272,7 +290,7 @@ export class DeviceEnrollmentService {
     const request = await this.store.getEnrollment(ctx, requestId),
       approver = await this.store.getDevice(ctx, approverId);
     if (
-      !request || request.status !== "pending" || request.expiresAt < now || !approver ||
+      !request || request.status !== "pending" || request.expiresAt <= now || !approver ||
       approver.status !== "active" || approver.role !== "admin" ||
       shortFingerprint(request.thumbprint) !== fingerprint || approver.agentId !== request.agentId
     ) throw new Error("enrollment approval denied");

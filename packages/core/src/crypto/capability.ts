@@ -120,7 +120,7 @@ function validateClaims(claims: CapabilityClaims, now: number): void {
     !claims.cnf || !exactKeys(claims.cnf as unknown as Record<string, unknown>, ["jkt"]) ||
     typeof claims.cnf.jkt !== "string" || claims.exp - claims.iat > 300 ||
     claims.exp <= claims.iat ||
-    claims.nbf < claims.iat || now < claims.nbf - 30 || now > claims.exp ||
+    claims.nbf < claims.iat || now < claims.nbf - 30 || now >= claims.exp ||
     !Number.isInteger(claims.iat) || !Number.isInteger(claims.nbf) || !Number.isInteger(claims.exp)
   ) {
     throw new Error("invalid capability");

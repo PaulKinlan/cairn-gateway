@@ -1,4 +1,6 @@
-import { isVerifiedMcpAuth, type VerifiedMcpAuth } from "./mcp_auth.ts";
+import { consumeVerifiedMcpAuth, isVerifiedMcpAuth, type VerifiedMcpAuth } from "./mcp_auth.ts";
+import { isTrustedPolicyMcpCore } from "./policy_core.ts";
+import { validatesSchema } from "./json_schema.ts";
 export const MCP_CURRENT = "2026-07-28" as const;
 export const MCP_LEGACY = "2025-06-18" as const;
 export const TOOL_NAMES = Object.freeze(
@@ -6,18 +8,6 @@ export const TOOL_NAMES = Object.freeze(
 );
 export type ToolName = typeof TOOL_NAMES[number];
 export type Structured = Record<string, unknown>;
-export interface McpCore {
-  accepts(auth: VerifiedMcpAuth): boolean;
-  search(query: string): Promise<Structured>;
-  describe(operation: string): Promise<Structured>;
-  invoke(
-    operation: string,
-    connection: string,
-    args: unknown,
-    receivedBody: Uint8Array,
-  ): Promise<Structured>;
-  status(connection: string): Promise<Structured>;
-}
 export class LegacyMcpSession {
   #state: "new" | "negotiating" | "ready" = "new";
   begin(): boolean {
@@ -46,7 +36,7 @@ const emptyArgumentsSchema = Object.freeze({
   properties: Object.freeze({}),
   additionalProperties: false,
 });
-const schemas: Record<ToolName, Record<string, unknown>> = {
+export const INPUT_SCHEMAS: Record<ToolName, Record<string, unknown>> = {
   search_capabilities: {
     type: "object",
     properties: { query: { type: "string", minLength: 1, maxLength: 200 } },
@@ -186,11 +176,16 @@ export const TOOLS = Object.freeze(
     Object.freeze({
       name,
       description: name.replaceAll("_", " "),
-      inputSchema: schemas[name],
+      inputSchema: INPUT_SCHEMAS[name],
       outputSchema: OUTPUT_SCHEMAS[name],
     })
   ),
 );
+export const LEGACY_INITIALIZE_RESULT = Object.freeze({
+  protocolVersion: MCP_LEGACY,
+  capabilities: Object.freeze({ tools: Object.freeze({}) }),
+  serverInfo: Object.freeze({ name: "cairn-fixture", version: "0.0.0-stage0" }),
+});
 const rpcError = (id: string | number | null, code: number, message: string) => ({
   jsonrpc: "2.0",
   id,
@@ -202,8 +197,9 @@ export async function handleFixtureMcp(
   headerRevision: string,
   route: "/mcp" | "/mcp/legacy",
   auth: VerifiedMcpAuth,
-  core: McpCore,
+  core: unknown,
   legacySession?: LegacyMcpSession,
+  authority = "fixture.cairn.invalid",
 ): Promise<Record<string, unknown> | undefined> {
   if (!isVerifiedMcpAuth(auth) || Array.isArray(body) || !body || typeof body !== "object") {
     return rpcError(null, -32600, "request denied");
@@ -216,7 +212,10 @@ export async function handleFixtureMcp(
   ) {
     return rpcError(id, -32600, "protocol denied");
   }
-  if (!core.accepts(auth)) return rpcError(id, -32600, "authentication binding denied");
+  if (
+    !isTrustedPolicyMcpCore(core, auth) ||
+    !await consumeVerifiedMcpAuth(auth, { receivedBody, authority, path: route })
+  ) return rpcError(id, -32600, "authentication binding denied");
 
   if (route === "/mcp/legacy") {
     if (!legacySession) return rpcError(id, -32002, "legacy session required");
@@ -227,11 +226,7 @@ export async function handleFixtureMcp(
       return {
         jsonrpc: "2.0",
         id: request.id,
-        result: {
-          protocolVersion: MCP_LEGACY,
-          capabilities: { tools: {} },
-          serverInfo: { name: "cairn-fixture", version: "0.0.0-stage0" },
-        },
+        result: LEGACY_INITIALIZE_RESULT,
       };
     }
     if (request.method === "notifications/initialized") {
@@ -340,58 +335,6 @@ function validInput(name: ToolName, value: unknown): boolean {
 function validId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 128;
 }
-function validOutput(name: ToolName, value: unknown): value is Structured {
-  if (!plainObject(value)) return false;
-  if (
-    exactKeys(value, ["outcome", "category"]) && value.outcome === "denied" &&
-    ["invalid_input", "policy_denied", "invalid_output"].includes(String(value.category))
-  ) return true;
-  if (name === "search_capabilities") {
-    if (!exactKeys(value, ["operations", "count"]) || !Array.isArray(value.operations)) {
-      return false;
-    }
-    if (value.count !== value.operations.length || ![0, 1].includes(Number(value.count))) {
-      return false;
-    }
-    return value.operations.every((item) =>
-      plainObject(item) && exactKeys(item, ["id", "connection"]) &&
-      item.id === "github.user.read@v1" && validId(item.connection)
-    );
-  }
-  if (name === "describe_operation") {
-    return exactKeys(value, ["id", "provider", "inputSchema", "requestUnits"]) &&
-      value.id === "github.user.read@v1" && value.provider === "github" &&
-      value.requestUnits === 1 &&
-      JSON.stringify(value.inputSchema) === JSON.stringify(emptyArgumentsSchema);
-  }
-  if (name === "connection_status") {
-    return exactKeys(value, ["connection", "status", "operation"]) && validId(value.connection) &&
-      value.status === "active" && value.operation === "github.user.read@v1";
-  }
-  if (!exactKeys(value, ["outcome", "receipt"], ["user"])) return false;
-  if (
-    ![
-      "success",
-      "auth_required",
-      "rate_limited",
-      "provider_denied",
-      "provider_unavailable",
-    ].includes(String(value.outcome)) || !validReceipt(value.receipt)
-  ) return false;
-  if (value.outcome !== "success") return !("user" in value);
-  return validUser(value.user);
-}
-function validReceipt(value: unknown): boolean {
-  return plainObject(value) && exactKeys(value, ["decision", "reason", "requestUnits"]) &&
-    ["allow", "deny", "error"].includes(String(value.decision)) &&
-    typeof value.reason === "string" && value.reason.length > 0 && value.reason.length <= 64 &&
-    (value.requestUnits === 0 || value.requestUnits === 1);
-}
-function validUser(value: unknown): boolean {
-  return plainObject(value) &&
-    exactKeys(value, ["id", "login", "name", "html_url", "avatar_url"]) &&
-    Number.isSafeInteger(value.id) && typeof value.login === "string" &&
-    value.login.length <= 100 &&
-    (value.name === null || typeof value.name === "string") &&
-    typeof value.html_url === "string" && typeof value.avatar_url === "string";
+export function validOutput(name: ToolName, value: unknown): value is Structured {
+  return validatesSchema(OUTPUT_SCHEMAS[name], value);
 }

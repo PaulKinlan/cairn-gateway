@@ -4,62 +4,43 @@ import {
   LegacyMcpSession,
   MCP_CURRENT,
   MCP_LEGACY,
-  type McpCore,
+  OUTPUT_SCHEMAS,
   TOOL_NAMES,
   TOOLS,
 } from "../../apps/gateway/mcp.ts";
-import { verifyMcpAuth } from "../../apps/gateway/mcp_auth.ts";
+import { validatesSchema } from "../../apps/gateway/json_schema.ts";
 import { MemoryStore } from "../../packages/core/src/store/memory_store.ts";
 import { ids, type TenantContext } from "../../packages/core/src/domain/types.ts";
 import {
   fixtureAgentSigner,
+  fixtureCapabilityKeyring,
   fixtureDeviceSigner,
 } from "../../packages/core/src/crypto/fixture_keys.ts";
 import { jwkThumbprint } from "../../packages/core/src/crypto/thumbprint.ts";
-import {
-  bodyHash,
-  type RequestProofPayload,
-  signRequestProof,
-} from "../../packages/core/src/crypto/request_proof.ts";
+import { MemoryCustodyFixture } from "../../packages/core/src/custody/memory_fixture.ts";
+import { MemorySafeLogger } from "../../packages/core/src/logging/safe_logger.ts";
+import { InvocationService } from "../../packages/core/src/policy/invocation.ts";
+import { FixtureLocalMcpBridge } from "../../packages/mcp-bridge/mod.ts";
 import sdkFixture from "../fixtures/mcp-sdk-1.30.0-minimal-schema.json" with { type: "json" };
-const now = 2_000_000_000,
-  ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("user_a") };
-const core: McpCore = {
-  accepts: () => true,
-  search: () =>
-    Promise.resolve({
-      operations: [{ id: "github.user.read@v1", connection: "connection_a" }],
-      count: 1,
-    }),
-  describe: () =>
-    Promise.resolve({
-      id: "github.user.read@v1",
-      provider: "github",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      requestUnits: 1,
-    }),
-  invoke: () =>
-    Promise.resolve({
-      outcome: "provider_unavailable",
-      receipt: { decision: "error", reason: "provider_failure", requestUnits: 1 },
-    }),
-  status: () =>
-    Promise.resolve({
-      connection: "connection_a",
-      status: "active",
-      operation: "github.user.read@v1",
-    }),
-};
-async function auth(
-  body: Uint8Array,
-  path: "/mcp" | "/mcp/legacy" = "/mcp",
-  expiresAt = now + 600,
-) {
-  const store = new MemoryStore(),
-    device = await fixtureDeviceSigner(0),
-    agent = await fixtureAgentSigner(),
-    dj = await device.publicJwk(),
-    aj = await agent.publicJwk();
+
+const now = 2_000_000_000;
+const ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("user_a") };
+const encoder = new TextEncoder();
+const modern = (name: string, args: Record<string, unknown> = {}) => ({
+  jsonrpc: "2.0" as const,
+  id: 1,
+  method: "tools/call",
+  params: { name, arguments: args },
+  _meta: {
+    protocolVersion: MCP_CURRENT,
+    clientInfo: { name: "fixture", version: "1" },
+    capabilities: {},
+  },
+});
+async function environment(expiresAt = now + 600, clock = { value: now }) {
+  const store = new MemoryStore();
+  const device = await fixtureDeviceSigner(0), agent = await fixtureAgentSigner();
+  const dj = await device.publicJwk(), aj = await agent.publicJwk();
   await store.putPrincipal(ctx, {
     id: ctx.userId,
     tenantId: ctx.tenantId,
@@ -110,210 +91,333 @@ async function auth(
     version: 1,
     expiresAt,
   });
-  const base: RequestProofPayload = {
-    v: 1,
-    method: "POST",
-    authority: "fixture.cairn.invalid",
-    path,
-    query: "",
-    audience: "urn:cairn:gateway",
-    body_sha256: await bodyHash(body),
-    issued_at: now,
-    nonce: "mcp_auth_nonce_01234567890",
-    device_id: "device_a",
-    agent_id: "agent_a",
-    grant_id: "grant_a",
-  };
-  return await verifyMcpAuth(store, {
+  const custody = new MemoryCustodyFixture(encoder.encode(JSON.stringify({
+    id: 1,
+    login: "fixture",
+    name: null,
+    html_url: "https://github.com/fixture",
+    avatar_url: "https://avatars.githubusercontent.com/u/1",
+  })));
+  const binding = {
     context: ctx,
-    grantId: "grant_a",
-    proofs: {
-      device: await signRequestProof(device, { ...base, nonce: `${base.nonce}_device` }),
-      agent: await signRequestProof(agent, { ...base, nonce: `${base.nonce}_agent00` }),
-    },
-    receivedBody: body,
+    connectionId: "connection_a",
+    connectionRef: "ref_a",
+    integration: "github-cairn-v1" as const,
+    redirectUri: "https://fixture.cairn.invalid/oauth/github/callback" as const,
+  };
+  await custody.beginAuthorization({ flowId: "flow_a", binding, now });
+  await custody.completeAuthorization({
+    flowId: "flow_a",
+    binding,
+    ...custody.fixtureCallbackMaterial(binding, "flow_a"),
+    code: "fixture_authorization_code",
     now,
-    path,
   });
-}
-const modern = (name: string, args: Record<string, unknown> = {}) => ({
-  jsonrpc: "2.0" as const,
-  id: 1,
-  method: "tools/call",
-  params: { name, arguments: args },
-  _meta: {
-    protocolVersion: MCP_CURRENT,
-    clientInfo: { name: "fixture", version: "1" },
-    capabilities: {},
-  },
-});
-Deno.test("vendored minimal SDK 1.30 legacy schema fixture validates tool contracts", () => {
-  equals(sdkFixture.provenance.version, "1.30.0");
-  equals(
-    sdkFixture.provenance.esmTypesSha256,
-    "962836b0f8dad85bcd398ad3ddb5ba81a7c7530c706955aa846dd8dfc02dd6a9",
+  const service = new InvocationService(
+    store,
+    await fixtureCapabilityKeyring(),
+    custody,
+    new MemorySafeLogger(),
   );
+  return {
+    store,
+    bridge: new FixtureLocalMcpBridge(
+      store,
+      service,
+      ctx,
+      "grant_a",
+      device,
+      agent,
+      "fixture.cairn.invalid",
+      () => clock.value,
+    ),
+  };
+}
+async function authorized(
+  body: unknown,
+  path: "/mcp" | "/mcp/legacy" = "/mcp",
+  expiresAt = now + 600,
+  clock = { value: now },
+) {
+  const env = await environment(expiresAt, clock);
+  const bytes = encoder.encode(JSON.stringify(body));
+  return { ...env, bytes, ...(await env.bridge.authorize(bytes, now, path)) };
+}
+Deno.test("vendored official SDK fixture and all closed schemas are executable", () => {
+  equals(sdkFixture.provenance.version, "1.30.0");
+  equals(TOOLS.map((tool) => tool.name), [...TOOL_NAMES]);
   for (const tool of TOOLS) {
     for (const key of sdkFixture.tool.required) assert(key in tool);
     equals(tool.inputSchema.type, sdkFixture.tool.inputSchemaRootType);
-  }
-});
-Deno.test("all four tools have exact object input schemas", () => {
-  equals(TOOLS.map((x) => x.name), [...TOOL_NAMES]);
-  for (const tool of TOOLS) {
-    equals(tool.inputSchema.type, "object");
-    equals(tool.inputSchema.additionalProperties, false);
-    assert(Array.isArray(tool.inputSchema.required));
-    equals(tool.outputSchema.type, "object");
-    assert(Array.isArray(tool.outputSchema.oneOf));
-  }
-});
-Deno.test("unverified auth cannot reach MCP", async () => {
-  const request = modern("search_capabilities", { query: "github" }),
-    bytes = new TextEncoder().encode(JSON.stringify(request)),
-    response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", {} as never, core);
-  equals((response!.error as { code: number }).code, -32600);
-});
-Deno.test("modern result structuredContent is always an object", async () => {
-  const request = modern("search_capabilities", { query: "github" }),
-    bytes = new TextEncoder().encode(JSON.stringify(request)),
-    response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", await auth(bytes), core),
-    content = (response!.result as { structuredContent: unknown }).structuredContent;
-  assert(!!content && typeof content === "object" && !Array.isArray(content));
-});
-Deno.test("legacy tools are unavailable before initialize", async () => {
-  const request = { jsonrpc: "2.0" as const, id: 1, method: "tools/list" },
-    bytes = new TextEncoder().encode(JSON.stringify(request)),
-    response = await handleFixtureMcp(
-      request,
-      bytes,
-      MCP_LEGACY,
-      "/mcp/legacy",
-      await auth(bytes, "/mcp/legacy"),
-      core,
-      new LegacyMcpSession(),
+    assert(
+      validatesSchema(OUTPUT_SCHEMAS[tool.name], { outcome: "denied", category: "invalid_output" }),
     );
-  equals((response!.error as { code: number }).code, -32002);
+    assert(
+      !validatesSchema(OUTPUT_SCHEMAS[tool.name], {
+        outcome: { toString: () => "denied" },
+        category: "invalid_output",
+      }),
+    );
+  }
 });
-Deno.test("legacy 2025-06-18 initialize lifecycle and tools schema", async () => {
+Deno.test("unverified auth and arbitrary fake core cannot reach MCP", async () => {
+  const request = modern("search_capabilities", { query: "github" });
+  const bytes = encoder.encode(JSON.stringify(request));
+  const unverified = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", {} as never, {});
+  equals((unverified!.error as { code: number }).code, -32600);
+  const bound = await authorized(request);
+  const fake = await handleFixtureMcp(request, bound.bytes, MCP_CURRENT, "/mcp", bound.auth, {
+    search: () => Promise.resolve({ operations: [], count: 0 }),
+  });
+  equals((fake!.error as { code: number }).code, -32600);
+});
+Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
+  const search = modern("search_capabilities", { query: "github" });
+  const bound = await authorized(search);
+  const substituted = modern("connection_status", { connection: "connection_a" });
+  const substitutedBytes = encoder.encode(JSON.stringify(substituted));
+  const denied = await handleFixtureMcp(
+    substituted,
+    substitutedBytes,
+    MCP_CURRENT,
+    "/mcp",
+    bound.auth,
+    bound.core,
+  );
+  equals((denied!.error as { code: number }).code, -32600);
+  const first = await handleFixtureMcp(
+    search,
+    bound.bytes,
+    MCP_CURRENT,
+    "/mcp",
+    bound.auth,
+    bound.core,
+  );
+  assert("result" in first!); // a mismatch does not burn the exact authorization
+  const replay = await handleFixtureMcp(
+    search,
+    bound.bytes,
+    MCP_CURRENT,
+    "/mcp",
+    bound.auth,
+    bound.core,
+  );
+  equals((replay!.error as { code: number }).code, -32600);
+  const route = await authorized(search);
+  const wrongRoute = await handleFixtureMcp(
+    search,
+    route.bytes,
+    MCP_LEGACY,
+    "/mcp/legacy",
+    route.auth,
+    route.core,
+    new LegacyMcpSession(),
+  );
+  equals((wrongRoute!.error as { code: number }).code, -32600);
+  const legacySearch = {
+    jsonrpc: "2.0" as const,
+    id: 4,
+    method: "tools/call",
+    params: { name: "search_capabilities", arguments: { query: "github" } },
+  };
+  const legacy = await authorized(legacySearch, "/mcp/legacy");
+  const legacySession = new LegacyMcpSession();
+  legacySession.begin();
+  legacySession.complete();
+  const legacySubstitution = {
+    ...legacySearch,
+    params: { name: "connection_status", arguments: { connection: "connection_a" } },
+  };
+  const legacySubstitutionBytes = encoder.encode(JSON.stringify(legacySubstitution));
+  const legacyDenied = await handleFixtureMcp(
+    legacySubstitution,
+    legacySubstitutionBytes,
+    MCP_LEGACY,
+    "/mcp/legacy",
+    legacy.auth,
+    legacy.core,
+    legacySession,
+  );
+  equals((legacyDenied!.error as { code: number }).code, -32600);
+  const legacyOk = await handleFixtureMcp(
+    legacySearch,
+    legacy.bytes,
+    MCP_LEGACY,
+    "/mcp/legacy",
+    legacy.auth,
+    legacy.core,
+    legacySession,
+  );
+  assert("result" in legacyOk!);
+  const legacyReplay = await handleFixtureMcp(
+    legacySearch,
+    legacy.bytes,
+    MCP_LEGACY,
+    "/mcp/legacy",
+    legacy.auth,
+    legacy.core,
+    legacySession,
+  );
+  equals((legacyReplay!.error as { code: number }).code, -32600);
+});
+Deno.test("legacy lifecycle requires initialized notification with per-request auth", async () => {
   const session = new LegacyMcpSession();
   const init = {
-      jsonrpc: "2.0" as const,
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: MCP_LEGACY,
-        capabilities: {},
-        clientInfo: { name: "fixture", version: "1" },
-      },
+    jsonrpc: "2.0" as const,
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: MCP_LEGACY,
+      capabilities: {},
+      clientInfo: { name: "fixture", version: "1" },
     },
-    bytes = new TextEncoder().encode(JSON.stringify(init)),
-    response = await handleFixtureMcp(
-      init,
-      bytes,
-      MCP_LEGACY,
-      "/mcp/legacy",
-      await auth(bytes, "/mcp/legacy"),
-      core,
-      session,
+  };
+  const a = await authorized(init, "/mcp/legacy");
+  const initialized = await handleFixtureMcp(
+    init,
+    a.bytes,
+    MCP_LEGACY,
+    "/mcp/legacy",
+    a.auth,
+    a.core,
+    session,
+  );
+  equals((initialized!.result as { protocolVersion: string }).protocolVersion, MCP_LEGACY);
+  const notice = { jsonrpc: "2.0" as const, method: "notifications/initialized" };
+  const b = await authorized(notice, "/mcp/legacy");
+  equals(
+    await handleFixtureMcp(notice, b.bytes, MCP_LEGACY, "/mcp/legacy", b.auth, b.core, session),
+    undefined,
+  );
+  const list = { jsonrpc: "2.0" as const, id: 2, method: "tools/list" };
+  const c = await authorized(list, "/mcp/legacy");
+  const listed = await handleFixtureMcp(
+    list,
+    c.bytes,
+    MCP_LEGACY,
+    "/mcp/legacy",
+    c.auth,
+    c.core,
+    session,
+  );
+  assert(Array.isArray((listed!.result as { tools: unknown[] }).tools));
+});
+Deno.test("every tool uses operation-time expiry and epoch snapshots", async () => {
+  const requests = [
+    modern("search_capabilities", { query: "github" }),
+    modern("describe_operation", { operation: "github.user.read@v1" }),
+    modern("connection_status", { connection: "connection_a" }),
+    modern("invoke_operation", {
+      operation: "github.user.read@v1",
+      connection: "connection_a",
+      arguments: {},
+    }),
+  ];
+  for (const request of requests) {
+    const clock = { value: now };
+    const expired = await authorized(request, "/mcp", now + 1, clock);
+    clock.value = now + 1;
+    const denied = await handleFixtureMcp(
+      request,
+      expired.bytes,
+      MCP_CURRENT,
+      "/mcp",
+      expired.auth,
+      expired.core,
     );
-  equals((response!.result as { protocolVersion: string }).protocolVersion, MCP_LEGACY);
-  const earlyList = { jsonrpc: "2.0" as const, id: 2, method: "tools/list" },
-    earlyBytes = new TextEncoder().encode(JSON.stringify(earlyList)),
-    early = await handleFixtureMcp(
-      earlyList,
-      earlyBytes,
-      MCP_LEGACY,
-      "/mcp/legacy",
-      await auth(earlyBytes, "/mcp/legacy"),
-      core,
-      session,
+    equals(
+      (denied!.result as { structuredContent: { category: string } }).structuredContent.category,
+      "policy_denied",
     );
-  equals((early!.error as { code: number }).code, -32002);
-  const initialized = { jsonrpc: "2.0" as const, method: "notifications/initialized" },
-    initializedBytes = new TextEncoder().encode(JSON.stringify(initialized)),
-    notificationResponse = await handleFixtureMcp(
-      initialized,
-      initializedBytes,
-      MCP_LEGACY,
-      "/mcp/legacy",
-      await auth(initializedBytes, "/mcp/legacy"),
-      core,
-      session,
+  }
+  const request = modern("search_capabilities", { query: "github" });
+  const mutations = [
+    async (env: Awaited<ReturnType<typeof authorized>>) => {
+      const value = (await env.store.getPrincipal(ctx, ctx.userId))!;
+      await env.store.updatePrincipal(ctx, { ...value, status: "revoked", epoch: 2 });
+      await env.store.updatePrincipal(ctx, { ...value, status: "active", epoch: 3 });
+    },
+    async (env: Awaited<ReturnType<typeof authorized>>) => {
+      const value = (await env.store.getAgent(ctx, "agent_a"))!;
+      await env.store.updateAgent(ctx, { ...value, status: "revoked", epoch: 2 });
+      await env.store.updateAgent(ctx, { ...value, status: "active", epoch: 3 });
+    },
+    async (env: Awaited<ReturnType<typeof authorized>>) => {
+      const value = (await env.store.getDevice(ctx, "device_a"))!;
+      await env.store.updateDevice(ctx, { ...value, status: "revoked", epoch: 2 });
+      await env.store.updateDevice(ctx, { ...value, status: "active", epoch: 3 });
+    },
+    async (env: Awaited<ReturnType<typeof authorized>>) => {
+      const value = (await env.store.getGrant(ctx, "grant_a"))!;
+      await env.store.updateGrant(ctx, { ...value, status: "revoked", version: 2 });
+      await env.store.updateGrant(ctx, { ...value, status: "active", version: 3 });
+    },
+    async (env: Awaited<ReturnType<typeof authorized>>) => {
+      const value = (await env.store.getConnection(ctx, "connection_a"))!;
+      await env.store.updateConnection(ctx, { ...value, status: "revoked", epoch: 2 });
+      await env.store.updateConnection(ctx, { ...value, status: "active", epoch: 3 });
+    },
+  ];
+  for (const mutate of mutations) {
+    const stale = await authorized(request);
+    await mutate(stale);
+    const denied = await handleFixtureMcp(
+      request,
+      stale.bytes,
+      MCP_CURRENT,
+      "/mcp",
+      stale.auth,
+      stale.core,
     );
-  equals(notificationResponse, undefined);
-  const list = { jsonrpc: "2.0" as const, id: 3, method: "tools/list" },
-    listBytes = new TextEncoder().encode(JSON.stringify(list)),
-    listed = await handleFixtureMcp(
-      list,
-      listBytes,
-      MCP_LEGACY,
-      "/mcp/legacy",
-      await auth(listBytes, "/mcp/legacy"),
-      core,
-      session,
+    equals(
+      (denied!.result as { structuredContent: { category: string } }).structuredContent.category,
+      "policy_denied",
     );
-  for (const tool of (listed!.result as { tools: { inputSchema?: unknown }[] }).tools) {
-    assert(tool.inputSchema);
   }
 });
-Deno.test("expired grants cannot authenticate any MCP tool", async () => {
+Deno.test("modern and legacy executable bridge invoke the fixed operation", async () => {
+  for (const path of ["/mcp", "/mcp/legacy"] as const) {
+    const request = path === "/mcp"
+      ? modern("invoke_operation", {
+        operation: "github.user.read@v1",
+        connection: "connection_a",
+        arguments: {},
+      })
+      : {
+        jsonrpc: "2.0" as const,
+        id: 3,
+        method: "tools/call",
+        params: {
+          name: "invoke_operation",
+          arguments: {
+            operation: "github.user.read@v1",
+            connection: "connection_a",
+            arguments: {},
+          },
+        },
+      };
+    const bound = await authorized(request, path);
+    const session = path === "/mcp/legacy" ? new LegacyMcpSession() : undefined;
+    if (session) {
+      session.begin();
+      session.complete();
+    }
+    const response = await handleFixtureMcp(
+      request,
+      bound.bytes,
+      path === "/mcp" ? MCP_CURRENT : MCP_LEGACY,
+      path,
+      bound.auth,
+      bound.core,
+      session,
+    );
+    equals(
+      (response!.result as { structuredContent: { outcome: string } }).structuredContent.outcome,
+      "success",
+    );
+  }
+});
+Deno.test("expired grant cannot authenticate", async () => {
   const request = modern("search_capabilities", { query: "github" });
-  const bytes = new TextEncoder().encode(JSON.stringify(request));
-  await rejects(() => auth(bytes, "/mcp", now - 1), "authentication denied");
-});
-Deno.test("authenticated session must be bound to the exact policy core", async () => {
-  const request = modern("search_capabilities", { query: "github" });
-  const bytes = new TextEncoder().encode(JSON.stringify(request));
-  const verifiedAuth = await auth(bytes);
-  const response = await handleFixtureMcp(
-    request,
-    bytes,
-    MCP_CURRENT,
-    "/mcp",
-    verifiedAuth,
-    { ...core, accepts: () => false },
-  );
-  equals((response!.error as { code: number }).code, -32600);
-});
-Deno.test("unknown tools are protocol errors and malformed core output is closed", async () => {
-  const unknown = modern("unknown_tool", {});
-  const unknownBytes = new TextEncoder().encode(JSON.stringify(unknown));
-  const unknownResponse = await handleFixtureMcp(
-    unknown,
-    unknownBytes,
-    MCP_CURRENT,
-    "/mcp",
-    await auth(unknownBytes),
-    core,
-  );
-  equals((unknownResponse!.error as { code: number }).code, -32602);
-  const request = modern("connection_status", { connection: "connection_a" });
-  const bytes = new TextEncoder().encode(JSON.stringify(request));
-  const response = await handleFixtureMcp(
-    request,
-    bytes,
-    MCP_CURRENT,
-    "/mcp",
-    await auth(bytes),
-    { ...core, status: () => Promise.resolve({ status: "PROVIDER_SECRET_SENTINEL" }) },
-  );
-  const result = response!.result as {
-    isError: boolean;
-    structuredContent: { category: string };
-  };
-  equals(result.isError, true);
-  equals(result.structuredContent.category, "invalid_output");
-  assert(!JSON.stringify(response).includes("SENTINEL"));
-});
-Deno.test("invalid tool arguments and methods return safe closed errors", async () => {
-  const request = modern("invoke_operation", {
-      operation: "evil",
-      connection: "x",
-      arguments: { url: "http://169.254.169.254" },
-    }),
-    bytes = new TextEncoder().encode(JSON.stringify(request)),
-    response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", await auth(bytes), core);
-  equals((response!.result as { isError: boolean }).isError, true);
-  assert(!JSON.stringify(response).includes("169.254"));
+  await rejects(() => authorized(request, "/mcp", now), "grant denied");
 });

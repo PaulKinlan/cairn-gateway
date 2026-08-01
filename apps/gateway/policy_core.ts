@@ -1,21 +1,42 @@
 import type { MetadataStore } from "../../packages/core/src/store/store.ts";
 import type { DualProof, InvocationService } from "../../packages/core/src/policy/invocation.ts";
 import { GITHUB_USER_READ } from "../../packages/core/src/connectors/github_user.ts";
-import type { McpCore, Structured } from "./mcp.ts";
+import type { Structured } from "./mcp.ts";
 import type { VerifiedMcpAuth } from "./mcp_auth.ts";
 
 interface PolicySession {
   capability: string;
   proofs: DualProof;
-  now: number;
   correlationId: string;
+  path: "/mcp" | "/mcp/legacy";
+  clock: () => number;
+}
+const trusted = new WeakMap<object, VerifiedMcpAuth>();
+
+export function isTrustedPolicyMcpCore(
+  value: unknown,
+  auth: VerifiedMcpAuth,
+): value is PolicyMcpCore {
+  return !!value && typeof value === "object" && trusted.get(value as object) === auth;
 }
 
-export class PolicyMcpCore implements McpCore {
+/** Application composition factory. The runtime brand cannot be self-asserted by an injected core. */
+export function createPolicyMcpCore(
+  store: MetadataStore,
+  service: InvocationService,
+  auth: VerifiedMcpAuth,
+  session: PolicySession,
+): PolicyMcpCore {
+  const core = new PolicyMcpCore(store, service, auth, session);
+  trusted.set(core, auth);
+  return core;
+}
+
+export class PolicyMcpCore {
   #store: MetadataStore;
   #service: InvocationService;
   #auth: VerifiedMcpAuth;
-  #session: PolicySession;
+  #session: Readonly<PolicySession>;
   constructor(
     store: MetadataStore,
     service: InvocationService,
@@ -27,19 +48,12 @@ export class PolicyMcpCore implements McpCore {
     this.#auth = auth;
     this.#session = Object.freeze({ ...session });
   }
-  accepts(auth: VerifiedMcpAuth): boolean {
-    return auth === this.#auth && auth.sessionId === this.#auth.sessionId &&
-      auth.grantId === this.#auth.grantId &&
-      auth.context.tenantId === this.#auth.context.tenantId &&
-      auth.context.userId === this.#auth.context.userId;
-  }
   async search(query: string): Promise<Structured> {
     const grant = await this.#activeGrant();
+    const match = query.toLowerCase().includes("github") || query.toLowerCase().includes("user");
     return {
-      operations: query.toLowerCase().includes("github") || query.toLowerCase().includes("user")
-        ? [{ id: GITHUB_USER_READ.id, connection: grant.connectionId }]
-        : [],
-      count: query.toLowerCase().includes("github") || query.toLowerCase().includes("user") ? 1 : 0,
+      operations: match ? [{ id: GITHUB_USER_READ.id, connection: grant.connectionId }] : [],
+      count: match ? 1 : 0,
     };
   }
   async describe(operation: string): Promise<Structured> {
@@ -62,14 +76,16 @@ export class PolicyMcpCore implements McpCore {
     if (operation !== GITHUB_USER_READ.id || connection !== grant.connectionId) {
       throw new Error("operation denied");
     }
+    const operationNow = this.#now();
     const output = await this.#service.invoke(
       this.#auth.context,
       this.#session.capability,
       this.#session.proofs,
       args,
       receivedBody,
-      this.#session.now,
+      operationNow,
       this.#session.correlationId,
+      this.#session.path,
     );
     return {
       outcome: output.result.outcome,
@@ -84,23 +100,30 @@ export class PolicyMcpCore implements McpCore {
   async status(connection: string): Promise<Structured> {
     const grant = await this.#activeGrant();
     if (connection !== grant.connectionId) throw new Error("connection denied");
-    const value = await this.#store.getConnection(this.#auth.context, connection);
-    if (!value || value.status !== "active") throw new Error("connection denied");
     return { connection, status: "active", operation: GITHUB_USER_READ.id };
   }
+  #now(): number {
+    const value = this.#session.clock();
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error("policy denied");
+    return value;
+  }
   async #activeGrant() {
+    const operationNow = this.#now();
     const grant = await this.#store.getGrant(this.#auth.context, this.#auth.grantId),
-      principal = await this.#store.getPrincipal(this.#auth.context, this.#auth.context.userId);
-    if (!grant || grant.status !== "active" || !principal || principal.status !== "active") {
-      throw new Error("policy denied");
-    }
-    const agent = await this.#store.getAgent(this.#auth.context, grant.agentId),
-      device = await this.#store.getDevice(this.#auth.context, grant.deviceId),
-      connection = await this.#store.getConnection(this.#auth.context, grant.connectionId);
+      principal = await this.#store.getPrincipal(this.#auth.context, this.#auth.context.userId),
+      agent = await this.#store.getAgent(this.#auth.context, this.#auth.agentId),
+      device = await this.#store.getDevice(this.#auth.context, this.#auth.deviceId),
+      connection = await this.#store.getConnection(this.#auth.context, this.#auth.connectionId);
     if (
-      grant.expiresAt < this.#session.now || !agent || agent.status !== "active" ||
-      !device || device.status !== "active" ||
-      device.agentId !== agent.id || !connection || connection.status !== "active"
+      !grant || grant.status !== "active" || grant.expiresAt <= operationNow ||
+      grant.expiresAt !== this.#auth.expiresAt || grant.version !== this.#auth.grantVersion ||
+      grant.agentId !== this.#auth.agentId || grant.deviceId !== this.#auth.deviceId ||
+      grant.connectionId !== this.#auth.connectionId || !principal ||
+      principal.status !== "active" ||
+      principal.epoch !== this.#auth.principalEpoch || !agent || agent.status !== "active" ||
+      agent.epoch !== this.#auth.agentEpoch || !device || device.status !== "active" ||
+      device.epoch !== this.#auth.deviceEpoch || device.agentId !== agent.id || !connection ||
+      connection.status !== "active" || connection.epoch !== this.#auth.connectionEpoch
     ) throw new Error("policy denied");
     return grant;
   }

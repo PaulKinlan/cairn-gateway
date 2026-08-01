@@ -18,10 +18,13 @@
     support.
 11. Principal creation and device approval require no email. Passkey and recovery remain real
     interfaces, not simulated production recovery.
-12. MCP discovery is not authorization. Every invocation independently authenticates and checks
-    policy.
+12. MCP discovery is not authorization. Every MCP request is bound to exact authority, route and
+    received bytes, consumed once, and rechecks policy/epochs using operation-time rather than
+    authentication-time.
 13. Device and agent signed requests bind method, configured authority, exact path, an explicitly
     empty query, a digest recomputed from received bytes, gateway audience, grant, both identities,
     nonce, timestamp, and (when present) the independently hashed capability.
 14. Reusable bearer values are never carried in URLs or WebSockets. No public-key reclaim occurs
     without a fresh challenge and proof of possession; agent and device keys remain distinct.
+15. Enrollment request and approval commits atomically recheck active principal, agent, approving
+    admin, epochs, key thumbprints, and the exact candidate transaction before creating state.

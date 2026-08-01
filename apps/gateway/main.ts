@@ -7,5 +7,5 @@ export {
   TOOLS,
 } from "./mcp.ts";
 export { verifyMcpAuth } from "./mcp_auth.ts";
-export { PolicyMcpCore } from "./policy_core.ts";
+// Trusted policy cores are composed only by the executable fixture bridge.
 // No listener is started in Stage 0. Network serving is blocked pending SDK and transport review.

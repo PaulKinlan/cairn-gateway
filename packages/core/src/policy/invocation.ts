@@ -33,7 +33,7 @@ export class InvocationService {
     const grant = await this.store.getGrant(ctx, grantId),
       principal = await this.store.getPrincipal(ctx, ctx.userId);
     if (
-      !grant || grant.status !== "active" || grant.expiresAt < now || !principal ||
+      !grant || grant.status !== "active" || grant.expiresAt <= now || !principal ||
       principal.status !== "active"
     ) throw new Error("grant denied");
     const agent = await this.store.getAgent(ctx, grant.agentId),
@@ -107,6 +107,7 @@ export class InvocationService {
     receivedBody: Uint8Array,
     now: number,
     correlationId: string,
+    requestPath: "/mcp" | "/mcp/legacy" = "/mcp",
   ): Promise<{ result: GithubResult; receipt: Receipt }> {
     const started = performance.now();
     let receiptEmitted = false;
@@ -156,7 +157,7 @@ export class InvocationService {
         v: 1 as const,
         method: "POST" as const,
         authority: this.authority,
-        path: "/mcp" as const,
+        path: requestPath,
         query: "" as const,
         audience: "urn:cairn:gateway" as const,
         body_sha256: await bodyHash(receivedBody),

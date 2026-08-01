@@ -7,5 +7,6 @@ boundary, safe projection/receipts, and four stable fixture MCP tools. It does n
 transport/client conformance or production multi-isolate durability. It contains no live adapter,
 secrets, deployment code, UI, provider token surface, or remote.
 
-Requires Deno 2.9.0. Run `deno task check`. Live activation is blocked by the verification ledger
+Requires Deno 2.9.0. Run `deno task check`; it includes the immutable official-SDK-derived MCP
+fixture and deterministic closed-schema gate. Live activation is blocked by the verification ledger
 and independent review gates.

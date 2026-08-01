@@ -28,7 +28,7 @@ import {
 import { encoder, sha256 } from "../../packages/core/src/crypto/encoding.ts";
 import { handleFixtureMcp, MCP_CURRENT } from "../../apps/gateway/mcp.ts";
 import { verifyMcpAuth } from "../../apps/gateway/mcp_auth.ts";
-import { PolicyMcpCore } from "../../apps/gateway/policy_core.ts";
+import { createPolicyMcpCore } from "../../apps/gateway/policy_core.ts";
 import { FixtureLocalMcpBridge } from "../../apps/gateway/local_bridge.ts";
 const now = 2_000_000_000,
   ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("user_a") };
@@ -440,11 +440,12 @@ Deno.test("actual MCP boundary authenticates and executes typed policy flow", as
     now,
     capability,
   });
-  const core = new PolicyMcpCore(env.store, env.service, auth, {
+  const core = createPolicyMcpCore(env.store, env.service, auth, {
     capability,
     proofs,
-    now,
     correlationId: "mcp_flow",
+    path: "/mcp",
+    clock: () => now,
   });
   const response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", auth, core),
     structured = (response!.result as { structuredContent: { outcome: string } }).structuredContent;
@@ -500,11 +501,12 @@ Deno.test("MCP stale discovery is denied at call time after revocation", async (
     MCP_CURRENT,
     "/mcp",
     auth,
-    new PolicyMcpCore(env.store, env.service, auth, {
+    createPolicyMcpCore(env.store, env.service, auth, {
       capability,
       proofs,
-      now,
       correlationId: "stale_flow",
+      path: "/mcp",
+      clock: () => now,
     }),
   );
   equals((response!.result as { isError: boolean }).isError, true);
@@ -537,6 +539,8 @@ Deno.test("fixture bridge acquires capability, dual-signs and binds exact authen
     "grant_0",
     env.signers[0]!,
     env.agentSigner,
+    "fixture.cairn.invalid",
+    () => now,
   );
   const { auth, core } = await bridge.authorize(bytes, now);
   const response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", auth, core);
@@ -556,6 +560,32 @@ Deno.test("malformed custody values map closed with exactly one sanitized error 
       contentType: "application/json",
       body: githubBody,
     }),
+    () => ({ outcome: "auth_required" }),
+    () => ({ outcome: "rate_limited", status: 429, contentType: "application/json" }),
+    () => ({
+      outcome: "provider_denied",
+      status: 200,
+      contentType: "application/json",
+      body: new Uint8Array(),
+    }),
+    () => ({
+      outcome: "provider_unavailable",
+      status: 503,
+      contentType: 7,
+      body: new Uint8Array(),
+    }),
+    () =>
+      Object.defineProperties({}, {
+        outcome: { value: "rate_limited", enumerable: true },
+        status: {
+          get: () => {
+            throw new Error("PROVIDER_SECRET_SENTINEL");
+          },
+          enumerable: true,
+        },
+        contentType: { value: "application/json", enumerable: true },
+        body: { value: new Uint8Array(), enumerable: true },
+      }),
     () =>
       Object.defineProperty({}, "outcome", {
         get: () => {

@@ -51,21 +51,24 @@ export async function invokeGithubUserRead(
       return { outcome: "provider_unavailable" };
     }
     const response = raw as Record<string, unknown>;
+    // Read every required member before branching so getters and missing/wrong
+    // fields fail through the same closed boundary for every outcome.
     const outcome = response.outcome;
-    if (
-      outcome !== "success" && outcome !== "auth_required" && outcome !== "rate_limited" &&
-      outcome !== "provider_denied" && outcome !== "provider_unavailable"
-    ) return { outcome: "provider_unavailable" };
-    if (outcome !== "success") return { outcome };
     const body = response.body;
     const contentType = response.contentType;
     const status = response.status;
     if (
+      (outcome !== "success" && outcome !== "auth_required" && outcome !== "rate_limited" &&
+        outcome !== "provider_denied" && outcome !== "provider_unavailable") ||
       !(body instanceof Uint8Array) || typeof contentType !== "string" ||
       typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599 ||
       body.byteLength > GITHUB_USER_READ.maxResponseBytes ||
-      contentType.split(";")[0]?.trim() !== "application/json"
+      !consistentOutcome(outcome, status)
     ) return { outcome: "provider_unavailable" };
+    if (outcome !== "success") return { outcome };
+    if (contentType.split(";")[0]?.trim() !== "application/json") {
+      return { outcome: "provider_unavailable" };
+    }
     const input: unknown = JSON.parse(new TextDecoder().decode(body));
     if (
       !input || typeof input !== "object" || Array.isArray(input) ||
@@ -95,6 +98,15 @@ export async function invokeGithubUserRead(
   } catch {
     return { outcome: "provider_unavailable" };
   }
+}
+function consistentOutcome(outcome: SafeOutcome, status: number): boolean {
+  if (outcome === "success") return status >= 200 && status <= 299;
+  if (outcome === "auth_required") return status === 401 || status === 403;
+  if (outcome === "rate_limited") return status === 429;
+  if (outcome === "provider_denied") {
+    return status >= 400 && status <= 499 && status !== 401 && status !== 403 && status !== 429;
+  }
+  return status >= 500 && status <= 599;
 }
 function safeGithubUrl(value: string): boolean {
   try {
