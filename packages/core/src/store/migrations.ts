@@ -4,6 +4,7 @@ import {
   DURABLE_AUTHORITY_MIN_SCHEMA_VERSION,
   DURABLE_AUTHORITY_SCHEMA_VERSION,
   type DurableAuthorityEnvelope,
+  sameDurableValue,
   serializeDurableAuthority,
 } from "./schema.ts";
 
@@ -11,6 +12,45 @@ export interface AuthorityMigration {
   fromVersion: number;
   toVersion: number;
   migrate(value: DurableAuthorityEnvelope): DurableAuthorityEnvelope;
+}
+
+const subjectStatus = (record: { value: unknown }): string | undefined => {
+  const value = record.value as Record<string, unknown>;
+  return value?.kind &&
+      ["principal", "agent", "device", "grant", "connection"].includes(String(value.kind))
+    ? String(value.status)
+    : undefined;
+};
+
+function assertRecordsMonotonic(
+  candidate: DurableAuthorityEnvelope,
+  current: DurableAuthorityEnvelope,
+  message: string,
+): void {
+  for (const [key, currentRecord] of Object.entries(current.records)) {
+    const candidateRecord = candidate.records[key];
+    if (
+      !candidateRecord || candidateRecord.tenantId !== currentRecord.tenantId ||
+      candidateRecord.userId !== currentRecord.userId ||
+      candidateRecord.recordVersion < currentRecord.recordVersion ||
+      candidateRecord.authorityGeneration < currentRecord.authorityGeneration
+    ) throw new Error(message);
+    if (
+      candidateRecord.recordVersion === currentRecord.recordVersion &&
+      !sameDurableValue(candidateRecord.value, currentRecord.value)
+    ) {
+      throw new Error("changed durable payload at equal version denied");
+    }
+    const beforeStatus = subjectStatus(currentRecord);
+    const afterStatus = subjectStatus(candidateRecord);
+    if (
+      beforeStatus && afterStatus &&
+      ((beforeStatus === "revoked" && afterStatus !== "revoked") ||
+        (beforeStatus === "disabled" && afterStatus === "active"))
+    ) {
+      throw new Error("forbidden authority status transition");
+    }
+  }
 }
 
 /** Pure migration planning. Adapters persist preparing, committing, and idle as separate CAS commits. */
@@ -29,29 +69,26 @@ export function migrateAuthorityEnvelope(
     if (!migration || migration.toVersion !== migration.fromVersion + 1) {
       throw new Error("authority migration unavailable");
     }
-    const before = structuredClone(value.highWatermarks);
-    const beforeRecords = structuredClone(value.records);
+    const before = structuredClone(value);
     value = migration.migrate(value);
     if (
       value.schemaVersion !== migration.toVersion ||
-      value.authorityGeneration < input.authorityGeneration ||
-      value.highWatermarks.authorityGeneration < before.authorityGeneration ||
-      value.highWatermarks.replayGeneration < before.replayGeneration ||
-      value.highWatermarks.revocationGeneration < before.revocationGeneration ||
-      value.highWatermarks.migrationGeneration <= before.migrationGeneration ||
-      value.highWatermarks.schemaVersion !== value.schemaVersion ||
-      Object.keys(beforeRecords).some((key) => !value.records[key])
+      value.authorityGeneration < before.authorityGeneration ||
+      value.effectiveNow < before.effectiveNow ||
+      value.highWatermarks.authorityGeneration < before.highWatermarks.authorityGeneration ||
+      value.highWatermarks.replayGeneration < before.highWatermarks.replayGeneration ||
+      value.highWatermarks.revocationGeneration < before.highWatermarks.revocationGeneration ||
+      value.highWatermarks.migrationGeneration <= before.highWatermarks.migrationGeneration ||
+      value.highWatermarks.schemaVersion !== value.schemaVersion
     ) throw new Error("non-monotonic authority migration");
+    assertRecordsMonotonic(value, before, "non-monotonic authority migration record");
     serializeDurableAuthority(value);
   }
   assertCurrentEnvelope(value);
   return value;
 }
 
-/**
- * Rejects envelope, watermark, record-version, deletion, ownership, and equal-version payload
- * rollback. Restore is monotonic per record, not merely by copied envelope watermarks.
- */
+/** Restore comparison includes durable time and every authority-bearing record. */
 export function assertRestoreNotStale(
   candidate: DurableAuthorityEnvelope,
   current: DurableAuthorityEnvelope,
@@ -67,26 +104,10 @@ export function assertRestoreNotStale(
   ] as const;
   if (
     candidate.authorityGeneration < current.authorityGeneration ||
+    candidate.effectiveNow < current.effectiveNow ||
     dimensions.some((key) => candidate.highWatermarks[key] < current.highWatermarks[key])
   ) {
     throw new Error("stale authority restore denied");
   }
-  for (const [key, currentRecord] of Object.entries(current.records)) {
-    const candidateRecord = candidate.records[key];
-    if (
-      !candidateRecord || candidateRecord.tenantId !== currentRecord.tenantId ||
-      candidateRecord.userId !== currentRecord.userId ||
-      candidateRecord.recordVersion < currentRecord.recordVersion ||
-      candidateRecord.authorityGeneration < currentRecord.authorityGeneration
-    ) {
-      throw new Error("stale authority record restore denied");
-    }
-    if (
-      candidateRecord.recordVersion === currentRecord.recordVersion &&
-      new TextDecoder().decode(serializeDurableAuthority(candidateRecord)) !==
-        new TextDecoder().decode(serializeDurableAuthority(currentRecord))
-    ) {
-      throw new Error("copied-watermark payload rollback denied");
-    }
-  }
+  assertRecordsMonotonic(candidate, current, "stale authority record restore denied");
 }

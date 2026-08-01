@@ -14,7 +14,8 @@ export const replayKey = (ctx: TenantContext, kind: "nonce" | "jti", hash: strin
 /** Adapter-neutral layout grammar. Every owner record substitutes validated tenant/user IDs. */
 export const DURABLE_KEY_LAYOUT = Object.freeze(
   {
-    authorityRecord: "cairn/v1/tenant/{tenantId}/user/{userId}/authority/{kind}/{id}",
+    authorityRecord: "tenant/{tenantId}/user/{userId}/{kind}/{id}",
+    replayRecord: "tenant/{tenantId}/user/{userId}/replay/{nonce|jti}/{hash}",
     authorityGeneration: "cairn/v1/tenant/{tenantId}/user/{userId}/high-watermark/authority",
     replayGeneration: "cairn/v1/tenant/{tenantId}/user/{userId}/high-watermark/replay",
     revocationGeneration: "cairn/v1/tenant/{tenantId}/user/{userId}/high-watermark/revocation",

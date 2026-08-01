@@ -6,6 +6,7 @@ import type {
   InvocationBinding,
   RemovalCommit,
 } from "./store.ts";
+import type { DurableAuthorityEnvelope } from "./schema.ts";
 
 export type AtomicAuthorityResult =
   | { outcome: "committed"; authorityGeneration: number; recordVersion: number }
@@ -66,7 +67,7 @@ export type AttemptState =
   | "failed_safe"
   | "dispatch_unknown";
 
-/** Opaque value returned only by the durable reserved -> dispatching claim. */
+/** Opaque, single-use value returned by the durable reserved -> dispatching claim. */
 export interface DurableDispatchPermit {
   attemptId: string;
   claimVersion: number;
@@ -85,6 +86,24 @@ export interface DispatchClaimTransaction {
   expectedState: "reserved";
   now: number;
 }
+
+export interface DispatchStartTransaction {
+  permit: DurableDispatchPermit;
+  now: number;
+}
+
+/** Returned only after the permit use and dispatch-start marker commit atomically. */
+export interface DispatchAuthorization {
+  attemptId: string;
+  claimVersion: number;
+  authorityGeneration: number;
+}
+
+export type DispatchStartResult =
+  | { outcome: "authorized"; authorization: DispatchAuthorization }
+  | { outcome: "denied"; reason: string }
+  | { outcome: "already_consumed" }
+  | { outcome: "unknown_commit" };
 
 export type AttemptTerminalResult =
   | { outcome: "completed"; resultHash: string }
@@ -115,6 +134,16 @@ export interface DispatchRecoveryTransaction {
   now: number;
 }
 
+/** Adapter-neutral maintenance result; no concrete storage handle crosses the boundary. */
+export type AuthorityMaintenanceResult =
+  | { outcome: "committed"; authorityGeneration: number }
+  | { outcome: "denied"; reason: string };
+
+export interface MigrationPreparation {
+  expectedSchemaVersion: number;
+  targetSchemaVersion: number;
+}
+
 /**
  * Adapter-neutral atomic authority boundary. Every call requires tenant and owner context.
  * Implementations must linearize validation and every listed mutation in one durable commit.
@@ -141,6 +170,10 @@ export interface DurableAuthorityTransactions {
     ctx: TenantContext,
     transaction: DispatchClaimTransaction,
   ): Promise<DispatchPermitClaim>;
+  startDispatch(
+    ctx: TenantContext,
+    transaction: DispatchStartTransaction,
+  ): Promise<DispatchStartResult>;
   finalizeAttempt(
     ctx: TenantContext,
     transaction: AttemptFinalization,
@@ -151,11 +184,31 @@ export interface DurableAuthorityTransactions {
   ): Promise<AtomicAuthorityResult>;
 }
 
-/** Only the one-time durable permit claim authorizes connector dispatch. */
-export function grantsDispatch(
+/** Neutral export/restore/migration/recovery/inspection boundary used by conformance scenarios. */
+export interface DurableAuthorityMaintenance {
+  exportAuthority(): Promise<DurableAuthorityEnvelope>;
+  inspectAuthority(requireCurrent?: boolean): Promise<DurableAuthorityEnvelope>;
+  /** Installs a validated envelope only into a pristine authority store (offline recovery/bootstrap). */
+  initializeAuthority(candidate: DurableAuthorityEnvelope): Promise<AuthorityMaintenanceResult>;
+  restoreAuthority(candidate: DurableAuthorityEnvelope): Promise<AuthorityMaintenanceResult>;
+  prepareMigration(transaction: MigrationPreparation): Promise<AuthorityMaintenanceResult>;
+  advanceMigration(): Promise<AuthorityMaintenanceResult>;
+  failMigration(): Promise<AuthorityMaintenanceResult>;
+  recoverMigration(): Promise<AuthorityMaintenanceResult>;
+}
+
+/** Only the one-time durable permit claim can subsequently be consumed at dispatch start. */
+export function grantsDispatchPermit(
   result: DispatchPermitClaim,
 ): result is Extract<DispatchPermitClaim, { outcome: "permit" }> {
   return result.outcome === "permit";
+}
+
+/** Only this outcome authorizes a connector call. */
+export function grantsDispatch(
+  result: DispatchStartResult,
+): result is Extract<DispatchStartResult, { outcome: "authorized" }> {
+  return result.outcome === "authorized";
 }
 
 /** Ambiguous commit and dispatch outcomes are never retryable automatically. */

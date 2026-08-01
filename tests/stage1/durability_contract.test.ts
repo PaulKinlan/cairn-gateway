@@ -1,12 +1,14 @@
 import { assert, equals, rejects } from "../assert.ts";
 import type {
   DispatchPermitClaim,
+  DurableAuthorityMaintenance,
   DurableAuthorityTransactions,
   InvocationReservationTransaction,
 } from "../../packages/core/src/store/authority_transaction.ts";
 import {
   automaticRetryAllowed,
   grantsDispatch,
+  grantsDispatchPermit,
 } from "../../packages/core/src/store/authority_transaction.ts";
 import { ids, type TenantContext } from "../../packages/core/src/domain/types.ts";
 import { DURABLE_KEY_LAYOUT, entityKey, replayKey } from "../../packages/core/src/store/keys.ts";
@@ -30,7 +32,6 @@ interface WorkerInput {
   root: string;
   owner?: { tenantId: string; userId: string };
   transaction?: unknown;
-  claim?: DispatchPermitClaim;
   custodyRef?: string;
   path?: string;
   fault?: string;
@@ -129,9 +130,118 @@ const challenge = (owner: typeof alice, id: string, purpose: string, now = 10) =
   now,
 });
 function validEnvelope(): DurableAuthorityEnvelope {
+  const owner = ctx();
+  const principal = entityKey(owner, "subject", "user");
+  const agent = entityKey(owner, "subject", "agent");
+  const device = entityKey(owner, "subject", "device");
+  const grant = entityKey(owner, "subject", "grant");
+  const connectionSubject = entityKey(owner, "subject", "connection");
+  const connection = entityKey(owner, "connection", "connection");
+  const custody = entityKey(owner, "custody", "custodyhash");
+  const replayKeys = [
+    replayKey(owner, "nonce", "device_attempt"),
+    replayKey(owner, "nonce", "agent_attempt"),
+    replayKey(owner, "jti", "jti_attempt"),
+  ];
+  let version = 0;
+  const records: DurableAuthorityEnvelope["records"] = {};
+  const add = (key: string, value: unknown) => {
+    records[key] = {
+      tenantId: "tenant_a",
+      userId: "user",
+      recordVersion: ++version,
+      authorityGeneration: 3,
+      value,
+    };
+  };
+  add(principal, {
+    kind: "principal",
+    id: "user",
+    status: "active",
+    version: 1,
+    identity: {
+      id: "user",
+      tenantId: "tenant_a",
+      kind: "cryptographic",
+      status: "active",
+      emailRequired: false,
+      epoch: 1,
+    },
+  });
+  add(agent, {
+    kind: "agent",
+    id: "agent",
+    status: "active",
+    version: 1,
+    identity: {
+      id: "agent",
+      tenantId: "tenant_a",
+      userId: "user",
+      publicJwk: { kty: "OKP" },
+      thumbprint: "agent_thumb",
+      status: "active",
+      epoch: 1,
+    },
+  });
+  add(device, {
+    kind: "device",
+    id: "device",
+    status: "active",
+    version: 1,
+    identity: {
+      id: "device",
+      tenantId: "tenant_a",
+      userId: "user",
+      agentId: "agent",
+      publicJwk: { kty: "OKP" },
+      thumbprint: "device_thumb",
+      role: "admin",
+      status: "active",
+      epoch: 1,
+    },
+  });
+  add(grant, { kind: "grant", id: "grant", status: "active", version: 1, identity: null });
+  add(connectionSubject, {
+    kind: "connection",
+    id: "connection",
+    status: "active",
+    version: 1,
+    identity: null,
+  });
+  add(connection, { id: "connection", custodyReferenceHash: "custodyhash" });
+  add(custody, {
+    custodyReferenceHash: "custodyhash",
+    owner: "tenant/tenant_a/user/user",
+    connectionId: "connection",
+  });
+  add(replayKeys[0]!, { kind: "nonce", hash: "device_attempt", expiresAt: 500, generation: 1 });
+  add(replayKeys[1]!, { kind: "nonce", hash: "agent_attempt", expiresAt: 500, generation: 1 });
+  add(replayKeys[2]!, { kind: "jti", hash: "jti_attempt", expiresAt: 500, generation: 1 });
+  add(entityKey(owner, "attempt", "attempt"), {
+    attemptId: "attempt",
+    state: "reserved",
+    binding: binding("attempt"),
+    replayKeys,
+    claimVersion: 0,
+    permitHash: null,
+    permitAuthorityGeneration: null,
+    dispatchStarted: false,
+    dispatchStarts: 0,
+    result: null,
+  });
+  add(entityKey(owner, "challenge", "challenge"), {
+    id: "challenge",
+    tenantId: "tenant_a",
+    userId: "user",
+    purpose: "bootstrap",
+    transactionHash: "challengehash",
+    expiresAt: 500,
+    used: false,
+  });
   return {
     schemaVersion: 2,
     authorityGeneration: 3,
+    effectiveNow: 10,
     highWatermarks: {
       authorityGeneration: 3,
       migrationGeneration: 0,
@@ -140,69 +250,20 @@ function validEnvelope(): DurableAuthorityEnvelope {
       schemaVersion: 2,
     },
     migration: { status: "idle", generation: 0, fromVersion: 2, toVersion: 2 },
-    records: {
-      "tenant/tenant_a/user/user/subject/device": {
-        tenantId: "tenant_a",
-        userId: "user",
-        recordVersion: 2,
-        authorityGeneration: 3,
-        value: { kind: "device", id: "device", status: "active", version: 1 },
-      },
-      "tenant/tenant_a/user/user/replay/replayhash": {
-        tenantId: "tenant_a",
-        userId: "user",
-        recordVersion: 3,
-        authorityGeneration: 3,
-        value: { kind: "nonce", hash: "replayhash", expiresAt: 500, generation: 1 },
-      },
-      "tenant/tenant_a/user/user/attempt/attempt": {
-        tenantId: "tenant_a",
-        userId: "user",
-        recordVersion: 4,
-        authorityGeneration: 3,
-        value: {
-          attemptId: "attempt",
-          state: "reserved",
-          replayKeys: ["tenant/tenant_a/user/user/replay/replayhash"],
-          dispatchPermitUsed: false,
-          claimVersion: 0,
-          result: null,
-        },
-      },
-      "tenant/tenant_a/user/user/challenge/challenge": {
-        tenantId: "tenant_a",
-        userId: "user",
-        recordVersion: 5,
-        authorityGeneration: 3,
-        value: {
-          id: "challenge",
-          tenantId: "tenant_a",
-          userId: "user",
-          purpose: "bootstrap",
-          transactionHash: "challengehash",
-          expiresAt: 500,
-          used: false,
-        },
-      },
-      "tenant/tenant_a/user/user/custody/custodyhash": {
-        tenantId: "tenant_a",
-        userId: "user",
-        recordVersion: 6,
-        authorityGeneration: 3,
-        value: {
-          custodyReferenceHash: "custodyhash",
-          owner: "tenant/tenant_a/user/user",
-        },
-      },
-    },
+    records,
   };
 }
 
 const cases: Record<string, (root: string) => Promise<void>> = {
   "DUR-01": async (root) => {
     await setup(root);
-    const adapter: DurableAuthorityTransactions = new OfflineReferenceAuthority(root);
+    const implementation = new OfflineReferenceAuthority(root);
+    const adapter: DurableAuthorityTransactions = implementation;
+    const maintenance: DurableAuthorityMaintenance = implementation;
     assert(adapter instanceof OfflineReferenceAuthority);
+    assert(maintenance instanceof OfflineReferenceAuthority);
+    const exported = await ok({ action: "export", root }) as DurableAuthorityEnvelope;
+    assertCurrentEnvelope(exported);
     equals((await inspect(root)).exists, true);
   },
   "DUR-02": async (root) => {
@@ -275,17 +336,37 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     await setup(root);
     await reserve(root, "dispatch");
     const claims = await Promise.all(Array.from({ length: 8 }, () => claim(root, "dispatch")));
-    equals(claims.filter(grantsDispatch).length, 1);
-    const permit = claims.find(grantsDispatch)!;
-    equals(await ok({ action: "dispatch", root, owner: alice, claim: permit }), true);
+    equals(claims.filter(grantsDispatchPermit).length, 1);
+    const permit = claims.find(grantsDispatchPermit)!;
     equals(
-      await ok({
-        action: "dispatch",
-        root,
-        owner: alice,
-        claim: { outcome: "denied", reason: "x" },
-      }),
-      false,
+      outcome(
+        await ok({
+          action: "start",
+          root,
+          owner: alice,
+          transaction: { permit: { ...permit.permit, authorityGeneration: 1 }, now: 12 },
+        }),
+      ),
+      "denied",
+    );
+    const started = await ok({
+      action: "start",
+      root,
+      owner: alice,
+      transaction: { permit: permit.permit, now: 12 },
+    });
+    assert(grantsDispatch(started as never));
+    equals(outcome(started), "authorized");
+    equals(
+      outcome(
+        await ok({
+          action: "start",
+          root,
+          owner: alice,
+          transaction: { permit: permit.permit, now: 12 },
+        }),
+      ),
+      "already_consumed",
     );
   },
   "DUR-08": async (root) => {
@@ -353,8 +434,16 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     await reserve(root, "start_ambiguity");
     const permit = await claim(root, "start_ambiguity");
     equals(
-      (await run({ action: "dispatch", root, owner: alice, claim: permit, fault: "ambiguous" }))
-        .code,
+      (await run({
+        action: "start",
+        root,
+        owner: alice,
+        transaction: {
+          permit: (permit as Extract<DispatchPermitClaim, { outcome: "permit" }>).permit,
+          now: 12,
+        },
+        fault: "ambiguous",
+      })).code,
       75,
     );
     const attempt =
@@ -364,7 +453,18 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       started: true,
       count: 1,
     });
-    equals(await ok({ action: "dispatch", root, owner: alice, claim: permit }), false);
+    assert(grantsDispatchPermit(permit));
+    equals(
+      outcome(
+        await ok({
+          action: "start",
+          root,
+          owner: alice,
+          transaction: { permit: permit.permit, now: 12 },
+        }),
+      ),
+      "already_consumed",
+    );
     equals(
       outcome(
         await ok({
@@ -386,25 +486,45 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     await setup(root);
     await reserve(root, "final");
     const permit = await claim(root, "final");
-    assert(grantsDispatch(permit));
+    assert(grantsDispatchPermit(permit));
     equals(
       outcome(
         await ok({
-          action: "finalize",
+          action: "start",
           root,
           owner: alice,
-          transaction: {
-            attemptId: "final",
-            expectedState: "dispatching",
-            permit: { ...permit.permit, token: "wrong" },
-            nextState: "completed",
-            result: { outcome: "completed", resultHash: "result_hash" },
-            now: 12,
-          },
+          transaction: { permit: permit.permit, now: 12 },
         }),
       ),
-      "denied",
+      "authorized",
     );
+    for (
+      const badPermit of [
+        { ...permit.permit, token: "wrong" },
+        { ...permit.permit, authorityGeneration: permit.permit.authorityGeneration + 1 },
+        { ...permit.permit, claimVersion: permit.permit.claimVersion + 1 },
+        { ...permit.permit, attemptId: "wrong_attempt" },
+      ]
+    ) {
+      equals(
+        outcome(
+          await ok({
+            action: "finalize",
+            root,
+            owner: alice,
+            transaction: {
+              attemptId: "final",
+              expectedState: "dispatching",
+              permit: badPermit,
+              nextState: "completed",
+              result: { outcome: "completed", resultHash: "result_hash" },
+              now: 12,
+            },
+          }),
+        ),
+        "denied",
+      );
+    }
     equals(
       outcome(
         await ok({
@@ -504,7 +624,7 @@ const cases: Record<string, (root: string) => Promise<void>> = {
           },
         }),
       ),
-      "committed",
+      "denied",
     );
   },
   "DUR-15": async (root) => {
@@ -621,6 +741,31 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       );
       const afterMismatch = tenantOf(await inspect(root));
       equals(serialize(afterMismatch), serialize(before));
+      const invalid = structuredClone(mutation) as { kind: string; value: Record<string, unknown> };
+      if (invalid.kind === "bootstrap") {
+        (invalid.value.agent as Record<string, unknown>).status = "revoked";
+      } else if (invalid.kind === "enrollment") {
+        (invalid.value.request as Record<string, unknown>).status = "approved";
+      } else if (invalid.kind === "approval") invalid.value.approverThumbprint = "wrong_thumb";
+      else invalid.value.targetThumbprint = "wrong_thumb";
+      equals(
+        outcome(
+          await ok({
+            action: "commit",
+            root,
+            owner: alice,
+            transaction: {
+              challengeId: id,
+              transactionHash: `hash_${id}`,
+              purpose,
+              now: 20,
+              mutation: invalid,
+            },
+          }),
+        ),
+        "denied",
+      );
+      equals(serialize(tenantOf(await inspect(root))), serialize(before));
       equals(
         outcome(
           await ok({
@@ -645,22 +790,96 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       "enroll",
       "remove",
     ]);
+    const persisted = await ok({ action: "export", root }) as DurableAuthorityEnvelope;
+    const approved = persisted.records[entityKey(ctx(), "enrollment", "request")]!.value as Record<
+      string,
+      Record<string, unknown>
+    >;
+    equals(approved.request!.status, "approved");
+    const candidate = persisted.records[entityKey(ctx(), "subject", "candidate")]!.value as Record<
+      string,
+      Record<string, unknown>
+    >;
+    equals({ role: candidate.identity!.role, status: candidate.identity!.status }, {
+      role: "member",
+      status: "active",
+    });
+    const removed = persisted.records[entityKey(ctx(), "subject", "device")]!.value as Record<
+      string,
+      Record<string, unknown>
+    >;
+    equals({ status: removed.status, identityStatus: removed.identity!.status }, {
+      status: "revoked",
+      identityStatus: "revoked",
+    });
   },
   "DUR-18": async (root) => {
-    for (const fault of ["after_preparing", "after_committing", "mark_failed"]) {
-      const migrationRoot = `${root}/${fault}`;
-      await setup(migrationRoot);
-      await ok({ action: "legacy", root: migrationRoot, owner: alice });
-      const result = await run({ action: "migrate", root: migrationRoot, fault });
-      equals(result.code, 75);
-      const raw = await ok({ action: "raw", root: migrationRoot }) as {
-        migration: { status: string };
+    const makeLegacy = async (name: string): Promise<DurableAuthorityEnvelope> => {
+      const source = `${root}/source_${name}`;
+      await setup(source);
+      const envelope = await ok({ action: "export", root: source }) as DurableAuthorityEnvelope;
+      envelope.schemaVersion = 1;
+      envelope.highWatermarks.schemaVersion = 1;
+      envelope.migration = { status: "idle", generation: 0, fromVersion: 1, toVersion: 1 };
+      envelope.highWatermarks.replayGeneration++;
+      const legacyKey = replayKey(ctx(), "nonce", "legacy");
+      envelope.records[legacyKey] = {
+        tenantId: "tenant_a",
+        userId: "user",
+        recordVersion:
+          Math.max(...Object.values(envelope.records).map((item) => item.recordVersion)) + 1,
+        authorityGeneration: envelope.authorityGeneration,
+        value: {
+          kind: "nonce",
+          hash: "legacy",
+          expiresAt: 999,
+          generation: envelope.highWatermarks.replayGeneration,
+        },
       };
-      assert(["preparing", "committing", "failed"].includes(raw.migration.status));
-      equals(await ok({ action: "migrate", root: migrationRoot }), "migrated");
-      const view = await inspect(migrationRoot);
-      equals(view.schemaVersion, 2);
-      assert("nonce/legacy" in (tenantOf(view).replay as object));
+      return envelope;
+    };
+    for (const stateName of ["preparing", "committing", "failed"] as const) {
+      const migrationRoot = `${root}/${stateName}`;
+      const legacyEnvelope = await makeLegacy(stateName);
+      equals(
+        outcome(
+          await ok({
+            action: "initializeAuthority",
+            root: migrationRoot,
+            transaction: legacyEnvelope,
+          }),
+        ),
+        "committed",
+      );
+      equals(
+        outcome(
+          await ok({
+            action: "prepareMigration",
+            root: migrationRoot,
+            transaction: { expectedSchemaVersion: 1, targetSchemaVersion: 2 },
+          }),
+        ),
+        "committed",
+      );
+      if (stateName === "committing") {
+        equals(outcome(await ok({ action: "advanceMigration", root: migrationRoot })), "committed");
+      }
+      if (stateName === "failed") {
+        equals(outcome(await ok({ action: "failMigration", root: migrationRoot })), "committed");
+      }
+      const raw = await ok({
+        action: "raw",
+        root: migrationRoot,
+        transaction: false,
+      }) as DurableAuthorityEnvelope;
+      equals(raw.migration.status, stateName);
+      equals(outcome(await ok({ action: "recoverMigration", root: migrationRoot })), "committed");
+      const exported = await ok({
+        action: "export",
+        root: migrationRoot,
+      }) as DurableAuthorityEnvelope;
+      assertCurrentEnvelope(exported);
+      assert(replayKey(ctx(), "nonce", "legacy") in exported.records);
     }
     const legacy = validEnvelope();
     legacy.schemaVersion = 1;
@@ -671,6 +890,8 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       toVersion: 2,
       migrate(value) {
         value.schemaVersion = 2;
+        value.authorityGeneration++;
+        value.highWatermarks.authorityGeneration = value.authorityGeneration;
         value.highWatermarks.schemaVersion = 2;
         value.migration = { status: "idle", generation: 1, fromVersion: 1, toVersion: 2 };
         value.highWatermarks.migrationGeneration = 1;
@@ -678,18 +899,102 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       },
     }]);
     assertCurrentEnvelope(migrated);
+    const helperRoot = `${root}/helper_restore`;
+    equals(
+      outcome(
+        await ok({
+          action: "initializeAuthority",
+          root: helperRoot,
+          transaction: migrated,
+        }),
+      ),
+      "committed",
+    );
+    equals(
+      outcome(
+        await ok({
+          action: "restore",
+          root: helperRoot,
+          transaction: migrated,
+        }),
+      ),
+      "committed",
+    );
+    assertCurrentEnvelope(
+      await ok({ action: "export", root: helperRoot }) as DurableAuthorityEnvelope,
+    );
+    const rollback = structuredClone(legacy);
+    rollback.records[entityKey(ctx(), "subject", "device")]!.recordVersion = 99;
+    const deviceKey = entityKey(ctx(), "subject", "device");
+    const grantKey = entityKey(ctx(), "subject", "grant");
+    const rejectsMigration = async (
+      before: DurableAuthorityEnvelope,
+      mutate: (value: DurableAuthorityEnvelope) => void,
+    ) => {
+      await rejects(() =>
+        migrateAuthorityEnvelope(before, [{
+          fromVersion: 1,
+          toVersion: 2,
+          migrate(value) {
+            value.schemaVersion = 2;
+            value.authorityGeneration++;
+            value.highWatermarks.authorityGeneration = value.authorityGeneration;
+            value.highWatermarks.schemaVersion = 2;
+            value.highWatermarks.migrationGeneration++;
+            value.migration = { status: "idle", generation: 1, fromVersion: 1, toVersion: 2 };
+            mutate(value);
+            return value;
+          },
+        }])
+      );
+    };
+    await rejectsMigration(rollback, (value) => {
+      value.records[deviceKey]!.recordVersion = 1;
+    });
+    await rejectsMigration(legacy, (value) => {
+      delete value.records[deviceKey];
+    });
+    await rejectsMigration(legacy, (value) => {
+      value.records[deviceKey]!.authorityGeneration--;
+    });
+    await rejectsMigration(legacy, (value) => {
+      const grant = value.records[grantKey]!.value as Record<string, unknown>;
+      grant.status = "disabled";
+    });
+    await rejectsMigration(legacy, (value) => {
+      value.authorityGeneration = legacy.authorityGeneration - 1;
+      value.highWatermarks.authorityGeneration = value.authorityGeneration;
+    });
+    const revoked = structuredClone(legacy);
+    const revokedDevice = revoked.records[deviceKey]!.value as Record<string, unknown>;
+    revokedDevice.status = "revoked";
+    (revokedDevice.identity as Record<string, unknown>).status = "revoked";
+    await rejectsMigration(revoked, (value) => {
+      const item = value.records[deviceKey]!;
+      item.recordVersion++;
+      const device = item.value as Record<string, unknown>;
+      device.status = "active";
+      (device.identity as Record<string, unknown>).status = "active";
+    });
   },
   "DUR-19": async (root) => {
-    await setup(root);
-    await ok({ action: "legacy", root, owner: alice });
-    equals((await run({ action: "inspect", root, owner: alice })).outcome, "denied");
-    const results = await Promise.all(
-      Array.from({ length: 6 }, () => ok({ action: "migrate", root })),
+    const source = `${root}/source`;
+    await setup(source);
+    const envelope = await ok({ action: "export", root: source }) as DurableAuthorityEnvelope;
+    envelope.schemaVersion = 1;
+    envelope.highWatermarks.schemaVersion = 1;
+    envelope.migration = { status: "idle", generation: 0, fromVersion: 1, toVersion: 1 };
+    equals(
+      outcome(await ok({ action: "initializeAuthority", root, transaction: envelope })),
+      "committed",
     );
-    assert(results.every((item) => item === "migrated" || item === "already_current"));
-    const migrated = await inspect(root);
-    equals(migrated.schemaVersion, 2);
-    equals((migrated.migration as Record<string, unknown>).generation, 1);
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => ok({ action: "recoverMigration", root })),
+    );
+    assert(results.every((item) => outcome(item) === "committed"));
+    const migrated = await ok({ action: "export", root }) as DurableAuthorityEnvelope;
+    assertCurrentEnvelope(migrated);
+    equals(migrated.migration.generation, 1);
   },
   "DUR-20": async (root) => {
     await setup(root);
@@ -709,28 +1014,65 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         now: 20,
       },
     });
-    equals(await ok({ action: "restore", root, path: currentPath }), false);
-    const mutationBase = "tenants.tenant_a/user";
+    equals(outcome(await ok({ action: "restore", root, path: currentPath })), "denied");
+    const recordBase = `records.${entityKey(ctx(), "subject", "device")}`;
     const mutations = [
-      { path: `${mutationBase}.subjects.device`, deletion: true },
-      { path: `${mutationBase}.subjects.device.recordVersion`, value: 1 },
-      { path: `${mutationBase}.subjects.device.status`, value: "active" },
-      { path: `${mutationBase}.tenantId`, value: "tenant_b" },
+      { path: recordBase, deletion: true },
+      { path: `${recordBase}.recordVersion`, value: 1 },
+      { path: `${recordBase}.value.status`, value: "active" },
+      { path: `${recordBase}.tenantId`, value: "tenant_b" },
     ];
     for (const mutation of mutations) {
       const path = `${root}/candidate_${crypto.randomUUID()}.json`;
       await ok({ action: "snapshot", root, path });
       await ok({ action: "mutatePath", root, path, mutation });
-      equals(await ok({ action: "restore", root, path }), false);
+      equals(outcome(await ok({ action: "restore", root, path })), "denied");
     }
-    const envelope = validEnvelope();
+    await ok({
+      action: "issue",
+      root,
+      owner: alice,
+      transaction: challenge(alice, "restore_expired", "bootstrap", 20),
+    });
+    const beforeClock = `${root}/before_clock.json`;
+    await ok({ action: "snapshot", root, path: beforeClock });
+    await ok({
+      action: "consumeReplay",
+      root,
+      owner: alice,
+      transaction: {
+        records: [{ kind: "nonce", hash: "clock_restore" }],
+        expiresAt: 700,
+        now: 600,
+      },
+    });
+    equals(outcome(await ok({ action: "restore", root, path: beforeClock })), "denied");
+    equals(
+      outcome(
+        await ok({
+          action: "commit",
+          root,
+          owner: alice,
+          transaction: {
+            challengeId: "restore_expired",
+            transactionHash: "hash_restore_expired",
+            purpose: "bootstrap",
+            now: 100,
+            mutation: { kind: "bootstrap", value: bootstrapValue(alice) },
+          },
+        }),
+      ),
+      "denied",
+    );
+    const envelope = await ok({ action: "export", root }) as DurableAuthorityEnvelope;
+    assertCurrentEnvelope(envelope);
+    equals(outcome(await ok({ action: "restore", root, transaction: envelope })), "committed");
     const stale = structuredClone(envelope);
-    stale.authorityGeneration = 2;
-    stale.highWatermarks.authorityGeneration = 2;
+    stale.effectiveNow--;
     await rejects(() => assertRestoreNotStale(stale, envelope));
     const copied = structuredClone(envelope);
-    (copied.records["tenant/tenant_a/user/user/subject/device"]!.value as Record<string, unknown>)
-      .status = "revoked";
+    (copied.records[entityKey(ctx(), "subject", "device")]!.value as Record<string, unknown>)
+      .status = "active";
     await rejects(() => assertRestoreNotStale(copied, envelope));
   },
   "DUR-21": async (root) => {
@@ -854,6 +1196,7 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       })(),
     ];
     for (const value of encoderCases) await rejects(() => serializeDurableAuthority(value));
+    await rejects(() => serializeDurableAuthority(-0));
     assert(new TextDecoder().decode(serializeDurableAuthority([1, 2])) === "[1,2]");
     const envelope = validEnvelope();
     assertCurrentEnvelope(envelope);
@@ -878,7 +1221,7 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         value.authorityGeneration = 2;
       },
       (value) => {
-        const replay = value.records["tenant/tenant_a/user/user/replay/replayhash"]!;
+        const replay = value.records[replayKey(ctx(), "nonce", "device_attempt")]!;
         (replay.value as Record<string, unknown>).expiresAt = 0;
       },
       (value) => {
@@ -888,10 +1231,10 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       (value) => {
         const attempt = value.records["tenant/tenant_a/user/user/attempt/attempt"]!;
         Object.assign(attempt.value as Record<string, unknown>, {
-          state: "completed",
-          dispatchPermitUsed: true,
+          state: "reserved",
           claimVersion: 1,
-          result: { outcome: "failed_safe", reason: "wrong" },
+          permitHash: "usedpermit",
+          permitAuthorityGeneration: 3,
         });
       },
       (value) => {
@@ -903,6 +1246,31 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         (item.value as Record<string, unknown>).owner = "tenant/tenant_b/user/user";
       },
       (value) => {
+        delete value.records[entityKey(ctx(), "custody", "custodyhash")];
+      },
+      (value) => {
+        delete value.records[entityKey(ctx(), "connection", "connection")];
+      },
+      (value) => {
+        const item = value.records[recordKey]!.value as Record<string, unknown>;
+        (item.identity as Record<string, unknown>).status = "revoked";
+      },
+      (value) => {
+        const bobReplay = replayKey(ctx(bob), "nonce", "device_attempt");
+        value.records[bobReplay] = {
+          tenantId: "tenant_b",
+          userId: "user",
+          recordVersion: 20,
+          authorityGeneration: 3,
+          value: { kind: "nonce", hash: "device_attempt", expiresAt: 500, generation: 1 },
+        };
+        const attempt = value.records[entityKey(ctx(), "attempt", "attempt")]!.value as Record<
+          string,
+          unknown
+        >;
+        (attempt.replayKeys as string[])[0] = bobReplay;
+      },
+      (value) => {
         value.records["tenant/tenant_b/user/user/custody/custodyhash"] = {
           tenantId: "tenant_b",
           userId: "user",
@@ -911,6 +1279,7 @@ const cases: Record<string, (root: string) => Promise<void>> = {
           value: {
             custodyReferenceHash: "custodyhash",
             owner: "tenant/tenant_b/user/user",
+            connectionId: "connection",
           },
         };
       },
@@ -940,12 +1309,18 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     const backup = `${root}/clean.json`;
     await ok({ action: "snapshot", root, path: backup });
     const nested = [
-      { path: "tenants.tenant_a/user.subjects.device.version", value: "bad" },
-      { path: "tenants.tenant_a/user.subjects.device.status", value: "bad" },
-      { path: "tenants.tenant_a/user.replay.nonce/corrupt.expiresAt", value: -1 },
-      { path: "tenants.tenant_a/user.challenges.corrupt_challenge.purpose", value: "bad" },
-      { path: "tenants.tenant_a/user.attempts.bad", value: { state: "reserved" } },
-      { path: "custodyClaims.custody_tenant_a_user", value: "tenant_b/user" },
+      { path: `records.${entityKey(ctx(), "subject", "device")}.value.version`, value: "bad" },
+      { path: `records.${entityKey(ctx(), "subject", "device")}.value.status`, value: "bad" },
+      { path: `records.${replayKey(ctx(), "nonce", "corrupt")}.value.expiresAt`, value: -1 },
+      {
+        path: `records.${entityKey(ctx(), "challenge", "corrupt_challenge")}.value.purpose`,
+        value: "bad",
+      },
+      { path: `records.${entityKey(ctx(), "attempt", "bad")}`, value: { state: "reserved" } },
+      {
+        path: `records.${entityKey(ctx(), "custody", "custody_tenant_a_user")}.value.owner`,
+        value: "tenant/tenant_b/user/user",
+      },
       { path: "effectiveNow", value: -1 },
     ];
     for (const mutation of nested) {

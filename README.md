@@ -15,9 +15,11 @@ offline gate with zero skips.
 No listener, live adapter, credential or environment access, remote import, vendor request,
 deployment, UI, Git remote, or provider resource exists. Storage, production key custody, MCP SDK
 and named clients, callback topology, revocation promise, and retention remain unresolved activation
-blockers. Stage 1A qualifies a one-time durable `reserved` → `dispatching` permit claim and
-at-most-once dispatch authorization, not filesystem power-loss durability or external exactly-once
-execution; `unknown_commit` and `dispatch_unknown` are durable ambiguity states and are never
-automatically retried.
+blockers. Stage 1A qualifies an opaque durable `reserved` → `dispatching` permit claim followed by
+adapter-neutral atomic `startDispatch` consumption; only that one-use result authorizes dispatch.
+The same neutral envelope and maintenance interface cover export, inspection, restore, migration,
+and recovery. This is not filesystem power-loss durability or external exactly-once execution;
+`unknown_commit` and `dispatch_unknown` are durable ambiguity states and are never automatically
+retried. Concrete seed/view helpers and write-fault configuration are test-fixture behavior only.
 
 Requires exact Deno 2.9.0. No network or package changes are needed.
