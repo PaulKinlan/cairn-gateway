@@ -592,6 +592,148 @@ async function exercisePostImportIntrinsicReplacement(root: string): Promise<voi
   }
 }
 
+type CandidateFactory = (root: string) => ReturnType<typeof createCandidateAdapter>;
+
+const tenantMaintenanceContext = (
+  candidate: ReturnType<typeof createCandidateAdapter>,
+  owner: typeof alice,
+  purpose: "export" | "inspect" | "restore",
+): AuthorityMaintenanceContext =>
+  candidate.fixture.issueMaintenanceContext({
+    tenant: ctx(owner),
+    actorId: `${owner.tenantId}_operator`,
+    purpose,
+  });
+
+function plannedAliceGrantDisable(
+  exported: DurableAuthorityEnvelope,
+): DurableAuthorityEnvelope {
+  const planned = structuredClone(exported);
+  const grant = planned.records[entityKey(ctx(alice), "subject", "grant")]!;
+  const value = grant.value as Record<string, unknown>;
+  const identity = value.identity as Record<string, unknown>;
+  grant.recordVersion++;
+  grant.authorityGeneration = planned.authorityGeneration;
+  value.status = "disabled";
+  value.version = Number(value.version) + 1;
+  identity.status = "disabled";
+  identity.version = Number(identity.version) + 1;
+  assertCurrentEnvelope(planned);
+  return planned;
+}
+
+async function assertScopedRestoreApplied(
+  factory: CandidateFactory,
+  root: string,
+): Promise<void> {
+  const candidate = factory(root);
+  const aliceBefore = await candidate.maintenance.exportAuthority(
+    tenantMaintenanceContext(candidate, alice, "export"),
+  );
+  const bobBefore = await candidate.maintenance.exportAuthority(
+    tenantMaintenanceContext(candidate, bob, "export"),
+  );
+  const planned = plannedAliceGrantDisable(aliceBefore);
+  const expectedAliceRecords = serialize(planned.records);
+  const expectedBobRecords = serialize(bobBefore.records);
+  const expectedGeneration = planned.authorityGeneration + 1;
+  const grantKey = entityKey(ctx(alice), "subject", "grant");
+  const priorGrant = aliceBefore.records[grantKey]!;
+  const priorValue = priorGrant.value as Record<string, unknown>;
+  const priorIdentity = priorValue.identity as Record<string, unknown>;
+  const expectedGrant = planned.records[grantKey]!;
+  const expectedValue = expectedGrant.value as Record<string, unknown>;
+  const expectedIdentity = expectedValue.identity as Record<string, unknown>;
+  assert(Object.values(planned.records).every((record) => record.tenantId === alice.tenantId));
+  equals(
+    {
+      recordVersion: expectedGrant.recordVersion,
+      recordAuthorityGeneration: expectedGrant.authorityGeneration,
+      status: expectedValue.status,
+      version: expectedValue.version,
+      identityStatus: expectedIdentity.status,
+      identityVersion: expectedIdentity.version,
+    },
+    {
+      recordVersion: priorGrant.recordVersion + 1,
+      recordAuthorityGeneration: planned.authorityGeneration,
+      status: "disabled",
+      version: Number(priorValue.version) + 1,
+      identityStatus: "disabled",
+      identityVersion: Number(priorIdentity.version) + 1,
+    },
+  );
+
+  equals(
+    await candidate.maintenance.restoreAuthority(
+      tenantMaintenanceContext(candidate, alice, "restore"),
+      planned,
+    ),
+    { outcome: "committed", authorityGeneration: expectedGeneration },
+  );
+
+  // Recreate the candidate through the public seam so only persisted state can satisfy the proof.
+  const reopened = factory(root);
+  const aliceAfter = await reopened.maintenance.exportAuthority(
+    tenantMaintenanceContext(reopened, alice, "export"),
+  );
+  const bobAfter = await reopened.maintenance.exportAuthority(
+    tenantMaintenanceContext(reopened, bob, "export"),
+  );
+  equals(serialize(aliceAfter.records), expectedAliceRecords);
+  equals(serialize(bobAfter.records), expectedBobRecords);
+  equals(aliceAfter.authorityGeneration, expectedGeneration);
+  equals(aliceAfter.highWatermarks.authorityGeneration, expectedGeneration);
+
+  const actualGrant = aliceAfter.records[grantKey]!;
+  const actualValue = actualGrant.value as Record<string, unknown>;
+  const actualIdentity = actualValue.identity as Record<string, unknown>;
+  equals(
+    {
+      recordVersion: actualGrant.recordVersion,
+      recordAuthorityGeneration: actualGrant.authorityGeneration,
+      status: actualValue.status,
+      version: actualValue.version,
+      identityStatus: actualIdentity.status,
+      identityVersion: actualIdentity.version,
+    },
+    {
+      recordVersion: expectedGrant.recordVersion,
+      recordAuthorityGeneration: expectedGrant.authorityGeneration,
+      status: "disabled",
+      version: expectedValue.version,
+      identityStatus: "disabled",
+      identityVersion: expectedIdentity.version,
+    },
+  );
+}
+
+/** Deliberately defective candidate used only to prove the conformance assertion catches false commit. */
+const falseCommitCandidate: CandidateFactory = (root) => {
+  const candidate = createCandidateAdapter(root);
+  const maintenance = new Proxy(candidate.maintenance, {
+    get(target, property) {
+      if (property === "restoreAuthority") {
+        return (
+          _context: AuthorityMaintenanceContext,
+          snapshot: DurableAuthorityEnvelope,
+        ) =>
+          Promise.resolve({
+            outcome: "committed" as const,
+            authorityGeneration: snapshot.authorityGeneration + 1,
+          });
+      }
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return Object.freeze({
+    transactions: candidate.transactions,
+    maintenance,
+    fixture: candidate.fixture,
+  });
+};
+
 const cases: Record<string, (root: string) => Promise<void>> = {
   "DUR-01": async (root) => {
     await setup(root);
@@ -722,37 +864,84 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     }
 
     const candidate = createCandidateAdapter(root);
-    const tenantCapability = (
-      owner: typeof alice,
-      purpose: "export" | "inspect" | "restore",
-    ) =>
-      candidate.fixture.issueMaintenanceContext({
-        tenant: ctx(owner),
-        actorId: `${owner.tenantId}_operator`,
-        purpose,
-      });
     const aliceExport = await candidate.maintenance.exportAuthority(
-      tenantCapability(alice, "export"),
+      tenantMaintenanceContext(candidate, alice, "export"),
     );
-    const bobExport = await candidate.maintenance.exportAuthority(tenantCapability(bob, "export"));
+    const bobExport = await candidate.maintenance.exportAuthority(
+      tenantMaintenanceContext(candidate, bob, "export"),
+    );
     assert(
       Object.values(aliceExport.records).every((record) => record.tenantId === alice.tenantId),
     );
     assert(Object.values(bobExport.records).every((record) => record.tenantId === bob.tenantId));
+    const aliceBefore = serialize(aliceExport.records);
     const bobBefore = serialize(bobExport.records);
+    const aliceGrantKey = entityKey(ctx(alice), "subject", "grant");
+    const bobGrantKey = entityKey(ctx(bob), "subject", "grant");
+    assert(!(bobGrantKey in aliceExport.records));
+
+    // A tenant snapshot may neither inject a new foreign record nor overwrite an existing one.
+    const foreignInjection = structuredClone(aliceExport);
+    const injectedReplayKey = replayKey(ctx(bob), "nonce", "restore_injection");
+    foreignInjection.records[injectedReplayKey] = {
+      tenantId: bob.tenantId,
+      userId: bob.userId,
+      recordVersion: 1,
+      authorityGeneration: foreignInjection.authorityGeneration,
+      value: {
+        kind: "nonce",
+        hash: "restore_injection",
+        expiresAt: 90,
+        generation: foreignInjection.highWatermarks.replayGeneration,
+      },
+    };
     equals(
       outcome(
         await candidate.maintenance.restoreAuthority(
-          tenantCapability(alice, "restore"),
-          aliceExport,
+          tenantMaintenanceContext(candidate, alice, "restore"),
+          foreignInjection,
         ),
       ),
-      "committed",
+      "denied",
+    );
+
+    const foreignOverwrite = structuredClone(aliceExport);
+    const overwrittenBobGrant = structuredClone(bobExport.records[bobGrantKey]!);
+    const overwrittenValue = overwrittenBobGrant.value as Record<string, unknown>;
+    const overwrittenIdentity = overwrittenValue.identity as Record<string, unknown>;
+    overwrittenBobGrant.recordVersion++;
+    overwrittenBobGrant.authorityGeneration = foreignOverwrite.authorityGeneration;
+    overwrittenValue.status = "disabled";
+    overwrittenValue.version = Number(overwrittenValue.version) + 1;
+    overwrittenIdentity.status = "disabled";
+    overwrittenIdentity.version = Number(overwrittenIdentity.version) + 1;
+    foreignOverwrite.records[bobGrantKey] = overwrittenBobGrant;
+    equals(
+      outcome(
+        await candidate.maintenance.restoreAuthority(
+          tenantMaintenanceContext(candidate, alice, "restore"),
+          foreignOverwrite,
+        ),
+      ),
+      "denied",
+    );
+
+    // Omitting an existing record from the owned partition is a denied monotonic deletion.
+    const ownedDeletion = structuredClone(aliceExport);
+    delete ownedDeletion.records[aliceGrantKey];
+    equals(
+      outcome(
+        await candidate.maintenance.restoreAuthority(
+          tenantMaintenanceContext(candidate, alice, "restore"),
+          ownedDeletion,
+        ),
+      ),
+      "denied",
     );
     equals(
       outcome(
         await candidate.maintenance.restoreAuthority(
-          tenantCapability(alice, "restore"),
+          tenantMaintenanceContext(candidate, alice, "restore"),
           bobExport,
         ),
       ),
@@ -760,10 +949,31 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     );
     equals(
       serialize(
-        (await candidate.maintenance.exportAuthority(tenantCapability(bob, "export"))).records,
+        (await candidate.maintenance.exportAuthority(
+          tenantMaintenanceContext(candidate, alice, "export"),
+        )).records,
+      ),
+      aliceBefore,
+    );
+    equals(
+      serialize(
+        (await candidate.maintenance.exportAuthority(
+          tenantMaintenanceContext(candidate, bob, "export"),
+        )).records,
       ),
       bobBefore,
     );
+
+    // Apply a genuine Alice-only monotonic authority transition and prove it survived reopening.
+    await assertScopedRestoreApplied(createCandidateAdapter, root);
+
+    // The same proof must reject an adapter that claims commit but does not write the snapshot.
+    const falseCommitRoot = `${root}/false_commit`;
+    await Promise.all([
+      setup(falseCommitRoot, alice, "false_commit_a"),
+      setup(falseCommitRoot, bob, "false_commit_b"),
+    ]);
+    await rejects(() => assertScopedRestoreApplied(falseCommitCandidate, falseCommitRoot));
     await rejects(() => candidate.maintenance.recoverMigration({} as AuthorityMaintenanceContext));
     await candidate.fixture.writeLegacy(alice);
     const globalRecovery = candidate.fixture.issueAuthorityMaintenanceContext({

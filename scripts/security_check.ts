@@ -12,7 +12,10 @@ const forbiddenRuntime = [
   /\bbaseUrlOverride\b/,
   /\bDeno\.openKv\b/,
   /\bDeno\.env\.get\b/,
-  /\bnew\s+WebSocket\b/,
+  /\bDeno\.(?:listen|listenTls|serve|serveHttp)\b/,
+  /\bBun\.serve\b/,
+  /\b(?:serve|serveTls|listen|listenTls|createServer|createSecureServer)\s*\(/,
+  /\bnew\s+(?:Server|WebSocket|WebSocketServer)\b/,
   /\bfetch\s*\(/,
   /https?:\/\/(?!api\.github\.com\/user\b|fixture\.cairn\.invalid\/oauth\/github\/callback\b)/,
 ];
@@ -57,5 +60,5 @@ for (const file of tracked) {
 }
 if ((await git(["remote"])).trim()) throw new Error("repository remote is forbidden at Stage 0");
 console.log(
-  `security-check: ${runtimeFiles.length} runtime TypeScript files and ${tracked.length} tracked paths recursively checked; no forbidden surfaces, credential-shaped files/content, remote imports, or Git remote`,
+  `security-check: ${runtimeFiles.length} runtime TypeScript files and ${tracked.length} tracked paths recursively checked; no forbidden network/listener, credential-shaped, remote-import, or Git-remote surface`,
 );
