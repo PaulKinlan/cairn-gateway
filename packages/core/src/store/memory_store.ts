@@ -30,22 +30,64 @@ import type {
   RemovalCommit,
 } from "./store.ts";
 
-function assertPlainData(value: unknown, active = new WeakSet<object>()): void {
-  if (value === null || ["string", "number", "boolean", "undefined"].includes(typeof value)) {
-    return;
-  }
-  if (typeof value !== "object") throw new Error("plain data denied");
+// Same-realm plain-data boundary inventory. Capture every mutable intrinsic before callers can
+// replace globals or the shared node:util types object after module initialization.
+const intrinsicReflectApply = Reflect.apply;
+const intrinsicIsProxy = nodeTypes.isProxy;
+const intrinsicArrayIsArray = Array.isArray;
+const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
+const intrinsicObjectGetOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
+const intrinsicReflectOwnKeys = Reflect.ownKeys;
+const intrinsicStructuredClone = structuredClone;
+const intrinsicObjectFreeze = Object.freeze;
+const intrinsicObjectPrototype = Object.prototype;
+const intrinsicArrayPrototype = Array.prototype;
+const IntrinsicWeakSet = WeakSet;
+const intrinsicWeakSetHas = WeakSet.prototype.has;
+const intrinsicWeakSetAdd = WeakSet.prototype.add;
+const intrinsicWeakSetDelete = WeakSet.prototype.delete;
+
+function applyIntrinsic<T>(fn: (...args: never[]) => T, receiver: unknown, args: unknown[]): T {
+  return intrinsicReflectApply(fn, receiver, args) as T;
+}
+
+function isProxy(object: object): boolean {
+  return applyIntrinsic(intrinsicIsProxy, nodeTypes, [object]);
+}
+
+function weakSetHas(set: WeakSet<object>, object: object): boolean {
+  return applyIntrinsic(intrinsicWeakSetHas, set, [object]);
+}
+
+function weakSetAdd(set: WeakSet<object>, object: object): void {
+  applyIntrinsic(intrinsicWeakSetAdd, set, [object]);
+}
+
+function weakSetDelete(set: WeakSet<object>, object: object): void {
+  applyIntrinsic(intrinsicWeakSetDelete, set, [object]);
+}
+
+function assertPlainData(value: unknown, active = new IntrinsicWeakSet<object>()): void {
+  const type = typeof value;
+  if (
+    value === null || type === "string" || type === "number" || type === "boolean" ||
+    type === "undefined"
+  ) return;
+  if (type !== "object") throw new Error("plain data denied");
   const object = value as object;
-  if (nodeTypes.isProxy(object) || active.has(object)) throw new Error("plain data denied");
-  active.add(object);
+  // The captured trap-free predicate must run before any reflective or property operation.
+  if (isProxy(object) || weakSetHas(active, object)) throw new Error("plain data denied");
+  weakSetAdd(active, object);
   try {
-    const array = Array.isArray(object);
-    const prototype = Object.getPrototypeOf(object);
-    if (prototype !== (array ? Array.prototype : Object.prototype)) {
+    const array = intrinsicArrayIsArray(object);
+    const prototype = intrinsicObjectGetPrototypeOf(object);
+    if (prototype !== (array ? intrinsicArrayPrototype : intrinsicObjectPrototype)) {
       throw new Error("plain data denied");
     }
-    const descriptors = Object.getOwnPropertyDescriptors(object);
-    for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptors = intrinsicObjectGetOwnPropertyDescriptors(object);
+    const keys = intrinsicReflectOwnKeys(descriptors);
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index]!;
       if (typeof key === "symbol") throw new Error("plain data denied");
       const descriptor = descriptors[key];
       if (!descriptor || !("value" in descriptor)) throw new Error("plain data denied");
@@ -54,24 +96,33 @@ function assertPlainData(value: unknown, active = new WeakSet<object>()): void {
       assertPlainData(descriptor.value, active);
     }
   } finally {
-    active.delete(object);
+    weakSetDelete(active, object);
   }
 }
 
-function freezePlainData(value: unknown, seen = new WeakSet<object>()): void {
-  if (!value || typeof value !== "object" || seen.has(value as object)) return;
-  const object = value as Record<PropertyKey, unknown>;
-  seen.add(object);
-  for (const key of Reflect.ownKeys(object)) freezePlainData(object[key], seen);
-  Object.freeze(object);
+function freezePlainData(value: unknown, seen = new IntrinsicWeakSet<object>()): void {
+  if (!value || typeof value !== "object") return;
+  const object = value as object;
+  // Keep deep-freeze trap-free even if its precondition is changed by a future caller.
+  if (isProxy(object)) throw new Error("plain data denied");
+  if (weakSetHas(seen, object)) return;
+  weakSetAdd(seen, object);
+  const descriptors = intrinsicObjectGetOwnPropertyDescriptors(object);
+  const keys = intrinsicReflectOwnKeys(descriptors);
+  for (let index = 0; index < keys.length; index++) {
+    const key = keys[index]!;
+    const descriptor = (descriptors as Record<PropertyKey, PropertyDescriptor>)[key];
+    if (!descriptor || !("value" in descriptor)) throw new Error("plain data denied");
+    freezePlainData(descriptor.value, seen);
+  }
+  intrinsicObjectFreeze(object);
 }
 
 /** Rejects accessors, exotic prototypes, symbols, cycles, and proxies before use. */
 function plainDataSnapshot<T>(value: T): Readonly<T> {
   try {
-    // Deno's local runtime proxy predicate is trap-free; use it recursively before reflection.
     assertPlainData(value);
-    const snapshot = structuredClone(value);
+    const snapshot = intrinsicStructuredClone(value);
     assertPlainData(snapshot);
     freezePlainData(snapshot);
     return snapshot;

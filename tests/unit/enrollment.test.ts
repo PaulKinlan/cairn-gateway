@@ -1,3 +1,4 @@
+import { types as mutableNodeTypes } from "node:util";
 import { assert, equals, rejects } from "../assert.ts";
 import {
   DeviceEnrollmentService,
@@ -317,6 +318,276 @@ Deno.test("authoritative commit inputs reject accessors without observation", as
     "plain data denied",
   );
   equals(reads, 0);
+});
+
+Deno.test("post-import intrinsic replacement cannot bypass authoritative snapshots", async () => {
+  const bootstrapBackend = new MemoryAuthorityBackend();
+  const bootstrapStore = new MemoryStore(bootstrapBackend);
+  const bootstrapService = new DeviceEnrollmentService(bootstrapStore);
+  const bootstrapDeviceSigner = await fixtureDeviceSigner(0);
+  const bootstrapAgentSigner = await fixtureAgentSigner();
+  const bootstrapDeviceJwk = await bootstrapDeviceSigner.publicJwk();
+  const bootstrapAgentJwk = await bootstrapAgentSigner.publicJwk();
+  const bootstrapAgentId = ids.agent("agent_intrinsics");
+  const bootstrapDeviceId = ids.device("device_intrinsics");
+  const bootstrapChallenge = await bootstrapService.bootstrapChallenge(
+    ctx,
+    principal,
+    bootstrapAgentId,
+    bootstrapAgentJwk,
+    bootstrapDeviceId,
+    bootstrapDeviceJwk,
+    now,
+  );
+  const bootstrapValue: BootstrapCommit = {
+    principal: { ...principal, epoch: 1 },
+    agent: {
+      id: bootstrapAgentId,
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      publicJwk: bootstrapAgentJwk,
+      thumbprint: await jwkThumbprint(bootstrapAgentJwk),
+      status: "active",
+      epoch: 1,
+    },
+    device: {
+      id: bootstrapDeviceId,
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentId: bootstrapAgentId,
+      publicJwk: bootstrapDeviceJwk,
+      thumbprint: await jwkThumbprint(bootstrapDeviceJwk),
+      role: "admin",
+      status: "active",
+      epoch: 1,
+    },
+  };
+
+  const approvalBackend = new MemoryAuthorityBackend();
+  const { store: approvalStore, service: approvalService } = await boot(approvalBackend);
+  const { result: pendingResult } = await pending(approvalService);
+  const approver = (await approvalStore.getDevice(ctx, "device_a"))!;
+  const approvalAgent = (await approvalStore.getAgent(ctx, "agent_a"))!;
+  const candidateId = ids.device("device_intrinsics_candidate");
+  const approvalChallenge = await approvalService.approvalChallenge(
+    ctx,
+    pendingResult.request.id,
+    approver.id,
+    candidateId,
+    pendingResult.fingerprint,
+    now,
+  );
+  const approvalValue: ApprovalCommit = {
+    requestId: pendingResult.request.id,
+    device: {
+      id: candidateId,
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentId: approvalAgent.id,
+      publicJwk: pendingResult.request.candidateJwk,
+      thumbprint: pendingResult.request.thumbprint,
+      role: "member",
+      status: "active",
+      epoch: 1,
+    },
+    principalEpoch: 1,
+    agentEpoch: approvalAgent.epoch,
+    agentThumbprint: approvalAgent.thumbprint,
+    approverId: approver.id,
+    approverEpoch: approver.epoch,
+    approverThumbprint: approver.thumbprint,
+  };
+
+  const isProxyDescriptor = Object.getOwnPropertyDescriptor(mutableNodeTypes, "isProxy")!;
+  let bootstrapTraps = 0;
+  let approvalTraps = 0;
+  const hostileBootstrap = structuredClone(bootstrapValue);
+  const bootstrapJwk = hostileBootstrap.device.publicJwk;
+  hostileBootstrap.device.publicJwk = new Proxy(bootstrapJwk, {
+    getPrototypeOf: (target) => {
+      bootstrapTraps++;
+      hostileBootstrap.device.publicJwk = structuredClone(bootstrapJwk);
+      return Object.getPrototypeOf(target);
+    },
+  });
+  const hostileApproval = structuredClone(approvalValue);
+  const approvalJwk = hostileApproval.device.publicJwk;
+  hostileApproval.device.publicJwk = new Proxy(approvalJwk, {
+    getPrototypeOf: (target) => {
+      approvalTraps++;
+      hostileApproval.device.publicJwk = structuredClone(approvalJwk);
+      return Object.getPrototypeOf(target);
+    },
+  });
+  try {
+    Object.defineProperty(mutableNodeTypes, "isProxy", {
+      ...isProxyDescriptor,
+      value: () => false,
+    });
+    await rejects(
+      () => bootstrapStore.commitBootstrap(ctx, bootstrapChallenge, hostileBootstrap, now),
+      "plain data denied",
+    );
+    await rejects(
+      () => approvalStore.commitApproval(ctx, approvalChallenge, hostileApproval, now),
+      "plain data denied",
+    );
+  } finally {
+    Object.defineProperty(mutableNodeTypes, "isProxy", isProxyDescriptor);
+  }
+  equals([bootstrapTraps, approvalTraps], [0, 0]);
+  equals(bootstrapBackend.principals.size, 0);
+  equals(bootstrapBackend.agents.size, 0);
+  equals(bootstrapBackend.devices.size, 0);
+  equals(
+    [...approvalBackend.devices.values()].some((value) => value.id === candidateId),
+    false,
+  );
+  equals(
+    [...approvalBackend.enrollments.values()].find((value) => value.id === pendingResult.request.id)
+      ?.status,
+    "pending",
+  );
+  equals(
+    [...bootstrapBackend.challenges.values()].find((value) => value.id === bootstrapChallenge)
+      ?.used,
+    false,
+  );
+  equals(
+    [...approvalBackend.challenges.values()].find((value) => value.id === approvalChallenge)?.used,
+    false,
+  );
+
+  const OriginalObject = Object;
+  const OriginalArray = Array;
+  const OriginalWeakSet = WeakSet;
+  const defineProperty = Object.defineProperty;
+  const setPrototypeOf = Object.setPrototypeOf;
+  const descriptors = {
+    arrayIsArray: Object.getOwnPropertyDescriptor(OriginalArray, "isArray")!,
+    objectGetPrototypeOf: Object.getOwnPropertyDescriptor(OriginalObject, "getPrototypeOf")!,
+    objectGetOwnPropertyDescriptors: Object.getOwnPropertyDescriptor(
+      OriginalObject,
+      "getOwnPropertyDescriptors",
+    )!,
+    reflectOwnKeys: Object.getOwnPropertyDescriptor(Reflect, "ownKeys")!,
+    reflectApply: Object.getOwnPropertyDescriptor(Reflect, "apply")!,
+    structuredClone: Object.getOwnPropertyDescriptor(globalThis, "structuredClone")!,
+    objectFreeze: Object.getOwnPropertyDescriptor(OriginalObject, "freeze")!,
+    weakSet: Object.getOwnPropertyDescriptor(globalThis, "WeakSet")!,
+    weakSetHas: Object.getOwnPropertyDescriptor(OriginalWeakSet.prototype, "has")!,
+    weakSetAdd: Object.getOwnPropertyDescriptor(OriginalWeakSet.prototype, "add")!,
+    weakSetDelete: Object.getOwnPropertyDescriptor(OriginalWeakSet.prototype, "delete")!,
+    object: Object.getOwnPropertyDescriptor(globalThis, "Object")!,
+    array: Object.getOwnPropertyDescriptor(globalThis, "Array")!,
+  };
+  const poison = () => {
+    throw new Error("mutable intrinsic used");
+  };
+  const ReplacementObject = function (value?: unknown) {
+    return OriginalObject(value);
+  };
+  const ReplacementArray = function (...values: unknown[]) {
+    return OriginalArray(...values);
+  };
+  setPrototypeOf(ReplacementObject, OriginalObject);
+  setPrototypeOf(ReplacementArray, OriginalArray);
+
+  let bootstrapCommitted = false;
+  let approvalCommitted = false;
+  try {
+    defineProperty(OriginalArray, "isArray", {
+      ...descriptors.arrayIsArray,
+      value: (value: unknown) => {
+        if (value === bootstrapValue || value === approvalValue) poison();
+        return descriptors.arrayIsArray.value(value);
+      },
+    });
+    defineProperty(OriginalObject, "getPrototypeOf", {
+      ...descriptors.objectGetPrototypeOf,
+      value: (value: unknown) => {
+        if (value === bootstrapValue || value === approvalValue) poison();
+        return descriptors.objectGetPrototypeOf.value(value);
+      },
+    });
+    defineProperty(OriginalObject, "getOwnPropertyDescriptors", {
+      ...descriptors.objectGetOwnPropertyDescriptors,
+      value: (value: unknown) => {
+        if (value === bootstrapValue || value === approvalValue) poison();
+        return descriptors.objectGetOwnPropertyDescriptors.value(value);
+      },
+    });
+    defineProperty(Reflect, "ownKeys", { ...descriptors.reflectOwnKeys, value: poison });
+    defineProperty(Reflect, "apply", { ...descriptors.reflectApply, value: poison });
+    defineProperty(globalThis, "structuredClone", {
+      ...descriptors.structuredClone,
+      value: poison,
+    });
+    defineProperty(OriginalObject, "freeze", { ...descriptors.objectFreeze, value: poison });
+    defineProperty(OriginalWeakSet.prototype, "has", {
+      ...descriptors.weakSetHas,
+      value: poison,
+    });
+    defineProperty(OriginalWeakSet.prototype, "add", {
+      ...descriptors.weakSetAdd,
+      value: poison,
+    });
+    defineProperty(OriginalWeakSet.prototype, "delete", {
+      ...descriptors.weakSetDelete,
+      value: poison,
+    });
+    defineProperty(globalThis, "WeakSet", {
+      ...descriptors.weakSet,
+      value: class {
+        constructor() {
+          poison();
+        }
+      },
+    });
+    defineProperty(globalThis, "Object", { ...descriptors.object, value: ReplacementObject });
+    defineProperty(globalThis, "Array", { ...descriptors.array, value: ReplacementArray });
+
+    bootstrapCommitted = await bootstrapStore.commitBootstrap(
+      ctx,
+      bootstrapChallenge,
+      bootstrapValue,
+      now,
+    );
+    approvalCommitted = await approvalStore.commitApproval(
+      ctx,
+      approvalChallenge,
+      approvalValue,
+      now,
+    );
+  } finally {
+    defineProperty(globalThis, "Object", descriptors.object);
+    defineProperty(globalThis, "Array", descriptors.array);
+    defineProperty(globalThis, "WeakSet", descriptors.weakSet);
+    defineProperty(globalThis, "structuredClone", descriptors.structuredClone);
+    defineProperty(OriginalArray, "isArray", descriptors.arrayIsArray);
+    defineProperty(OriginalObject, "getPrototypeOf", descriptors.objectGetPrototypeOf);
+    defineProperty(
+      OriginalObject,
+      "getOwnPropertyDescriptors",
+      descriptors.objectGetOwnPropertyDescriptors,
+    );
+    defineProperty(OriginalObject, "freeze", descriptors.objectFreeze);
+    defineProperty(Reflect, "ownKeys", descriptors.reflectOwnKeys);
+    defineProperty(Reflect, "apply", descriptors.reflectApply);
+    defineProperty(OriginalWeakSet.prototype, "has", descriptors.weakSetHas);
+    defineProperty(OriginalWeakSet.prototype, "add", descriptors.weakSetAdd);
+    defineProperty(OriginalWeakSet.prototype, "delete", descriptors.weakSetDelete);
+  }
+  assert(bootstrapCommitted);
+  assert(approvalCommitted);
+  const storedBootstrapDevice = [...bootstrapBackend.devices.values()][0];
+  const storedApprovalDevice = [...approvalBackend.devices.values()].find((value) =>
+    value.id === candidateId
+  );
+  assert(storedBootstrapDevice && Object.isFrozen(storedBootstrapDevice));
+  assert(Object.isFrozen(storedBootstrapDevice.publicJwk));
+  assert(storedApprovalDevice && Object.isFrozen(storedApprovalDevice));
+  assert(Object.isFrozen(storedApprovalDevice.publicJwk));
 });
 
 Deno.test("hostile approval role and JWK inputs neither consume challenge nor elevate", async () => {
