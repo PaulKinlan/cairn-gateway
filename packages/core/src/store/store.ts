@@ -174,8 +174,10 @@ export type {
   DurableAuthorityMaintenance,
   DurableAuthorityTransactions,
   DurableDispatchPermit,
+  GlobalAuthorityMaintenanceAuthorization,
   InvocationReservation,
   InvocationReservationTransaction,
   MigrationPreparation,
   ReplayTransaction,
+  TenantAuthorityMaintenancePurpose,
 } from "./authority_transaction.ts";

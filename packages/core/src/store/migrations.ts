@@ -7,6 +7,11 @@ import {
   sameDurableValue,
   serializeDurableAuthority,
 } from "./schema.ts";
+import {
+  authorityObjectEntries,
+  authorityObjectValues,
+  authorityStructuredClone,
+} from "./intrinsics.ts";
 
 export interface AuthorityMigration {
   fromVersion: number;
@@ -25,7 +30,7 @@ const subjectStatus = (record: { value: unknown }): string | undefined => {
 const data = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
 
 function withoutFields(value: unknown, fields: readonly string[]): unknown {
-  const copy = structuredClone(value) as Record<string, unknown>;
+  const copy = authorityStructuredClone(value) as Record<string, unknown>;
   for (const field of fields) delete copy[field];
   return copy;
 }
@@ -120,7 +125,7 @@ function assertRecordsMonotonic(
   current: DurableAuthorityEnvelope,
   message: string,
 ): void {
-  for (const [key, currentRecord] of Object.entries(current.records)) {
+  for (const [key, currentRecord] of authorityObjectEntries(current.records)) {
     const candidateRecord = candidate.records[key];
     if (
       !candidateRecord || candidateRecord.tenantId !== currentRecord.tenantId ||
@@ -148,13 +153,13 @@ export function migrateAuthorityEnvelope(
     input.schemaVersion < DURABLE_AUTHORITY_MIN_SCHEMA_VERSION ||
     input.schemaVersion > DURABLE_AUTHORITY_SCHEMA_VERSION
   ) throw new Error("authority schema unavailable");
-  let value = structuredClone(input);
+  let value = authorityStructuredClone(input);
   while (value.schemaVersion < DURABLE_AUTHORITY_SCHEMA_VERSION) {
     const migration = migrations.find((item) => item.fromVersion === value.schemaVersion);
     if (!migration || migration.toVersion !== migration.fromVersion + 1) {
       throw new Error("authority migration unavailable");
     }
-    const before = structuredClone(value);
+    const before = authorityStructuredClone(value);
     value = migration.migrate(value);
     if (
       value.schemaVersion !== migration.toVersion ||
@@ -197,4 +202,41 @@ export function assertRestoreNotStale(
     throw new Error("stale authority restore denied");
   }
   assertRecordsMonotonic(candidate, current, "stale authority record restore denied");
+}
+
+/**
+ * A tenant-scoped restore compares only that owner partition. Schema and global watermarks remain
+ * controlled by the current envelope and are never imported from the tenant snapshot.
+ */
+export function assertTenantRestoreNotStale(
+  candidate: DurableAuthorityEnvelope,
+  current: DurableAuthorityEnvelope,
+  tenantId: string,
+  userId: string,
+): void {
+  assertCurrentEnvelope(current);
+  assertCurrentEnvelope(candidate);
+  const candidateRecords = authorityObjectValues(candidate.records);
+  if (
+    candidateRecords.some((record) => record.tenantId !== tenantId || record.userId !== userId) ||
+    candidateRecords.some((record) => record.authorityGeneration > current.authorityGeneration)
+  ) {
+    throw new Error("tenant restore ownership denied");
+  }
+  const prefix = `tenant/${tenantId}/user/${userId}/`;
+  const currentPartition = authorityStructuredClone(current);
+  currentPartition.records = {};
+  for (const [key, record] of authorityObjectEntries(current.records)) {
+    if (key.startsWith(prefix)) currentPartition.records[key] = record;
+  }
+  const candidatePartition = authorityStructuredClone(candidate);
+  candidatePartition.authorityGeneration = current.authorityGeneration;
+  candidatePartition.effectiveNow = current.effectiveNow;
+  candidatePartition.highWatermarks = authorityStructuredClone(current.highWatermarks);
+  candidatePartition.migration = authorityStructuredClone(current.migration);
+  assertRecordsMonotonic(
+    candidatePartition,
+    currentPartition,
+    "stale tenant authority record restore denied",
+  );
 }

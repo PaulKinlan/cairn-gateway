@@ -35,8 +35,15 @@ uses a candidate adapter factory; concrete seed/view/issuer helpers remain behin
 fixture-only driver. Crash scenarios use abrupt worker exit while holding a lock acquired by an
 atomic hard link whose complete owner record was prepared first, plus bounded dead-owner recovery.
 They qualify logical commit boundaries only: there is still no fsync or power-loss claim.
-Whole-authority maintenance uses opaque issuer identity bound to the exact tenant owner, actor, and
-operation purpose, and rejects cross-tenant envelope ownership.
+Maintenance uses opaque issuer identity bound to actor and exact operation purpose. Tenant-scoped
+capabilities export, inspect, or restore only one owner partition in the global envelope; they
+cannot observe another tenant, initialize the global store, or enter schema migration. A separately
+issued unforgeable authority scope performs schema-wide migration/recovery and may maintain a whole
+envelope; no forgeable tenant sentinel grants that scope. Captured authority primordials preserve
+capability identity, tenant isolation, canonical decisions, and recursive snapshot freezing after
+post-import intrinsic replacement. Active connection subjects and grant bindings require inverse
+standalone connection/custody linkage matching owner, agent, device, and workload. Unsupported
+migration targets are rejected before any preparing/committing transition is persisted.
 
 ## Still blocked
 

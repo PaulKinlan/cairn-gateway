@@ -6,18 +6,23 @@
 
 Production authority implements `DurableAuthorityTransactions` and `DurableAuthorityMaintenance`;
 the Stage 0 `MetadataStore` remains fixture-only. Every tenant transaction requires `TenantContext`.
-Whole-authority export, inspection, migration, initialization, and restore require an opaque,
-issuer-identity-checked `AuthorityMaintenanceContext` bound to one tenant owner, actor, and exact
-operation purpose; no public literal or structurally reproducible object grants authority. The
-custody-neutral issuer is held outside the ordinary maintenance interface, and every imported or
-exported envelope must be wholly owned by the capability's tenant owner. Each transaction must
-atomically validate owner, subject status/epoch/version, device-agent linkage, grant
-agent/device/connection/operation/expiry, and connection provider/adapter/custody linkage, then
-mutate all affected challenge, identity, revocation, replay, reservation, or finalization records.
-Enrollment requests expire within 600 seconds of commit, approvals create epoch-1 devices, and
-immutable approved-enrollment linkage survives later agent/device revocation. Authority may be
-reactivated only at the exact next logical version; stale or same-version activation is denied.
-Production composition may not assemble authorization from separate check and consume calls.
+Maintenance always requires an opaque, issuer-identity-checked `AuthorityMaintenanceContext` bound
+to one actor, exact operation purpose, and either one tenant owner or a separately issued
+schema-wide authority scope. No public literal, tenant sentinel (including `"*"`), or structurally
+reproducible object grants either scope. The custody-neutral tenant and authority issuers are held
+outside the ordinary maintenance interface. Tenant export and inspection return only that owner
+partition, and tenant restore rejects foreign records and can mutate only that partition.
+Schema-wide initialization, migration, and recovery require the distinct authority scope; that scope
+may also perform whole-envelope export, inspection, and restore. This permits a global multi-tenant
+envelope without allowing one tenant capability to observe another tenant or control schema state.
+Each transaction must atomically validate owner, subject status/epoch/version, device-agent linkage,
+grant agent/device/connection/operation/expiry, and the inverse standalone connection plus custody
+owner/agent/device/workload linkage, then mutate all affected challenge, identity, revocation,
+replay, reservation, or finalization records. Enrollment requests expire within 600 seconds of
+commit, approvals create epoch-1 devices, and immutable approved-enrollment linkage survives later
+agent/device revocation. Authority may be reactivated only at the exact next logical version; stale
+or same-version activation is denied. Production composition may not assemble authorization from
+separate check and consume calls.
 
 A reservation result is exactly `reserved`, `denied`, `already_consumed`, or `unknown_commit`.
 Reservation alone never authorizes a connector. The adapter atomically writes both proof nonces,
@@ -45,7 +50,12 @@ permits only plain data and safe integers, and rejects undefined, exotic objects
 symbols, sparse arrays, extra array properties, cycles, and non-finite numbers independently of
 adapter prototypes. Caller inputs are detached once into recursively frozen null-prototype snapshots
 before semantic/asynchronous reads; Proxy and adversarial reflective inputs fail closed. Export and
-inspection snapshots have the same recursive freeze/detachment boundary.
+inspection snapshots have the same recursive freeze/detachment boundary. Authority-critical
+primordials are captured before use: later replacement of WeakMap, Object, Function, Reflect,
+structured-clone, JSON, descriptor, prototype, iteration, or freeze operations cannot mint a
+capability, change ownership/schema decisions, or make returned snapshots mutable. Only the
+supported schema 1 to 2 transition may enter preparing/committing; unsupported targets are denied
+before a transition is persisted, and recovery returns every admitted transition to a valid state.
 
 ## Storage decision deferred
 

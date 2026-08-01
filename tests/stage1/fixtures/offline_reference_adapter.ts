@@ -16,6 +16,7 @@ import type {
   DurableAuthorityMaintenance,
   DurableAuthorityTransactions,
   DurableDispatchPermit,
+  GlobalAuthorityMaintenanceAuthorization,
   InvocationReservation,
   InvocationReservationTransaction,
   MigrationPreparation,
@@ -33,10 +34,15 @@ import { ids } from "../../../packages/core/src/domain/types.ts";
 import { jwkThumbprint } from "../../../packages/core/src/crypto/thumbprint.ts";
 import { transactionHash } from "../../../packages/core/src/identity/transactions.ts";
 import { entityKey, replayKey } from "../../../packages/core/src/store/keys.ts";
-import { assertRestoreNotStale } from "../../../packages/core/src/store/migrations.ts";
+import {
+  assertRestoreNotStale,
+  assertTenantRestoreNotStale,
+} from "../../../packages/core/src/store/migrations.ts";
 import {
   assertAuthorityCryptography,
   assertAuthorityEnvelope,
+  DURABLE_AUTHORITY_MIN_SCHEMA_VERSION,
+  DURABLE_AUTHORITY_SCHEMA_VERSION,
   type DurableAuthorityEnvelope,
   type DurableRecord,
   frozenDurableSnapshot,
@@ -45,6 +51,25 @@ import {
   serializeDurableAuthority,
   snapshotDurableInput,
 } from "../../../packages/core/src/store/schema.ts";
+import {
+  authorityArrayIsArray,
+  authorityJsonParse,
+  authorityJsonStringify,
+  authorityNumberIsSafeInteger,
+  authorityObjectAssign,
+  authorityObjectCreate,
+  authorityObjectEntries,
+  authorityObjectFreeze,
+  authorityObjectGetPrototypeOf,
+  authorityObjectIs,
+  authorityObjectKeys,
+  authorityObjectPrototype,
+  authorityObjectValues,
+  authorityStructuredClone,
+  authorityWeakMapGet,
+  authorityWeakMapHas,
+  authorityWeakMapSet,
+} from "../../../packages/core/src/store/intrinsics.ts";
 import { FIXTURE_JWKS, FIXTURE_THUMBPRINTS, type Owner } from "./candidate_fixture_data.ts";
 
 /** Test machinery only: process contention and logical commits, never power-loss/fsync evidence. */
@@ -86,13 +111,27 @@ type EnrollmentValue = {
   request: EnrollmentRequest;
   approvedDeviceId: string | null;
 };
+type StoredMaintenanceAuthorization =
+  | {
+    scope: "tenant";
+    tenant: TenantContext;
+    actorId: string;
+    purpose: AuthorityMaintenancePurpose;
+  }
+  | {
+    scope: "authority";
+    actorId: string;
+    purpose: AuthorityMaintenancePurpose;
+  };
 
 const safe = (value: unknown, minimum = 0): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0) &&
+  typeof value === "number" && authorityNumberIsSafeInteger(value) &&
+  !authorityObjectIs(value, -0) &&
   value >= minimum;
 const plain = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
-  (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  Boolean(value) && typeof value === "object" && !authorityArrayIsArray(value) &&
+  (authorityObjectGetPrototypeOf(value as object) === authorityObjectPrototype ||
+    authorityObjectGetPrototypeOf(value as object) === null);
 const clean = (value: unknown): string => {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(value)) {
     throw new Error("identifier denied");
@@ -126,8 +165,14 @@ const maintenanceDenied = (reason: string): AuthorityMaintenanceResult => ({
   outcome: "denied",
   reason,
 });
+const supportedMigration = (fromVersion: number, toVersion: number): boolean =>
+  fromVersion === DURABLE_AUTHORITY_MIN_SCHEMA_VERSION &&
+  toVersion === DURABLE_AUTHORITY_SCHEMA_VERSION;
 function nextVersion(state: DurableAuthorityEnvelope): number {
-  return Math.max(0, ...Object.values(state.records).map((record) => record.recordVersion)) + 1;
+  return Math.max(
+    0,
+    ...authorityObjectValues(state.records).map((record) => record.recordVersion),
+  ) + 1;
 }
 function beginCommit(state: DurableAuthorityEnvelope): void {
   state.authorityGeneration++;
@@ -145,7 +190,7 @@ function put(
     userId: ctx.userId,
     recordVersion,
     authorityGeneration: state.authorityGeneration,
-    value: structuredClone(value),
+    value: authorityStructuredClone(value),
   };
   return recordVersion;
 }
@@ -234,7 +279,26 @@ function validBinding(
   const deviceMetadata = device?.identity as Device | undefined;
   const grantMetadata = grant?.identity as Grant | undefined;
   const connectionMetadata = connection?.identity as ConnectionMetadata | undefined;
-  return tx.operation === "github.user.read" &&
+  const connectionRecord = record<Record<string, unknown>>(
+    state,
+    key(ctx, "connection", tx.connectionId),
+  )?.value;
+  const custodyRecord = connectionMetadata
+    ? record<Record<string, unknown>>(
+      state,
+      key(ctx, "custody", connectionMetadata.custodyReferenceHash),
+    )?.value
+    : undefined;
+  const owner = ownerPrefix(ctx);
+  const completeLinkage = connectionRecord?.id === tx.connectionId &&
+    connectionRecord.custodyReferenceHash === connectionMetadata?.custodyReferenceHash &&
+    connectionRecord.owner === owner && connectionRecord.agentId === tx.agentId &&
+    connectionRecord.deviceId === tx.deviceId && connectionRecord.workload === tx.operation &&
+    custodyRecord?.custodyReferenceHash === connectionMetadata?.custodyReferenceHash &&
+    custodyRecord?.owner === owner && custodyRecord?.connectionId === tx.connectionId &&
+    custodyRecord?.agentId === tx.agentId && custodyRecord?.deviceId === tx.deviceId &&
+    custodyRecord?.workload === tx.operation;
+  return tx.operation === "github.user.read" && completeLinkage &&
     subjectActive(principal, "principal", tx.principalEpoch) &&
     subjectActive(agent, "agent", tx.agentEpoch) &&
     subjectActive(device, "device", tx.deviceEpoch) &&
@@ -252,25 +316,43 @@ function ownerRecords(
   kind?: string,
 ): Array<[string, DurableRecord]> {
   const prefix = `${ownerPrefix(ctx)}/${kind ? `${kind}/` : ""}`;
-  return Object.entries(state.records).filter(([recordKey]) => recordKey.startsWith(prefix));
+  return authorityObjectEntries(state.records).filter(([recordKey]) =>
+    recordKey.startsWith(prefix)
+  );
 }
 
 export class OfflineReferenceAuthority
   implements DurableAuthorityTransactions, DurableAuthorityMaintenance {
   readonly statePath: string;
   readonly lockPath: string;
-  private readonly maintenanceContexts = new WeakMap<object, AuthorityMaintenanceAuthorization>();
+  private readonly maintenanceContexts = new WeakMap<object, StoredMaintenanceAuthorization>();
   constructor(readonly root: string, private readonly injectedFault?: FaultPoint) {
     this.statePath = `${root}/authority.json`;
     this.lockPath = `${root}/authority.lock`;
   }
 
-  /** Test-only issuer kept behind the fixture driver, never on the maintenance interface. */
+  /** Test-only tenant issuer kept behind the fixture driver, never on the maintenance interface. */
   issueMaintenanceContext(
     input: AuthorityMaintenanceAuthorization,
   ): AuthorityMaintenanceContext {
     const value = snapshotDurableInput(input);
     const tenant = context(value.tenant);
+    const purposes: readonly AuthorityMaintenancePurpose[] = ["export", "inspect", "restore"];
+    clean(value.actorId);
+    if (!purposes.includes(value.purpose)) throw new Error("maintenance purpose denied");
+    return this.issueCapability({
+      scope: "tenant",
+      tenant,
+      actorId: value.actorId,
+      purpose: value.purpose,
+    });
+  }
+
+  /** Test-only schema-wide issuer is deliberately separate from the tenant issuer. */
+  issueAuthorityMaintenanceContext(
+    input: GlobalAuthorityMaintenanceAuthorization,
+  ): AuthorityMaintenanceContext {
+    const value = snapshotDurableInput(input);
     const purposes: readonly AuthorityMaintenancePurpose[] = [
       "export",
       "inspect",
@@ -283,14 +365,23 @@ export class OfflineReferenceAuthority
     ];
     clean(value.actorId);
     if (!purposes.includes(value.purpose)) throw new Error("maintenance purpose denied");
-    const capability = Object.freeze(Object.create(null)) as AuthorityMaintenanceContext;
-    this.maintenanceContexts.set(
+    return this.issueCapability({
+      scope: "authority",
+      actorId: value.actorId,
+      purpose: value.purpose,
+    });
+  }
+
+  private issueCapability(
+    authorization: StoredMaintenanceAuthorization,
+  ): AuthorityMaintenanceContext {
+    const capability = authorityObjectFreeze(
+      authorityObjectCreate<Record<string, unknown>>(null),
+    ) as unknown as AuthorityMaintenanceContext;
+    authorityWeakMapSet(
+      this.maintenanceContexts,
       capability,
-      Object.freeze({
-        tenant,
-        actorId: value.actorId,
-        purpose: value.purpose,
-      }),
+      authorityObjectFreeze(authorization) as StoredMaintenanceAuthorization,
     );
     return capability;
   }
@@ -298,27 +389,53 @@ export class OfflineReferenceAuthority
   private privileged(
     input: AuthorityMaintenanceContext,
     purpose: AuthorityMaintenancePurpose,
-  ): AuthorityMaintenanceAuthorization {
+  ): StoredMaintenanceAuthorization {
     if (!input || typeof input !== "object") throw new Error("maintenance privilege denied");
-    const authorization = this.maintenanceContexts.get(input as object);
+    if (!authorityWeakMapHas(this.maintenanceContexts, input as object)) {
+      throw new Error("maintenance privilege denied");
+    }
+    const authorization = authorityWeakMapGet(this.maintenanceContexts, input as object);
     if (!authorization || authorization.purpose !== purpose) {
       throw new Error("maintenance privilege denied");
     }
-    context(authorization.tenant);
     clean(authorization.actorId);
+    if (authorization.scope === "tenant") context(authorization.tenant);
+    return authorization;
+  }
+
+  private globalPrivilege(
+    input: AuthorityMaintenanceContext,
+    purpose: AuthorityMaintenancePurpose,
+  ): Extract<StoredMaintenanceAuthorization, { scope: "authority" }> {
+    const authorization = this.privileged(input, purpose);
+    if (authorization.scope !== "authority") throw new Error("global maintenance privilege denied");
     return authorization;
   }
 
   private assertTenantOwnership(
     state: DurableAuthorityEnvelope,
-    authorization: AuthorityMaintenanceAuthorization,
+    authorization: Extract<StoredMaintenanceAuthorization, { scope: "tenant" }>,
   ): void {
-    for (const item of Object.values(state.records)) {
+    for (const item of authorityObjectValues(state.records)) {
       if (
         item.tenantId !== authorization.tenant.tenantId ||
         item.userId !== authorization.tenant.userId
       ) throw new Error("maintenance tenant ownership denied");
     }
+  }
+
+  private scopedEnvelope(
+    state: DurableAuthorityEnvelope,
+    authorization: StoredMaintenanceAuthorization,
+  ): DurableAuthorityEnvelope {
+    if (authorization.scope === "authority") return state;
+    const scoped = authorityStructuredClone(state);
+    scoped.records = {};
+    for (const [recordKey, item] of ownerRecords(state, authorization.tenant)) {
+      scoped.records[recordKey] = item;
+    }
+    assertAuthorityEnvelope(scoped, false);
+    return scoped;
   }
 
   async initialize(): Promise<void> {
@@ -334,7 +451,7 @@ export class OfflineReferenceAuthority
   async read(requireCurrent = true): Promise<DurableAuthorityEnvelope> {
     let value: unknown;
     try {
-      value = JSON.parse(await Deno.readTextFile(this.statePath));
+      value = authorityJsonParse(await Deno.readTextFile(this.statePath));
     } catch {
       throw new Error("record denied");
     }
@@ -362,7 +479,7 @@ export class OfflineReferenceAuthority
         // link leaves no lock; a crash after link leaves recoverable owner metadata at lockPath.
         await Deno.writeTextFile(
           claimant,
-          JSON.stringify({ pid: Deno.pid, acquiredAt: Date.now() }),
+          authorityJsonStringify({ pid: Deno.pid, acquiredAt: Date.now() }),
           { createNew: true },
         );
         await Deno.link(claimant, this.lockPath);
@@ -372,7 +489,7 @@ export class OfflineReferenceAuthority
         await Deno.remove(claimant).catch(() => undefined);
         if (!(error instanceof Deno.errors.AlreadyExists) || attempt >= 5000) throw error;
         try {
-          const lockOwner = JSON.parse(
+          const lockOwner = authorityJsonParse(
             await Deno.readTextFile(this.lockPath),
           ) as { pid?: unknown; acquiredAt?: unknown };
           if (!safe(lockOwner.pid, 1) || !safe(lockOwner.acquiredAt)) {
@@ -412,7 +529,7 @@ export class OfflineReferenceAuthority
       const ctx = context(owner);
       if (
         ownerRecords(state, ctx).length ||
-        Object.values(state.records).some((item) =>
+        authorityObjectValues(state.records).some((item) =>
           plain(item.value) && item.value.custodyReferenceHash === custodyRef
         )
       ) return false;
@@ -471,11 +588,18 @@ export class OfflineReferenceAuthority
       put(state, ctx, key(ctx, "connection", "connection"), {
         id: "connection",
         custodyReferenceHash: clean(custodyRef),
+        owner: ownerPrefix(ctx),
+        agentId: "agent",
+        deviceId: "device",
+        workload: "github.user.read",
       });
       put(state, ctx, key(ctx, "custody", custodyRef), {
         custodyReferenceHash: clean(custodyRef),
         owner: ownerPrefix(ctx),
         connectionId: "connection",
+        agentId: "agent",
+        deviceId: "device",
+        workload: "github.user.read",
       });
       return true;
     });
@@ -635,7 +759,7 @@ export class OfflineReferenceAuthority
           {
             attemptId: tx.attemptId,
             state: "reserved",
-            binding: structuredClone(tx),
+            binding: authorityStructuredClone(tx),
             replayKeys,
             claimVersion: 0,
             permitHash: null,
@@ -758,7 +882,7 @@ export class OfflineReferenceAuthority
       const version = put(state, ctx, key(ctx, "attempt", tx.attemptId), {
         ...item.value,
         state: tx.nextState,
-        result: structuredClone(tx.result),
+        result: authorityStructuredClone(tx.result),
       });
       return {
         outcome: "committed",
@@ -1066,8 +1190,7 @@ export class OfflineReferenceAuthority
   async exportAuthority(ctx: AuthorityMaintenanceContext): Promise<DurableAuthorityEnvelope> {
     const authorization = this.privileged(ctx, "export");
     const state = await this.read(false);
-    this.assertTenantOwnership(state, authorization);
-    return frozenDurableSnapshot(state);
+    return frozenDurableSnapshot(this.scopedEnvelope(state, authorization));
   }
   async inspectAuthority(
     ctx: AuthorityMaintenanceContext,
@@ -1075,33 +1198,31 @@ export class OfflineReferenceAuthority
   ): Promise<DurableAuthorityEnvelope> {
     const authorization = this.privileged(ctx, "inspect");
     const state = await this.read(requireCurrent);
-    this.assertTenantOwnership(state, authorization);
-    return frozenDurableSnapshot(state);
+    return frozenDurableSnapshot(this.scopedEnvelope(state, authorization));
   }
   async initializeAuthority(
     ctx: AuthorityMaintenanceContext,
     candidate: DurableAuthorityEnvelope,
   ): Promise<AuthorityMaintenanceResult> {
-    const authorization = this.privileged(ctx, "initialize");
+    this.globalPrivilege(ctx, "initialize");
     candidate = snapshotDurableInput(candidate);
     return await this.locked(async (current) => {
       if (
-        Object.keys(current.records).length || current.authorityGeneration !== 1 ||
+        authorityObjectKeys(current.records).length || current.authorityGeneration !== 1 ||
         current.effectiveNow !== 0
       ) {
         return maintenanceDenied("authority store is not pristine");
       }
       try {
         assertAuthorityEnvelope(candidate, false);
-        this.assertTenantOwnership(candidate, authorization);
         await assertAuthorityCryptography(candidate);
       } catch {
         return maintenanceDenied("authority import denied");
       }
-      for (const item of Object.keys(current)) {
+      for (const item of authorityObjectKeys(current)) {
         delete (current as unknown as Record<string, unknown>)[item];
       }
-      Object.assign(current, structuredClone(candidate));
+      authorityObjectAssign(current, authorityStructuredClone(candidate));
       return { outcome: "committed", authorityGeneration: current.authorityGeneration };
     }, false);
   }
@@ -1113,17 +1234,36 @@ export class OfflineReferenceAuthority
     candidate = snapshotDurableInput(candidate);
     return await this.locked(async (current) => {
       try {
-        this.assertTenantOwnership(current, authorization);
-        assertRestoreNotStale(candidate, current);
-        this.assertTenantOwnership(candidate, authorization);
+        if (authorization.scope === "tenant") {
+          this.assertTenantOwnership(candidate, authorization);
+          assertTenantRestoreNotStale(
+            candidate,
+            current,
+            authorization.tenant.tenantId,
+            authorization.tenant.userId,
+          );
+        } else {
+          assertRestoreNotStale(candidate, current);
+        }
         await assertAuthorityCryptography(candidate);
       } catch {
         return maintenanceDenied("stale or corrupt restore denied");
       }
-      for (const item of Object.keys(current)) {
-        delete (current as unknown as Record<string, unknown>)[item];
+      if (authorization.scope === "tenant") {
+        const prefix = `${ownerPrefix(authorization.tenant)}/`;
+        for (const recordKey of authorityObjectKeys(current.records)) {
+          if (recordKey.startsWith(prefix)) delete current.records[recordKey];
+        }
+        for (const [recordKey, item] of authorityObjectEntries(candidate.records)) {
+          current.records[recordKey] = authorityStructuredClone(item);
+        }
+        beginCommit(current);
+      } else {
+        for (const item of authorityObjectKeys(current)) {
+          delete (current as unknown as Record<string, unknown>)[item];
+        }
+        authorityObjectAssign(current, authorityStructuredClone(candidate));
       }
-      Object.assign(current, structuredClone(candidate));
       return { outcome: "committed", authorityGeneration: current.authorityGeneration };
     });
   }
@@ -1131,13 +1271,13 @@ export class OfflineReferenceAuthority
     ctx: AuthorityMaintenanceContext,
     tx: MigrationPreparation,
   ): Promise<AuthorityMaintenanceResult> {
-    const authorization = this.privileged(ctx, "prepare_migration");
+    this.globalPrivilege(ctx, "prepare_migration");
     tx = snapshotDurableInput(tx);
     return await this.locked((state) => {
-      this.assertTenantOwnership(state, authorization);
       if (
         state.schemaVersion !== tx.expectedSchemaVersion || state.migration.status !== "idle" ||
-        tx.targetSchemaVersion !== tx.expectedSchemaVersion + 1
+        tx.targetSchemaVersion !== tx.expectedSchemaVersion + 1 ||
+        !supportedMigration(tx.expectedSchemaVersion, tx.targetSchemaVersion)
       ) return maintenanceDenied("migration preparation denied");
       beginCommit(state);
       state.migration = {
@@ -1151,9 +1291,11 @@ export class OfflineReferenceAuthority
     }, false);
   }
   async advanceMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
-    const authorization = this.privileged(ctx, "advance_migration");
+    this.globalPrivilege(ctx, "advance_migration");
     return await this.locked((state) => {
-      this.assertTenantOwnership(state, authorization);
+      if (
+        !supportedMigration(state.migration.fromVersion, state.migration.toVersion)
+      ) return maintenanceDenied("migration advance denied");
       if (state.migration.status === "preparing") {
         beginCommit(state);
         state.migration.status = "committing";
@@ -1167,9 +1309,8 @@ export class OfflineReferenceAuthority
     }, false);
   }
   async failMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
-    const authorization = this.privileged(ctx, "fail_migration");
+    this.globalPrivilege(ctx, "fail_migration");
     return await this.locked((state) => {
-      this.assertTenantOwnership(state, authorization);
       if (!["preparing", "committing"].includes(state.migration.status)) {
         return maintenanceDenied("migration failure mark denied");
       }
@@ -1179,22 +1320,37 @@ export class OfflineReferenceAuthority
     }, false);
   }
   async recoverMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
-    const authorization = this.privileged(ctx, "recover_migration");
+    this.globalPrivilege(ctx, "recover_migration");
     for (;;) {
       const result = await this.locked((state) => {
-        this.assertTenantOwnership(state, authorization);
-        if (state.schemaVersion === 2 && state.migration.status === "idle") {
+        if (
+          state.schemaVersion === DURABLE_AUTHORITY_SCHEMA_VERSION &&
+          state.migration.status === "idle"
+        ) {
           return { done: true, authorityGeneration: state.authorityGeneration };
         }
         beginCommit(state);
-        if (state.migration.status === "failed") {
+        if (
+          state.migration.status !== "idle" &&
+          !supportedMigration(state.migration.fromVersion, state.migration.toVersion)
+        ) {
+          state.migration = {
+            status: "idle",
+            generation: state.migration.generation,
+            fromVersion: state.schemaVersion,
+            toVersion: state.schemaVersion,
+          };
+        } else if (state.migration.status === "failed") {
           state.migration.status = "preparing";
         } else if (state.migration.status === "idle") {
+          if (
+            !supportedMigration(state.schemaVersion, DURABLE_AUTHORITY_SCHEMA_VERSION)
+          ) throw new Error("authority migration unavailable");
           state.migration = {
             status: "preparing",
             generation: state.migration.generation + 1,
             fromVersion: state.schemaVersion,
-            toVersion: state.schemaVersion + 1,
+            toVersion: DURABLE_AUTHORITY_SCHEMA_VERSION,
           };
           state.highWatermarks.migrationGeneration = state.migration.generation;
         } else if (state.migration.status === "preparing") {

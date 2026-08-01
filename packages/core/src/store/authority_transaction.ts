@@ -133,11 +133,14 @@ export interface DispatchRecoveryTransaction {
   now: number;
 }
 
-export type AuthorityMaintenancePurpose =
+export type TenantAuthorityMaintenancePurpose =
   | "export"
   | "inspect"
+  | "restore";
+
+export type AuthorityMaintenancePurpose =
+  | TenantAuthorityMaintenancePurpose
   | "initialize"
-  | "restore"
   | "prepare_migration"
   | "advance_migration"
   | "fail_migration"
@@ -152,9 +155,15 @@ export interface AuthorityMaintenanceContext {
   readonly [authorityMaintenanceContextBrand]: never;
 }
 
-/** Input to a custody-neutral issuer held outside the ordinary maintenance caller surface. */
+/** Input to a tenant issuer held outside the ordinary maintenance caller surface. */
 export interface AuthorityMaintenanceAuthorization {
   tenant: TenantContext;
+  actorId: string;
+  purpose: TenantAuthorityMaintenancePurpose;
+}
+
+/** Input to a separately held schema-wide authority issuer. It is never a tenant sentinel value. */
+export interface GlobalAuthorityMaintenanceAuthorization {
   actorId: string;
   purpose: AuthorityMaintenancePurpose;
 }

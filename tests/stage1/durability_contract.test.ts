@@ -254,11 +254,21 @@ function validEnvelope(): DurableAuthorityEnvelope {
       epoch: 1,
     },
   });
-  add(connection, { id: "connection", custodyReferenceHash: "custodyhash" });
+  add(connection, {
+    id: "connection",
+    custodyReferenceHash: "custodyhash",
+    owner: "tenant/tenant_a/user/user",
+    agentId: "agent",
+    deviceId: "device",
+    workload: "github.user.read",
+  });
   add(custody, {
     custodyReferenceHash: "custodyhash",
     owner: "tenant/tenant_a/user/user",
     connectionId: "connection",
+    agentId: "agent",
+    deviceId: "device",
+    workload: "github.user.read",
   });
   add(replayKeys[0]!, { kind: "nonce", hash: "device_attempt", expiresAt: 500, generation: 1 });
   add(replayKeys[1]!, { kind: "nonce", hash: "agent_attempt", expiresAt: 500, generation: 1 });
@@ -300,6 +310,288 @@ function validEnvelope(): DurableAuthorityEnvelope {
   };
 }
 
+async function exercisePostImportIntrinsicReplacement(root: string): Promise<void> {
+  const make = async (name: string, legacy = false) => {
+    const candidate = createCandidateAdapter(`${root}/intrinsic_${name}`);
+    await candidate.fixture.seed(alice, `custody_${name}`);
+    if (legacy) await candidate.fixture.writeLegacy(alice);
+    return candidate;
+  };
+  const authorityContext = (
+    candidate: ReturnType<typeof createCandidateAdapter>,
+    purpose:
+      | "export"
+      | "inspect"
+      | "initialize"
+      | "restore"
+      | "prepare_migration"
+      | "advance_migration"
+      | "fail_migration"
+      | "recover_migration",
+  ) =>
+    candidate.fixture.issueAuthorityMaintenanceContext({
+      actorId: "intrinsic_authority_operator",
+      purpose,
+    });
+
+  const source = await make("source");
+  const sourceEnvelope = await source.maintenance.exportAuthority(
+    authorityContext(source, "export"),
+  );
+  const exportAdapter = await make("export");
+  const inspectAdapter = await make("inspect");
+  const initializeAdapter = createCandidateAdapter(`${root}/intrinsic_initialize`);
+  const restoreAdapter = await make("restore");
+  const restoreEnvelope = await restoreAdapter.maintenance.exportAuthority(
+    authorityContext(restoreAdapter, "export"),
+  );
+  const prepareAdapter = await make("prepare", true);
+  const advanceAdapter = await make("advance", true);
+  const failAdapter = await make("fail", true);
+  const recoverAdapter = await make("recover", true);
+  equals(
+    outcome(
+      await advanceAdapter.maintenance.prepareMigration(
+        authorityContext(advanceAdapter, "prepare_migration"),
+        { expectedSchemaVersion: 1, targetSchemaVersion: 2 },
+      ),
+    ),
+    "committed",
+  );
+  equals(
+    outcome(
+      await failAdapter.maintenance.prepareMigration(
+        authorityContext(failAdapter, "prepare_migration"),
+        { expectedSchemaVersion: 1, targetSchemaVersion: 2 },
+      ),
+    ),
+    "committed",
+  );
+
+  const contexts = {
+    export: authorityContext(exportAdapter, "export"),
+    inspect: authorityContext(inspectAdapter, "inspect"),
+    initialize: authorityContext(initializeAdapter, "initialize"),
+    restore: authorityContext(restoreAdapter, "restore"),
+    prepare: authorityContext(prepareAdapter, "prepare_migration"),
+    advance: authorityContext(advanceAdapter, "advance_migration"),
+    fail: authorityContext(failAdapter, "fail_migration"),
+    recover: authorityContext(recoverAdapter, "recover_migration"),
+  };
+
+  const multi = createCandidateAdapter(`${root}/intrinsic_multi`);
+  await multi.fixture.seed(alice, "intrinsic_alice_custody");
+  await multi.fixture.seed(bob, "intrinsic_bob_custody");
+  const aliceExportContext = multi.fixture.issueMaintenanceContext({
+    tenant: ctx(alice),
+    actorId: "alice_intrinsic_operator",
+    purpose: "export",
+  });
+  const bobExportContext = multi.fixture.issueMaintenanceContext({
+    tenant: ctx(bob),
+    actorId: "bob_intrinsic_operator",
+    purpose: "export",
+  });
+  const aliceRestoreContext = multi.fixture.issueMaintenanceContext({
+    tenant: ctx(alice),
+    actorId: "alice_intrinsic_operator",
+    purpose: "restore",
+  });
+  const bobEnvelope = await multi.maintenance.exportAuthority(bobExportContext);
+
+  const OriginalObject = Object;
+  const OriginalArray = Array;
+  const OriginalWeakMap = WeakMap;
+  const OriginalFunction = Function;
+  const defineProperty = Object.defineProperty;
+  const descriptor = Object.getOwnPropertyDescriptor;
+  const descriptors = {
+    weakMapGet: descriptor(OriginalWeakMap.prototype, "get")!,
+    weakMapSet: descriptor(OriginalWeakMap.prototype, "set")!,
+    weakMapHas: descriptor(OriginalWeakMap.prototype, "has")!,
+    values: descriptor(OriginalObject, "values")!,
+    entries: descriptor(OriginalObject, "entries")!,
+    keys: descriptor(OriginalObject, "keys")!,
+    freeze: descriptor(OriginalObject, "freeze")!,
+    descriptors: descriptor(OriginalObject, "getOwnPropertyDescriptors")!,
+    prototype: descriptor(OriginalObject, "getPrototypeOf")!,
+    create: descriptor(OriginalObject, "create")!,
+    assign: descriptor(OriginalObject, "assign")!,
+    is: descriptor(OriginalObject, "is")!,
+    isArray: descriptor(OriginalArray, "isArray")!,
+    call: descriptor(OriginalFunction.prototype, "call")!,
+    apply: descriptor(OriginalFunction.prototype, "apply")!,
+    bind: descriptor(OriginalFunction.prototype, "bind")!,
+    reflectApply: descriptor(Reflect, "apply")!,
+    reflectOwnKeys: descriptor(Reflect, "ownKeys")!,
+    reflectGetPrototypeOf: descriptor(Reflect, "getPrototypeOf")!,
+    structuredClone: descriptor(globalThis, "structuredClone")!,
+    jsonParse: descriptor(JSON, "parse")!,
+    jsonStringify: descriptor(JSON, "stringify")!,
+  };
+  const poison = () => {
+    throw new Error("mutable intrinsic used");
+  };
+  const replace = (target: object, name: string, original: PropertyDescriptor, value: unknown) =>
+    defineProperty(target, name, { ...original, value });
+
+  let exported: DurableAuthorityEnvelope | undefined;
+  let inspected: DurableAuthorityEnvelope | undefined;
+  let crossTenantRecords: DurableAuthorityEnvelope | undefined;
+  const results: string[] = [];
+  const forgedDenied: boolean[] = [];
+  const forged = {} as AuthorityMaintenanceContext;
+  const deniedCall = async (operation: () => Promise<unknown>): Promise<boolean> => {
+    try {
+      await operation();
+      return false;
+    } catch {
+      return true;
+    }
+  };
+  try {
+    replace(OriginalWeakMap.prototype, "get", descriptors.weakMapGet, () => ({
+      scope: "authority",
+      actorId: "forged_actor",
+      purpose: "export",
+    }));
+    replace(OriginalWeakMap.prototype, "set", descriptors.weakMapSet, poison);
+    replace(OriginalWeakMap.prototype, "has", descriptors.weakMapHas, () => true);
+    replace(OriginalObject, "values", descriptors.values, () => []);
+    replace(OriginalObject, "entries", descriptors.entries, () => []);
+    replace(OriginalObject, "keys", descriptors.keys, () => []);
+    replace(OriginalObject, "freeze", descriptors.freeze, (value: unknown) => value);
+    replace(OriginalObject, "getOwnPropertyDescriptors", descriptors.descriptors, () => ({}));
+    replace(OriginalObject, "getPrototypeOf", descriptors.prototype, () => null);
+    replace(OriginalObject, "create", descriptors.create, () => ({}));
+    replace(OriginalObject, "assign", descriptors.assign, (target: unknown) => target);
+    replace(OriginalObject, "is", descriptors.is, () => true);
+    replace(OriginalArray, "isArray", descriptors.isArray, () => false);
+    replace(
+      OriginalFunction.prototype,
+      "call",
+      descriptors.call,
+      function (this: (...args: unknown[]) => unknown, thisArg: unknown, ...args: unknown[]) {
+        return descriptors.reflectApply.value(descriptors.call.value, this, [thisArg, ...args]);
+      },
+    );
+    replace(
+      OriginalFunction.prototype,
+      "apply",
+      descriptors.apply,
+      function (this: (...args: unknown[]) => unknown, thisArg: unknown, args?: unknown[]) {
+        return descriptors.reflectApply.value(descriptors.apply.value, this, [thisArg, args]);
+      },
+    );
+    replace(
+      OriginalFunction.prototype,
+      "bind",
+      descriptors.bind,
+      function (this: (...args: unknown[]) => unknown, thisArg: unknown, ...args: unknown[]) {
+        return descriptors.reflectApply.value(descriptors.bind.value, this, [thisArg, ...args]);
+      },
+    );
+    replace(Reflect, "apply", descriptors.reflectApply, poison);
+    replace(Reflect, "ownKeys", descriptors.reflectOwnKeys, poison);
+    replace(Reflect, "getPrototypeOf", descriptors.reflectGetPrototypeOf, poison);
+    replace(globalThis, "structuredClone", descriptors.structuredClone, poison);
+    replace(JSON, "parse", descriptors.jsonParse, () => ({}));
+    replace(JSON, "stringify", descriptors.jsonStringify, () => "{}");
+
+    const postImportExportContext = exportAdapter.fixture.issueAuthorityMaintenanceContext({
+      actorId: "post_import_authority_operator",
+      purpose: "export",
+    });
+    forgedDenied[0] = await deniedCall(() => exportAdapter.maintenance.exportAuthority(forged));
+    forgedDenied[1] = await deniedCall(() => inspectAdapter.maintenance.inspectAuthority(forged));
+    forgedDenied[2] = await deniedCall(() =>
+      initializeAdapter.maintenance.initializeAuthority(forged, sourceEnvelope)
+    );
+    forgedDenied[3] = await deniedCall(() =>
+      restoreAdapter.maintenance.restoreAuthority(forged, restoreEnvelope)
+    );
+    forgedDenied[4] = await deniedCall(() =>
+      prepareAdapter.maintenance.prepareMigration(forged, {
+        expectedSchemaVersion: 1,
+        targetSchemaVersion: 2,
+      })
+    );
+    forgedDenied[5] = await deniedCall(() => advanceAdapter.maintenance.advanceMigration(forged));
+    forgedDenied[6] = await deniedCall(() => failAdapter.maintenance.failMigration(forged));
+    forgedDenied[7] = await deniedCall(() => recoverAdapter.maintenance.recoverMigration(forged));
+
+    exported = await exportAdapter.maintenance.exportAuthority(postImportExportContext);
+    results[0] = "committed";
+    inspected = await inspectAdapter.maintenance.inspectAuthority(contexts.inspect);
+    results[1] = "committed";
+    results[2] = outcome(
+      await initializeAdapter.maintenance.initializeAuthority(contexts.initialize, sourceEnvelope),
+    );
+    results[3] = outcome(
+      await restoreAdapter.maintenance.restoreAuthority(contexts.restore, restoreEnvelope),
+    );
+    results[4] = outcome(
+      await prepareAdapter.maintenance.prepareMigration(contexts.prepare, {
+        expectedSchemaVersion: 1,
+        targetSchemaVersion: 2,
+      }),
+    );
+    results[5] = outcome(await advanceAdapter.maintenance.advanceMigration(contexts.advance));
+    results[6] = outcome(await failAdapter.maintenance.failMigration(contexts.fail));
+    results[7] = outcome(await recoverAdapter.maintenance.recoverMigration(contexts.recover));
+
+    crossTenantRecords = await multi.maintenance.exportAuthority(aliceExportContext);
+    results[8] = outcome(
+      await multi.maintenance.restoreAuthority(aliceRestoreContext, bobEnvelope),
+    );
+  } finally {
+    defineProperty(OriginalWeakMap.prototype, "get", descriptors.weakMapGet);
+    defineProperty(OriginalWeakMap.prototype, "set", descriptors.weakMapSet);
+    defineProperty(OriginalWeakMap.prototype, "has", descriptors.weakMapHas);
+    defineProperty(OriginalObject, "values", descriptors.values);
+    defineProperty(OriginalObject, "entries", descriptors.entries);
+    defineProperty(OriginalObject, "keys", descriptors.keys);
+    defineProperty(OriginalObject, "freeze", descriptors.freeze);
+    defineProperty(OriginalObject, "getOwnPropertyDescriptors", descriptors.descriptors);
+    defineProperty(OriginalObject, "getPrototypeOf", descriptors.prototype);
+    defineProperty(OriginalObject, "create", descriptors.create);
+    defineProperty(OriginalObject, "assign", descriptors.assign);
+    defineProperty(OriginalObject, "is", descriptors.is);
+    defineProperty(OriginalArray, "isArray", descriptors.isArray);
+    defineProperty(OriginalFunction.prototype, "call", descriptors.call);
+    defineProperty(OriginalFunction.prototype, "apply", descriptors.apply);
+    defineProperty(OriginalFunction.prototype, "bind", descriptors.bind);
+    defineProperty(Reflect, "apply", descriptors.reflectApply);
+    defineProperty(Reflect, "ownKeys", descriptors.reflectOwnKeys);
+    defineProperty(Reflect, "getPrototypeOf", descriptors.reflectGetPrototypeOf);
+    defineProperty(globalThis, "structuredClone", descriptors.structuredClone);
+    defineProperty(JSON, "parse", descriptors.jsonParse);
+    defineProperty(JSON, "stringify", descriptors.jsonStringify);
+  }
+
+  assert(forgedDenied.every(Boolean));
+  equals(results.slice(0, 8), Array.from({ length: 8 }, () => "committed"));
+  equals(results[8], "denied");
+  assert(
+    crossTenantRecords &&
+      Object.values(crossTenantRecords.records).every((record) => record.tenantId === "tenant_a"),
+  );
+  for (const snapshot of [exported, inspected]) {
+    assert(snapshot && Object.isFrozen(snapshot));
+    assert(Object.isFrozen(snapshot.records));
+    const nested = Object.values(snapshot.records)[0]!;
+    assert(Object.isFrozen(nested));
+    assert(Object.isFrozen(nested.value as object));
+    const originalGeneration = snapshot.authorityGeneration;
+    try {
+      (snapshot as { authorityGeneration: number }).authorityGeneration = 0;
+    } catch {
+      // Expected for a frozen snapshot.
+    }
+    equals(snapshot.authorityGeneration, originalGeneration);
+  }
+}
+
 const cases: Record<string, (root: string) => Promise<void>> = {
   "DUR-01": async (root) => {
     await setup(root);
@@ -307,15 +599,7 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     const adapter: DurableAuthorityTransactions = candidate.transactions;
     const maintenance: DurableAuthorityMaintenance = candidate.maintenance;
     const authorize = (
-      purpose:
-        | "export"
-        | "inspect"
-        | "initialize"
-        | "restore"
-        | "prepare_migration"
-        | "advance_migration"
-        | "fail_migration"
-        | "recover_migration",
+      purpose: "export" | "inspect" | "restore",
       owner = alice,
     ) =>
       candidate.fixture.issueMaintenanceContext({
@@ -368,58 +652,61 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         purpose: "export",
       })
     );
-    await rejects(() => maintenance.exportAuthority(authorize("export", bob)));
+    equals(
+      Object.keys(
+        await maintenance.exportAuthority(authorize("export", bob)).then((value) => value.records),
+      ),
+      [],
+    );
     const foreignContext = createCandidateAdapter(root).fixture.issueMaintenanceContext({
       tenant: ctx(),
       actorId: "durability_operator",
       purpose: "export",
     });
     await rejects(() => maintenance.exportAuthority(foreignContext));
+    equals(
+      Object.keys((await maintenance.inspectAuthority(authorize("inspect", bob))).records),
+      [],
+    );
     for (
-      const [purpose, invoke] of [
-        [
-          "inspect",
-          (capability: AuthorityMaintenanceContext) => maintenance.inspectAuthority(capability),
-        ],
-        [
-          "prepare_migration",
-          (capability: AuthorityMaintenanceContext) =>
-            maintenance.prepareMigration(capability, {
-              expectedSchemaVersion: 2,
-              targetSchemaVersion: 3,
-            }),
-        ],
-        [
-          "advance_migration",
-          (capability: AuthorityMaintenanceContext) => maintenance.advanceMigration(capability),
-        ],
-        [
-          "fail_migration",
-          (capability: AuthorityMaintenanceContext) => maintenance.failMigration(capability),
-        ],
-        [
-          "recover_migration",
-          (capability: AuthorityMaintenanceContext) => maintenance.recoverMigration(capability),
-        ],
+      const purpose of [
+        "prepare_migration",
+        "advance_migration",
+        "fail_migration",
+        "recover_migration",
       ] as const
     ) {
-      await rejects(() => invoke(authorize(purpose, bob)));
+      await rejects(() =>
+        candidate.fixture.issueMaintenanceContext({
+          tenant: ctx(),
+          actorId: "durability_operator",
+          purpose,
+        } as never)
+      );
     }
+    await rejects(() =>
+      maintenance.prepareMigration(authorize("export"), {
+        expectedSchemaVersion: 1,
+        targetSchemaVersion: 2,
+      })
+    );
     equals(
       outcome(await maintenance.restoreAuthority(authorize("restore", bob), exported)),
       "denied",
     );
     const pristine = createCandidateAdapter(`${root}/pristine`);
-    const crossTenantInitialize = await pristine.maintenance.initializeAuthority(
+    await rejects(() =>
       pristine.fixture.issueMaintenanceContext({
         tenant: ctx(bob),
         actorId: "durability_operator",
         purpose: "initialize",
-      }),
-      exported,
+      } as never)
     );
-    equals(outcome(crossTenantInitialize), "denied");
+    await rejects(() =>
+      pristine.maintenance.initializeAuthority(authorize("export", bob), exported)
+    );
     equals((await inspect(root)).exists, true);
+    await exercisePostImportIntrinsicReplacement(root);
   },
   "DUR-02": async (root) => {
     await Promise.all([setup(root, alice, "custody_a"), setup(root, bob, "custody_b")]);
@@ -433,6 +720,66 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       const replay = tenantOf(await inspect(root, owner)).replay as Record<string, unknown>;
       equals(Object.keys(replay), ["nonce/collision"]);
     }
+
+    const candidate = createCandidateAdapter(root);
+    const tenantCapability = (
+      owner: typeof alice,
+      purpose: "export" | "inspect" | "restore",
+    ) =>
+      candidate.fixture.issueMaintenanceContext({
+        tenant: ctx(owner),
+        actorId: `${owner.tenantId}_operator`,
+        purpose,
+      });
+    const aliceExport = await candidate.maintenance.exportAuthority(
+      tenantCapability(alice, "export"),
+    );
+    const bobExport = await candidate.maintenance.exportAuthority(tenantCapability(bob, "export"));
+    assert(
+      Object.values(aliceExport.records).every((record) => record.tenantId === alice.tenantId),
+    );
+    assert(Object.values(bobExport.records).every((record) => record.tenantId === bob.tenantId));
+    const bobBefore = serialize(bobExport.records);
+    equals(
+      outcome(
+        await candidate.maintenance.restoreAuthority(
+          tenantCapability(alice, "restore"),
+          aliceExport,
+        ),
+      ),
+      "committed",
+    );
+    equals(
+      outcome(
+        await candidate.maintenance.restoreAuthority(
+          tenantCapability(alice, "restore"),
+          bobExport,
+        ),
+      ),
+      "denied",
+    );
+    equals(
+      serialize(
+        (await candidate.maintenance.exportAuthority(tenantCapability(bob, "export"))).records,
+      ),
+      bobBefore,
+    );
+    await rejects(() => candidate.maintenance.recoverMigration({} as AuthorityMaintenanceContext));
+    await candidate.fixture.writeLegacy(alice);
+    const globalRecovery = candidate.fixture.issueAuthorityMaintenanceContext({
+      actorId: "schema_authority_operator",
+      purpose: "recover_migration",
+    });
+    equals(outcome(await candidate.maintenance.recoverMigration(globalRecovery)), "committed");
+    const globalInspection = await candidate.maintenance.inspectAuthority(
+      candidate.fixture.issueAuthorityMaintenanceContext({
+        actorId: "schema_authority_operator",
+        purpose: "inspect",
+      }),
+    );
+    assertCurrentEnvelope(globalInspection);
+    assert(entityKey(ctx(alice), "subject", "agent") in globalInspection.records);
+    assert(entityKey(ctx(bob), "subject", "agent") in globalInspection.records);
   },
   "DUR-03": async (root) => {
     await setup(root);
@@ -1333,6 +1680,37 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     );
   },
   "DUR-18": async (root) => {
+    const unsupportedRoot = `${root}/unsupported_target`;
+    await setup(unsupportedRoot);
+    const beforeUnsupported = await ok({
+      action: "raw",
+      root: unsupportedRoot,
+      transaction: false,
+    }) as DurableAuthorityEnvelope;
+    equals(
+      outcome(
+        await ok({
+          action: "prepareMigration",
+          root: unsupportedRoot,
+          transaction: { expectedSchemaVersion: 2, targetSchemaVersion: 3 },
+        }),
+      ),
+      "denied",
+    );
+    const afterUnsupported = await ok({
+      action: "raw",
+      root: unsupportedRoot,
+      transaction: false,
+    }) as DurableAuthorityEnvelope;
+    equals(afterUnsupported.migration.status, "idle");
+    equals(afterUnsupported.migration.toVersion, 2);
+    equals(afterUnsupported.authorityGeneration, beforeUnsupported.authorityGeneration);
+    equals(outcome(await ok({ action: "failMigration", root: unsupportedRoot })), "denied");
+    equals(outcome(await ok({ action: "recoverMigration", root: unsupportedRoot })), "committed");
+    assertCurrentEnvelope(
+      await ok({ action: "export", root: unsupportedRoot }) as DurableAuthorityEnvelope,
+    );
+
     const makeLegacy = async (name: string): Promise<DurableAuthorityEnvelope> => {
       const source = `${root}/source_${name}`;
       await setup(source);
@@ -1978,6 +2356,20 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         delete value.records[entityKey(ctx(), "connection", "connection")];
       },
       (value) => {
+        delete value.records[entityKey(ctx(), "connection", "connection")];
+        delete value.records[entityKey(ctx(), "custody", "custodyhash")];
+      },
+      (value) => {
+        const connection = value.records[entityKey(ctx(), "connection", "connection")]!
+          .value as Record<string, unknown>;
+        connection.agentId = "other_agent";
+      },
+      (value) => {
+        const custody = value.records[entityKey(ctx(), "custody", "custodyhash")]!
+          .value as Record<string, unknown>;
+        custody.workload = "wrong.operation";
+      },
+      (value) => {
         const item = value.records[recordKey]!.value as Record<string, unknown>;
         (item.identity as Record<string, unknown>).status = "revoked";
       },
@@ -2057,6 +2449,9 @@ const cases: Record<string, (root: string) => Promise<void>> = {
             custodyReferenceHash: "custodyhash",
             owner: "tenant/tenant_b/user/user",
             connectionId: "connection",
+            agentId: "agent",
+            deviceId: "device",
+            workload: "github.user.read",
           },
         };
       },
@@ -2076,7 +2471,64 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         "denied",
       );
     }
+
+    const disconnected = structuredClone(envelope);
+    delete disconnected.records[entityKey(ctx(), "connection", "connection")];
+    delete disconnected.records[entityKey(ctx(), "custody", "custodyhash")];
+    const legacyDisconnected = structuredClone(disconnected);
+    legacyDisconnected.schemaVersion = 1;
+    legacyDisconnected.highWatermarks.schemaVersion = 1;
+    legacyDisconnected.migration = {
+      status: "idle",
+      generation: 0,
+      fromVersion: 1,
+      toVersion: 1,
+    };
+    await rejects(() =>
+      migrateAuthorityEnvelope(legacyDisconnected, [{
+        fromVersion: 1,
+        toVersion: 2,
+        migrate(value) {
+          value.schemaVersion = 2;
+          value.highWatermarks.schemaVersion = 2;
+          return value;
+        },
+      }])
+    );
+
     await setup(root);
+    const cleanBackup = `${root}/complete_graph.json`;
+    await ok({ action: "snapshot", root, path: cleanBackup });
+    const brokenRestore = await ok({ action: "export", root }) as DurableAuthorityEnvelope;
+    delete brokenRestore.records[entityKey(ctx(), "connection", "connection")];
+    delete brokenRestore.records[entityKey(ctx(), "custody", "custody_tenant_a_user")];
+    equals(outcome(await ok({ action: "restore", root, transaction: brokenRestore })), "denied");
+    await ok({
+      action: "mutate",
+      root,
+      mutation: {
+        path: `records.${entityKey(ctx(), "connection", "connection")}`,
+        deletion: true,
+      },
+    });
+    await ok({
+      action: "mutate",
+      root,
+      mutation: {
+        path: `records.${entityKey(ctx(), "custody", "custody_tenant_a_user")}`,
+        deletion: true,
+      },
+    });
+    equals(
+      (await run({
+        action: "reserve",
+        root,
+        owner: alice,
+        transaction: binding("disconnected"),
+      })).outcome,
+      "denied",
+    );
+    await ok({ action: "replace", root, path: cleanBackup });
     await ok({
       action: "consumeReplay",
       root,

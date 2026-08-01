@@ -1,9 +1,27 @@
 import { types as nodeTypes } from "node:util";
 import { jwkThumbprint } from "../crypto/thumbprint.ts";
+import {
+  authorityArrayIsArray,
+  authorityDecodeText,
+  authorityEncodeText,
+  authorityJsonStringify,
+  authorityNumberIsSafeInteger,
+  authorityObjectCreate,
+  authorityObjectEntries,
+  authorityObjectFreeze,
+  authorityObjectGetOwnPropertyDescriptors,
+  authorityObjectGetPrototypeOf,
+  authorityObjectIs,
+  authorityObjectKeys,
+  authorityObjectPrototype,
+  authorityObjectValues,
+  authorityReflectOwnKeys,
+  authorityStructuredClone,
+} from "./intrinsics.ts";
 
 const intrinsicIsProxy = nodeTypes.isProxy;
 const intrinsicReflectApply = Reflect.apply;
-const intrinsicDescriptors = Object.getOwnPropertyDescriptors;
+const intrinsicDescriptors = authorityObjectGetOwnPropertyDescriptors;
 const intrinsicOwnKeys = Reflect.ownKeys;
 const IntrinsicWeakSet = WeakSet;
 const intrinsicWeakSetHas = WeakSet.prototype.has;
@@ -48,17 +66,19 @@ export interface DurableAuthorityEnvelope {
 }
 
 const safe = (value: unknown, minimum = 0): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0) &&
+  typeof value === "number" && authorityNumberIsSafeInteger(value) &&
+  !authorityObjectIs(value, -0) &&
   value >= minimum;
 const plain = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
-  (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  Boolean(value) && typeof value === "object" && !authorityArrayIsArray(value) &&
+  (authorityObjectGetPrototypeOf(value as object) === authorityObjectPrototype ||
+    authorityObjectGetPrototypeOf(value as object) === null);
 const clean = (value: unknown): value is string =>
   typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 
 function ownData(value: object, expected?: readonly string[]): Record<string, PropertyDescriptor> {
-  const descriptors = Object.getOwnPropertyDescriptors(value);
-  const keys = Reflect.ownKeys(descriptors);
+  const descriptors = authorityObjectGetOwnPropertyDescriptors(value);
+  const keys = authorityReflectOwnKeys(descriptors);
   if (keys.some((key) => typeof key !== "string")) throw new Error("non-canonical durable value");
   const names = keys as string[];
   if (
@@ -75,9 +95,12 @@ function ownData(value: object, expected?: readonly string[]): Record<string, Pr
 
 function canonicalValue(value: unknown, active: Set<object>): string {
   if (value === null || typeof value === "boolean" || typeof value === "string") {
-    return JSON.stringify(value);
+    return authorityJsonStringify(value);
   }
-  if (typeof value === "number" && Number.isSafeInteger(value) && !Object.is(value, -0)) {
+  if (
+    typeof value === "number" && authorityNumberIsSafeInteger(value) &&
+    !authorityObjectIs(value, -0)
+  ) {
     return String(value);
   }
   if (!value || typeof value !== "object" || active.has(value)) {
@@ -85,9 +108,9 @@ function canonicalValue(value: unknown, active: Set<object>): string {
   }
   active.add(value);
   try {
-    if (Array.isArray(value)) {
-      const descriptors = Object.getOwnPropertyDescriptors(value);
-      const keys = Reflect.ownKeys(descriptors);
+    if (authorityArrayIsArray(value)) {
+      const descriptors = authorityObjectGetOwnPropertyDescriptors(value);
+      const keys = authorityReflectOwnKeys(descriptors);
       if (keys.some((key) => typeof key !== "string")) {
         throw new Error("non-canonical durable value");
       }
@@ -117,12 +140,12 @@ function canonicalValue(value: unknown, active: Set<object>): string {
     }
     if (!plain(value)) throw new Error("non-canonical durable value");
     const descriptors = ownData(value);
-    const names = Object.keys(descriptors).sort();
+    const names = authorityObjectKeys(descriptors).sort();
     const fields: string[] = [];
     for (const name of names) {
       const descriptor = descriptors[name]!;
       if (descriptor.value === undefined) throw new Error("non-canonical durable value");
-      fields.push(`${JSON.stringify(name)}:${canonicalValue(descriptor.value, active)}`);
+      fields.push(`${authorityJsonStringify(name)}:${canonicalValue(descriptor.value, active)}`);
     }
     return `{${fields.join(",")}}`;
   } finally {
@@ -150,22 +173,26 @@ function containsProxy(
 /** Injective deterministic UTF-8 JSON for the admitted durable-value domain. */
 export function serializeDurableAuthority(value: unknown): Uint8Array {
   if (containsProxy(value)) throw new Error("Proxy input denied");
-  return new TextEncoder().encode(canonicalValue(value, new Set()));
+  return authorityEncodeText(canonicalValue(value, new Set()));
 }
 
 function nullPrototypeFrozen(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return Object.freeze(value.map((item) => nullPrototypeFrozen(item)));
+  if (authorityArrayIsArray(value)) {
+    return authorityObjectFreeze(value.map((item) => nullPrototypeFrozen(item)));
   }
   if (value && typeof value === "object") {
-    const output = Object.create(null) as Record<string, unknown>;
-    for (const [name, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(value))) {
+    const output = authorityObjectCreate<Record<string, unknown>>(null) as Record<string, unknown>;
+    for (
+      const [name, descriptor] of authorityObjectEntries(
+        authorityObjectGetOwnPropertyDescriptors(value),
+      )
+    ) {
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
         throw new Error("authoritative input denied");
       }
       output[name] = nullPrototypeFrozen(descriptor.value);
     }
-    return Object.freeze(output);
+    return authorityObjectFreeze(output);
   }
   return value;
 }
@@ -180,7 +207,7 @@ export function snapshotDurableInput<T>(value: T): T {
   try {
     // The captured same-realm predicate rejects nested proxies before any reflective clone/read.
     if (containsProxy(value)) throw new Error("Proxy input denied");
-    detached = structuredClone(value);
+    detached = authorityStructuredClone(value);
   } catch {
     throw new Error("authoritative input denied");
   }
@@ -193,7 +220,7 @@ export function frozenDurableSnapshot<T>(value: T): T {
   return snapshotDurableInput(value);
 }
 
-const text = (value: unknown): string => new TextDecoder().decode(serializeDurableAuthority(value));
+const text = (value: unknown): string => authorityDecodeText(serializeDurableAuthority(value));
 
 export async function hashDispatchPermit(input: {
   attemptId: string;
@@ -436,9 +463,17 @@ export function assertAuthorityEnvelope(
   }
 
   ownData(envelope.records);
-  const parsed = Object.entries(envelope.records).map(([key, record]) => parseRecord(key, record));
-  const custody = new Map<string, string>();
-  const connections = new Map<string, string>();
+  const parsed = authorityObjectEntries(envelope.records).map(([key, record]) =>
+    parseRecord(key, record)
+  );
+  const custody = new Map<
+    string,
+    { connectionKey: string; agentId: string; deviceId: string; workload: string }
+  >();
+  const connections = new Map<
+    string,
+    { custodyReferenceHash: string; agentId: string; deviceId: string; workload: string }
+  >();
   const subjects = new Map<string, Record<string, unknown>>();
   const enrollments: Array<{ tenantId: string; userId: string; request: Record<string, unknown> }> =
     [];
@@ -504,7 +539,7 @@ export function assertAuthorityEnvelope(
         !["reserved", "dispatching", "completed", "failed_safe", "dispatch_unknown"].includes(
           String(v.state),
         ) ||
-        !Array.isArray(v.replayKeys) || v.replayKeys.length !== 3 ||
+        !authorityArrayIsArray(v.replayKeys) || v.replayKeys.length !== 3 ||
         new Set(v.replayKeys).size !== 3 ||
         v.replayKeys.some((replayKey) =>
           typeof replayKey !== "string" || !envelope.records[replayKey] ||
@@ -609,27 +644,62 @@ export function assertAuthorityEnvelope(
       }
       enrollments.push({ tenantId, userId, request: v.request });
     } else if (kind === "connection") {
-      ownData(v, ["id", "custodyReferenceHash"]);
-      if (v.id !== id || !clean(v.custodyReferenceHash)) {
+      ownData(v, [
+        "id",
+        "custodyReferenceHash",
+        "owner",
+        "agentId",
+        "deviceId",
+        "workload",
+      ]);
+      const owner = `tenant/${tenantId}/user/${userId}`;
+      if (
+        v.id !== id || !clean(v.custodyReferenceHash) || v.owner !== owner ||
+        !clean(v.agentId) || !clean(v.deviceId) || v.workload !== "github.user.read"
+      ) {
         throw new Error("durable connection denied");
       }
-      connections.set(key, v.custodyReferenceHash);
+      connections.set(key, {
+        custodyReferenceHash: v.custodyReferenceHash,
+        agentId: v.agentId,
+        deviceId: v.deviceId,
+        workload: v.workload,
+      });
     } else if (kind === "custody") {
-      ownData(v, ["custodyReferenceHash", "owner", "connectionId"]);
+      ownData(v, [
+        "custodyReferenceHash",
+        "owner",
+        "connectionId",
+        "agentId",
+        "deviceId",
+        "workload",
+      ]);
       const owner = `tenant/${tenantId}/user/${userId}`;
       if (
         v.custodyReferenceHash !== id || v.owner !== owner || !clean(v.connectionId) ||
+        !clean(v.agentId) || !clean(v.deviceId) || v.workload !== "github.user.read" ||
         custody.has(id)
       ) {
         throw new Error("durable custody denied");
       }
-      custody.set(id, `${owner}/connection/${v.connectionId}`);
+      custody.set(id, {
+        connectionKey: `${owner}/connection/${v.connectionId}`,
+        agentId: v.agentId,
+        deviceId: v.deviceId,
+        workload: v.workload,
+      });
     }
   }
 
-  for (const [connectionKey, custodyHash] of connections) {
+  for (const [connectionKey, linkage] of connections) {
     const item = parsed.find((candidate) => candidate.key === connectionKey)!;
-    if (custody.get(custodyHash) !== connectionKey) {
+    const custodyLinkage = custody.get(linkage.custodyReferenceHash);
+    if (
+      !custodyLinkage || custodyLinkage.connectionKey !== connectionKey ||
+      custodyLinkage.agentId !== linkage.agentId ||
+      custodyLinkage.deviceId !== linkage.deviceId ||
+      custodyLinkage.workload !== linkage.workload
+    ) {
       throw new Error("connection custody relation denied");
     }
     const connectionSubject = subjects.get(
@@ -637,13 +707,15 @@ export function assertAuthorityEnvelope(
     );
     if (
       !connectionSubject || !plain(connectionSubject.identity) ||
-      connectionSubject.identity.custodyReferenceHash !== custodyHash
+      connectionSubject.identity.custodyReferenceHash !== linkage.custodyReferenceHash
     ) {
       throw new Error("connection subject denied");
     }
   }
-  for (const connectionKey of custody.values()) {
-    if (!connections.has(connectionKey)) throw new Error("custody connection relation denied");
+  for (const linkage of custody.values()) {
+    if (!connections.has(linkage.connectionKey)) {
+      throw new Error("custody connection relation denied");
+    }
   }
   for (const [subjectKey, subject] of subjects) {
     const [tenantId, userId] = subjectKey.split("/");
@@ -652,6 +724,19 @@ export function assertAuthorityEnvelope(
       if (!subjects.has(`${tenantId}/${userId}/agent/${identity.agentId}`)) {
         throw new Error("device agent relation denied");
       }
+    } else if (subject.kind === "connection") {
+      const identity = subject.identity as Record<string, unknown>;
+      const connectionKey = `tenant/${tenantId}/user/${userId}/connection/${subject.id}`;
+      const linkage = connections.get(connectionKey);
+      const custodyLinkage = clean(identity.custodyReferenceHash)
+        ? custody.get(identity.custodyReferenceHash)
+        : undefined;
+      if (
+        subject.status === "active" &&
+        (!linkage || !custodyLinkage || custodyLinkage.connectionKey !== connectionKey)
+      ) {
+        throw new Error("active connection linkage denied");
+      }
     } else if (subject.kind === "grant") {
       const identity = subject.identity as Record<string, unknown>;
       const agent = subjects.get(`${tenantId}/${userId}/agent/${identity.agentId}`);
@@ -659,8 +744,17 @@ export function assertAuthorityEnvelope(
       const connection = subjects.get(
         `${tenantId}/${userId}/connection/${identity.connectionId}`,
       );
+      const connectionKey = `tenant/${tenantId}/user/${userId}/connection/${identity.connectionId}`;
+      const linkage = connections.get(connectionKey);
+      const custodyLinkage = linkage ? custody.get(linkage.custodyReferenceHash) : undefined;
       if (
-        !agent || !device || !connection || !plain(device.identity) ||
+        !agent || !device || !connection || !plain(device.identity) || !linkage ||
+        !custodyLinkage || custodyLinkage.connectionKey !== connectionKey ||
+        linkage.agentId !== identity.agentId || linkage.deviceId !== identity.deviceId ||
+        linkage.workload !== identity.operation ||
+        custodyLinkage.agentId !== identity.agentId ||
+        custodyLinkage.deviceId !== identity.deviceId ||
+        custodyLinkage.workload !== identity.operation ||
         device.identity.agentId !== identity.agentId || identity.operation !== "github.user.read" ||
         !safe(identity.expiresAt, 1)
       ) throw new Error("grant authority relation denied");
@@ -729,7 +823,7 @@ export function assertCurrentEnvelope(value: DurableAuthorityEnvelope): void {
 /** Verifies persisted agent/device/enrollment thumbprints against their public JWKs. */
 export async function assertAuthorityCryptography(value: DurableAuthorityEnvelope): Promise<void> {
   assertAuthorityEnvelope(value, false);
-  for (const record of Object.values(value.records)) {
+  for (const record of authorityObjectValues(value.records)) {
     const item = record.value as Record<string, unknown>;
     if (
       item.kind === "agent" || item.kind === "device"

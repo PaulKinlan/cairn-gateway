@@ -5,11 +5,11 @@ import type {
   Principal,
   TenantContext,
 } from "../domain/types.ts";
-import { canonical, encoder, sha256 } from "../crypto/encoding.ts";
+import { canonical, encodeUtf8, sha256 } from "../crypto/encoding.ts";
 import { jwkThumbprint, shortFingerprint } from "../crypto/thumbprint.ts";
 
 export async function transactionHash(value: unknown): Promise<string> {
-  return await sha256(encoder.encode(canonical(value)));
+  return await sha256(encodeUtf8(canonical(value)));
 }
 
 export async function bootstrapTransaction(

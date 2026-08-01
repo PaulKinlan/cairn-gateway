@@ -3,6 +3,7 @@ import type {
   AuthorityMaintenanceContext,
   DurableAuthorityMaintenance,
   DurableAuthorityTransactions,
+  GlobalAuthorityMaintenanceAuthorization,
 } from "../../../packages/core/src/store/authority_transaction.ts";
 import { type FaultPoint, OfflineReferenceAuthority } from "./offline_reference_adapter.ts";
 import type { Owner } from "./candidate_fixture_data.ts";
@@ -22,6 +23,9 @@ export interface CandidateFixtureDriver {
   inspect(owner: Owner): Promise<Record<string, unknown>>;
   writeLegacy(owner: Owner): Promise<void>;
   issueMaintenanceContext(input: AuthorityMaintenanceAuthorization): AuthorityMaintenanceContext;
+  issueAuthorityMaintenanceContext(
+    input: GlobalAuthorityMaintenanceAuthorization,
+  ): AuthorityMaintenanceContext;
   readonly statePath: string;
   readonly lockPath: string;
 }

@@ -48,7 +48,9 @@ const ctx = (): TenantContext => ({
   tenantId: ids.tenant(owner().tenantId),
   userId: ids.user(owner().userId),
 });
-const maintenanceCtx = (purpose: AuthorityMaintenancePurpose): AuthorityMaintenanceContext => {
+const maintenanceCtx = (
+  purpose: "export" | "inspect" | "restore",
+): AuthorityMaintenanceContext => {
   const value = input.owner ?? { tenantId: "tenant_a", userId: "user" };
   return fixture.issueMaintenanceContext({
     tenant: { tenantId: ids.tenant(value.tenantId), userId: ids.user(value.userId) },
@@ -56,6 +58,10 @@ const maintenanceCtx = (purpose: AuthorityMaintenancePurpose): AuthorityMaintena
     purpose,
   });
 };
+const authorityMaintenanceCtx = (
+  purpose: AuthorityMaintenancePurpose,
+): AuthorityMaintenanceContext =>
+  fixture.issueAuthorityMaintenanceContext({ actorId: "stage1_authority_worker", purpose });
 const envelopeFromPath = async (): Promise<DurableAuthorityEnvelope> =>
   JSON.parse(await Deno.readTextFile(input.path!)) as DurableAuthorityEnvelope;
 let value: unknown;
@@ -145,25 +151,25 @@ try {
       break;
     case "initializeAuthority":
       value = await maintenance.initializeAuthority(
-        maintenanceCtx("initialize"),
+        authorityMaintenanceCtx("initialize"),
         input.path ? await envelopeFromPath() : input.transaction as DurableAuthorityEnvelope,
       );
       break;
     case "prepareMigration":
       value = await maintenance.prepareMigration(
-        maintenanceCtx("prepare_migration"),
+        authorityMaintenanceCtx("prepare_migration"),
         input.transaction as MigrationPreparation,
       );
       break;
     case "advanceMigration":
-      value = await maintenance.advanceMigration(maintenanceCtx("advance_migration"));
+      value = await maintenance.advanceMigration(authorityMaintenanceCtx("advance_migration"));
       break;
     case "failMigration":
-      value = await maintenance.failMigration(maintenanceCtx("fail_migration"));
+      value = await maintenance.failMigration(authorityMaintenanceCtx("fail_migration"));
       break;
     case "recoverMigration":
     case "migrate":
-      value = await maintenance.recoverMigration(maintenanceCtx("recover_migration"));
+      value = await maintenance.recoverMigration(authorityMaintenanceCtx("recover_migration"));
       break;
     case "snapshot":
       await Deno.writeFile(
