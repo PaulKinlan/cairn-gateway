@@ -10,6 +10,7 @@ import type {
   RevocationEvent,
   TenantContext,
 } from "../domain/types.ts";
+import { jwkThumbprint } from "../crypto/thumbprint.ts";
 import { entityKey, ownerPrefix, replayKey } from "./keys.ts";
 import type {
   ApprovalCommit,
@@ -32,14 +33,14 @@ export class MemoryAuthorityBackend {
   used = new Map<string, number>();
   revocations: RevocationEvent[] = [];
   tail: Promise<void> = Promise.resolve();
-  async exclusive<T>(fn: () => T): Promise<T> {
+  async exclusive<T>(fn: () => T | Promise<T>): Promise<T> {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => release = resolve);
     const prior = this.tail;
     this.tail = prior.then(() => gate);
     await prior;
     try {
-      return fn();
+      return await fn();
     } finally {
       release();
     }
@@ -144,8 +145,13 @@ export class MemoryStore implements MetadataStore {
     this.#owned(ctx, { ...value.principal, userId: value.principal.id });
     this.#owned(ctx, value.agent);
     this.#owned(ctx, value.device);
-    return await this.backend.exclusive(() => {
+    return await this.backend.exclusive(async () => {
+      const agentThumbprint = await jwkThumbprint(value.agent.publicJwk);
+      const deviceThumbprint = await jwkThumbprint(value.device.publicJwk);
       if (
+        agentThumbprint !== value.agent.thumbprint ||
+        deviceThumbprint !== value.device.thumbprint ||
+        agentThumbprint === deviceThumbprint ||
         this.backend.principals.has(entityKey(ctx, "principal", ctx.userId)) ||
         [...this.backend.devices.keys()].some((key) =>
           key.startsWith(`${ownerPrefix(ctx)}/device/`)
@@ -175,15 +181,18 @@ export class MemoryStore implements MetadataStore {
     now: number,
   ): Promise<boolean> {
     this.#owned(ctx, value.request);
-    return await this.backend.exclusive(() => {
+    return await this.backend.exclusive(async () => {
       const principal = this.backend.principals.get(entityKey(ctx, "principal", ctx.userId));
       const agent = this.backend.agents.get(
         entityKey(ctx, "agent", value.request.agentId),
       );
+      const candidateThumbprint = await jwkThumbprint(value.request.candidateJwk);
       if (
         !principal || principal.status !== "active" ||
         principal.epoch !== value.principalEpoch || !agent || agent.status !== "active" ||
         agent.epoch !== value.agentEpoch || agent.thumbprint !== value.agentThumbprint ||
+        candidateThumbprint !== value.request.thumbprint ||
+        candidateThumbprint === agent.thumbprint ||
         value.request.status !== "pending" || value.request.expiresAt <= now ||
         [...this.backend.devices.values()].some((device) =>
           device.tenantId === ctx.tenantId && device.userId === ctx.userId &&
@@ -205,7 +214,7 @@ export class MemoryStore implements MetadataStore {
     now: number,
   ): Promise<boolean> {
     this.#owned(ctx, value.device);
-    return await this.backend.exclusive(() => {
+    return await this.backend.exclusive(async () => {
       if (!this.#consumeChallenge(ctx, challengeId, hash, "approve_enrollment", now)) return false;
       const requestKey = entityKey(ctx, "enrollment", value.requestId);
       const request = this.backend.enrollments.get(requestKey);
@@ -214,11 +223,15 @@ export class MemoryStore implements MetadataStore {
         ? this.backend.agents.get(entityKey(ctx, "agent", request.agentId))
         : undefined;
       const approver = this.backend.devices.get(entityKey(ctx, "device", value.approverId));
+      const requestThumbprint = request ? await jwkThumbprint(request.candidateJwk) : undefined;
+      const deviceThumbprint = await jwkThumbprint(value.device.publicJwk);
       if (
         !request || request.status !== "pending" || request.expiresAt <= now ||
         !principal || principal.status !== "active" ||
         principal.epoch !== value.principalEpoch || !agent || agent.status !== "active" ||
         agent.epoch !== value.agentEpoch || agent.thumbprint !== value.agentThumbprint ||
+        requestThumbprint !== request.thumbprint || deviceThumbprint !== value.device.thumbprint ||
+        requestThumbprint !== deviceThumbprint || deviceThumbprint === agent.thumbprint ||
         !approver || approver.status !== "active" || approver.role !== "admin" ||
         approver.agentId !== request.agentId || approver.epoch !== value.approverEpoch ||
         approver.thumbprint !== value.approverThumbprint ||
@@ -371,12 +384,17 @@ export class MemoryStore implements MetadataStore {
   }
   async consumeInvocation(ctx: TenantContext, b: InvocationBinding): Promise<InvocationDecision> {
     return await this.backend.exclusive(() => {
-      const nonceKey = replayKey(ctx, "nonce", b.nonceHash),
+      const nonceKeys = [
+          replayKey(ctx, "nonce", b.deviceNonceHash),
+          replayKey(ctx, "nonce", b.agentNonceHash),
+        ],
         jtiKey = replayKey(ctx, "jti", b.jtiHash);
       for (const [key, expiry] of this.backend.used) {
         if (expiry < b.now) this.backend.used.delete(key);
       }
-      if (this.backend.used.has(nonceKey)) return { ok: false, reason: "nonce replay" };
+      if (nonceKeys.some((key) => this.backend.used.has(key))) {
+        return { ok: false, reason: "nonce replay" };
+      }
       if (this.backend.used.has(jtiKey)) return { ok: false, reason: "capability replay" };
       const principal = this.backend.principals.get(entityKey(ctx, "principal", b.principalId));
       const agent = this.backend.agents.get(entityKey(ctx, "agent", b.agentId));
@@ -391,7 +409,7 @@ export class MemoryStore implements MetadataStore {
       }
       if (
         !device || device.status !== "active" || device.epoch !== b.deviceEpoch ||
-        device.agentId !== b.agentId
+        device.agentId !== b.agentId || device.thumbprint === agent.thumbprint
       ) return { ok: false, reason: "device inactive" };
       if (
         !grant || grant.status !== "active" || grant.version !== b.grantVersion ||
@@ -402,7 +420,7 @@ export class MemoryStore implements MetadataStore {
       if (!connection || connection.status !== "active" || connection.epoch !== b.connectionEpoch) {
         return { ok: false, reason: "connection inactive" };
       }
-      this.backend.used.set(nonceKey, b.nonceExpiresAt);
+      for (const nonceKey of nonceKeys) this.backend.used.set(nonceKey, b.nonceExpiresAt);
       this.backend.used.set(jtiKey, b.jtiExpiresAt);
       return { ok: true };
     });

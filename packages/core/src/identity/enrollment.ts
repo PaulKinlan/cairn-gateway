@@ -196,6 +196,7 @@ export class DeviceEnrollmentService {
     const agent = await this.store.getAgent(ctx, value.agentId);
     if (!agent || agent.status !== "active") throw new Error("agent denied");
     const jkt = await jwkThumbprint(value.candidateJwk);
+    if (jkt === agent.thumbprint) throw new Error("agent and device keys must differ");
     if ((await this.store.listDevices(ctx)).some((d) => d.thumbprint === jkt)) {
       throw new Error("duplicate device key");
     }

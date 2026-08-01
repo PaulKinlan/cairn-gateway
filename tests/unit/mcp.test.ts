@@ -17,6 +17,9 @@ import {
   fixtureDeviceSigner,
 } from "../../packages/core/src/crypto/fixture_keys.ts";
 import { jwkThumbprint } from "../../packages/core/src/crypto/thumbprint.ts";
+import { bodyHash, signRequestProof } from "../../packages/core/src/crypto/request_proof.ts";
+import { verifyMcpAuth } from "../../apps/gateway/mcp_auth.ts";
+import { runMcpContractGate } from "../../scripts/mcp_contract_gate.ts";
 import { MemoryCustodyFixture } from "../../packages/core/src/custody/memory_fixture.ts";
 import { MemorySafeLogger } from "../../packages/core/src/logging/safe_logger.ts";
 import { InvocationService } from "../../packages/core/src/policy/invocation.ts";
@@ -121,6 +124,9 @@ async function environment(expiresAt = now + 600, clock = { value: now }) {
   );
   return {
     store,
+    service,
+    device,
+    agent,
     bridge: new FixtureLocalMcpBridge(
       store,
       service,
@@ -163,10 +169,10 @@ Deno.test("vendored official SDK fixture and all closed schemas are executable",
 Deno.test("unverified auth and arbitrary fake core cannot reach MCP", async () => {
   const request = modern("search_capabilities", { query: "github" });
   const bytes = encoder.encode(JSON.stringify(request));
-  const unverified = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", {} as never, {});
+  const unverified = await handleFixtureMcp(bytes, MCP_CURRENT, "/mcp", {} as never, {});
   equals((unverified!.error as { code: number }).code, -32600);
   const bound = await authorized(request);
-  const fake = await handleFixtureMcp(request, bound.bytes, MCP_CURRENT, "/mcp", bound.auth, {
+  const fake = await handleFixtureMcp(bound.bytes, MCP_CURRENT, "/mcp", bound.auth, {
     search: () => Promise.resolve({ operations: [], count: 0 }),
   });
   equals((fake!.error as { code: number }).code, -32600);
@@ -177,7 +183,6 @@ Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
   const substituted = modern("connection_status", { connection: "connection_a" });
   const substitutedBytes = encoder.encode(JSON.stringify(substituted));
   const denied = await handleFixtureMcp(
-    substituted,
     substitutedBytes,
     MCP_CURRENT,
     "/mcp",
@@ -186,7 +191,6 @@ Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
   );
   equals((denied!.error as { code: number }).code, -32600);
   const first = await handleFixtureMcp(
-    search,
     bound.bytes,
     MCP_CURRENT,
     "/mcp",
@@ -195,7 +199,6 @@ Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
   );
   assert("result" in first!); // a mismatch does not burn the exact authorization
   const replay = await handleFixtureMcp(
-    search,
     bound.bytes,
     MCP_CURRENT,
     "/mcp",
@@ -205,7 +208,6 @@ Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
   equals((replay!.error as { code: number }).code, -32600);
   const route = await authorized(search);
   const wrongRoute = await handleFixtureMcp(
-    search,
     route.bytes,
     MCP_LEGACY,
     "/mcp/legacy",
@@ -230,7 +232,6 @@ Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
   };
   const legacySubstitutionBytes = encoder.encode(JSON.stringify(legacySubstitution));
   const legacyDenied = await handleFixtureMcp(
-    legacySubstitution,
     legacySubstitutionBytes,
     MCP_LEGACY,
     "/mcp/legacy",
@@ -240,7 +241,6 @@ Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
   );
   equals((legacyDenied!.error as { code: number }).code, -32600);
   const legacyOk = await handleFixtureMcp(
-    legacySearch,
     legacy.bytes,
     MCP_LEGACY,
     "/mcp/legacy",
@@ -250,7 +250,6 @@ Deno.test("verified auth is exact-body, exact-route and one-use", async () => {
   );
   assert("result" in legacyOk!);
   const legacyReplay = await handleFixtureMcp(
-    legacySearch,
     legacy.bytes,
     MCP_LEGACY,
     "/mcp/legacy",
@@ -274,7 +273,6 @@ Deno.test("legacy lifecycle requires initialized notification with per-request a
   };
   const a = await authorized(init, "/mcp/legacy");
   const initialized = await handleFixtureMcp(
-    init,
     a.bytes,
     MCP_LEGACY,
     "/mcp/legacy",
@@ -286,13 +284,12 @@ Deno.test("legacy lifecycle requires initialized notification with per-request a
   const notice = { jsonrpc: "2.0" as const, method: "notifications/initialized" };
   const b = await authorized(notice, "/mcp/legacy");
   equals(
-    await handleFixtureMcp(notice, b.bytes, MCP_LEGACY, "/mcp/legacy", b.auth, b.core, session),
+    await handleFixtureMcp(b.bytes, MCP_LEGACY, "/mcp/legacy", b.auth, b.core, session),
     undefined,
   );
   const list = { jsonrpc: "2.0" as const, id: 2, method: "tools/list" };
   const c = await authorized(list, "/mcp/legacy");
   const listed = await handleFixtureMcp(
-    list,
     c.bytes,
     MCP_LEGACY,
     "/mcp/legacy",
@@ -318,7 +315,6 @@ Deno.test("every tool uses operation-time expiry and epoch snapshots", async () 
     const expired = await authorized(request, "/mcp", now + 1, clock);
     clock.value = now + 1;
     const denied = await handleFixtureMcp(
-      request,
       expired.bytes,
       MCP_CURRENT,
       "/mcp",
@@ -362,7 +358,6 @@ Deno.test("every tool uses operation-time expiry and epoch snapshots", async () 
     const stale = await authorized(request);
     await mutate(stale);
     const denied = await handleFixtureMcp(
-      request,
       stale.bytes,
       MCP_CURRENT,
       "/mcp",
@@ -403,7 +398,6 @@ Deno.test("modern and legacy executable bridge invoke the fixed operation", asyn
       session.complete();
     }
     const response = await handleFixtureMcp(
-      request,
       bound.bytes,
       path === "/mcp" ? MCP_CURRENT : MCP_LEGACY,
       path,
@@ -415,6 +409,120 @@ Deno.test("modern and legacy executable bridge invoke the fixed operation", asyn
       (response!.result as { structuredContent: { outcome: string } }).structuredContent.outcome,
       "success",
     );
+  }
+});
+Deno.test("MCP parses only signed received bytes and has no split body dispatch", async () => {
+  for (const path of ["/mcp", "/mcp/legacy"] as const) {
+    const signedSearch = path === "/mcp" ? modern("search_capabilities", { query: "github" }) : {
+      jsonrpc: "2.0" as const,
+      id: 12,
+      method: "tools/call",
+      params: { name: "search_capabilities", arguments: { query: "github" } },
+    };
+    const bound = await authorized(signedSearch, path);
+    const forgedInvoke = path === "/mcp"
+      ? modern("invoke_operation", {
+        operation: "github.user.read@v1",
+        connection: "connection_a",
+        arguments: {},
+      })
+      : {
+        jsonrpc: "2.0" as const,
+        id: 12,
+        method: "tools/call",
+        params: {
+          name: "invoke_operation",
+          arguments: {
+            operation: "github.user.read@v1",
+            connection: "connection_a",
+            arguments: {},
+          },
+        },
+      };
+    // Exercise the rejected old split-input calling convention. The independent
+    // object is now treated as invalid raw bytes and can never drive dispatch.
+    const oldSplitCall = handleFixtureMcp as unknown as (
+      ...args: unknown[]
+    ) => Promise<Record<string, unknown> | undefined>;
+    const denied = await oldSplitCall(
+      forgedInvoke,
+      bound.bytes,
+      path === "/mcp" ? MCP_CURRENT : MCP_LEGACY,
+      path,
+      bound.auth,
+      bound.core,
+      path === "/mcp/legacy" ? new LegacyMcpSession() : undefined,
+    );
+    equals((denied!.error as { code: number }).code, -32700);
+  }
+});
+Deno.test("device and agent proof nonces are independently atomic", async () => {
+  const env = await environment();
+  const request = modern("search_capabilities", { query: "github" });
+  const bytes = encoder.encode(JSON.stringify(request));
+  const base = {
+    v: 1 as const,
+    method: "POST" as const,
+    authority: "fixture.cairn.invalid",
+    path: "/mcp" as const,
+    query: "" as const,
+    audience: "urn:cairn:gateway" as const,
+    body_sha256: await bodyHash(bytes),
+    issued_at: now,
+    device_id: "device_a",
+    agent_id: "agent_a",
+    grant_id: "grant_a",
+  };
+  const deviceProof = await signRequestProof(env.device, {
+    ...base,
+    nonce: "shared_device_nonce_0123456789",
+  });
+  const proofs = await Promise.all([0, 1].map(async (index) => ({
+    device: deviceProof,
+    agent: await signRequestProof(env.agent, {
+      ...base,
+      nonce: `fresh_agent_nonce_${index}_0123456789`,
+    }),
+  })));
+  const results = await Promise.allSettled(proofs.map((pair) =>
+    verifyMcpAuth(env.store, {
+      context: ctx,
+      grantId: "grant_a",
+      proofs: pair,
+      receivedBody: bytes,
+      now,
+    })
+  ));
+  equals(results.filter((result) => result.status === "fulfilled").length, 1);
+});
+Deno.test("trusted policy brand has no public mint", async () => {
+  const policyExports = await import("../../apps/gateway/policy_core.ts");
+  const bridgeExports = await import("../../packages/mcp-bridge/mod.ts");
+  assert(!("createPolicyMcpCore" in policyExports));
+  assert(!("PolicyMcpCore" in policyExports));
+  assert(!("createPolicyMcpCore" in bridgeExports));
+  assert(!("PolicyMcpCore" in bridgeExports));
+});
+Deno.test("MCP contract gate consumes notification and call-result fixture fields", () => {
+  runMcpContractGate(structuredClone(sdkFixture), true);
+  for (
+    const mutate of [
+      (value: typeof sdkFixture) => value.initializedNotification.mustNotProduceResponse = false,
+      (value: typeof sdkFixture) => value.callToolResult.errorFlag = "wrongErrorFlag",
+      (value: typeof sdkFixture) => {
+        (value.callToolResult as Record<string, unknown>).newUnconsumedConstraint = true;
+      },
+    ]
+  ) {
+    const changed = structuredClone(sdkFixture);
+    mutate(changed);
+    let rejected = false;
+    try {
+      runMcpContractGate(changed, true);
+    } catch {
+      rejected = true;
+    }
+    assert(rejected);
   }
 });
 Deno.test("expired grant cannot authenticate", async () => {

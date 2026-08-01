@@ -191,8 +191,33 @@ const rpcError = (id: string | number | null, code: number, message: string) => 
   id,
   error: { code, message },
 });
+export function processLegacyLifecycle(
+  request: Rpc,
+  session: LegacyMcpSession,
+): { handled: boolean; response?: Record<string, unknown> } {
+  const id = request.id ?? null;
+  if (request.method === "initialize") {
+    return {
+      handled: true,
+      response: request.id === undefined || !validInitialize(request.params) || !session.begin()
+        ? rpcError(id, -32602, "initialize denied")
+        : { jsonrpc: "2.0", id: request.id, result: LEGACY_INITIALIZE_RESULT },
+    };
+  }
+  if (request.method === "notifications/initialized") {
+    if (request.id !== undefined || !session.complete()) {
+      return {
+        handled: true,
+        ...(request.id === undefined
+          ? {}
+          : { response: rpcError(id, -32600, "notification denied") }),
+      };
+    }
+    return { handled: true };
+  }
+  return { handled: false };
+}
 export async function handleFixtureMcp(
-  body: unknown,
   receivedBody: Uint8Array,
   headerRevision: string,
   route: "/mcp" | "/mcp/legacy",
@@ -201,6 +226,12 @@ export async function handleFixtureMcp(
   legacySession?: LegacyMcpSession,
   authority = "fixture.cairn.invalid",
 ): Promise<Record<string, unknown> | undefined> {
+  let body: unknown;
+  try {
+    body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(receivedBody));
+  } catch {
+    return rpcError(null, -32700, "parse denied");
+  }
   if (!isVerifiedMcpAuth(auth) || Array.isArray(body) || !body || typeof body !== "object") {
     return rpcError(null, -32600, "request denied");
   }
@@ -219,22 +250,8 @@ export async function handleFixtureMcp(
 
   if (route === "/mcp/legacy") {
     if (!legacySession) return rpcError(id, -32002, "legacy session required");
-    if (request.method === "initialize") {
-      if (request.id === undefined || !validInitialize(request.params) || !legacySession.begin()) {
-        return rpcError(id, -32602, "initialize denied");
-      }
-      return {
-        jsonrpc: "2.0",
-        id: request.id,
-        result: LEGACY_INITIALIZE_RESULT,
-      };
-    }
-    if (request.method === "notifications/initialized") {
-      if (request.id !== undefined || !legacySession.complete()) {
-        return request.id === undefined ? undefined : rpcError(id, -32600, "notification denied");
-      }
-      return undefined;
-    }
+    const lifecycle = processLegacyLifecycle(request, legacySession);
+    if (lifecycle.handled) return lifecycle.response;
     if (!legacySession.initialized) return rpcError(id, -32002, "initialize required");
   }
   if (request.id === undefined) return undefined;
@@ -278,11 +295,9 @@ export async function handleFixtureMcp(
         break;
     }
     if (!validOutput(name, structuredContent)) return toolError(request.id, name, "invalid_output");
-    return {
-      jsonrpc: "2.0",
-      id: request.id,
-      result: { content: [{ type: "text", text: "ok" }], structuredContent },
-    };
+    const result = { content: [{ type: "text", text: "ok" }], structuredContent };
+    if (!validCallToolResult(name, result)) throw new Error("internal result schema mismatch");
+    return { jsonrpc: "2.0", id: request.id, result };
   } catch {
     return toolError(request.id, name, "policy_denied");
   }
@@ -290,15 +305,13 @@ export async function handleFixtureMcp(
 function toolError(id: string | number, name: ToolName, category: string) {
   const structuredContent = { outcome: "denied", category };
   if (!validOutput(name, structuredContent)) throw new Error("internal error schema mismatch");
-  return {
-    jsonrpc: "2.0",
-    id,
-    result: {
-      isError: true,
-      content: [{ type: "text", text: "request denied" }],
-      structuredContent,
-    },
+  const result = {
+    isError: true,
+    content: [{ type: "text", text: "request denied" }],
+    structuredContent,
   };
+  if (!validCallToolResult(name, result)) throw new Error("internal error envelope mismatch");
+  return { jsonrpc: "2.0", id, result };
 }
 function plainObject(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -337,4 +350,18 @@ function validId(value: unknown): value is string {
 }
 export function validOutput(name: ToolName, value: unknown): value is Structured {
   return validatesSchema(OUTPUT_SCHEMAS[name], value);
+}
+export function validCallToolResult(name: ToolName, value: unknown): boolean {
+  if (!plainObject(value) || !exactKeys(value, ["content", "structuredContent"], ["isError"])) {
+    return false;
+  }
+  if (!Array.isArray(value.content) || value.content.length === 0) return false;
+  if (
+    !value.content.every((item) =>
+      plainObject(item) && exactKeys(item, ["type", "text"]) && item.type === "text" &&
+      typeof item.text === "string"
+    )
+  ) return false;
+  if (value.isError !== undefined && typeof value.isError !== "boolean") return false;
+  return plainObject(value.structuredContent) && validOutput(name, value.structuredContent);
 }

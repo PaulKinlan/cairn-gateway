@@ -22,7 +22,8 @@ export interface InvocationBinding {
   connectionId: string;
   connectionEpoch: number;
   operation: "github.user.read";
-  nonceHash: string;
+  deviceNonceHash: string;
+  agentNonceHash: string;
   nonceExpiresAt: number;
   jtiHash: string;
   jtiExpiresAt: number;

@@ -1,8 +1,9 @@
 # Security invariants
 
 1. Every record lookup and mutation includes tenant and owner context; opaque IDs never authorize.
-2. Device nonce and capability JTI are single-use in shared authoritative state and consumed
-   atomically before dispatch; an isolate-local replay cache is never sufficient.
+2. Device and agent nonces are independently single-use in shared authoritative state and are
+   consumed together atomically; capability JTIs are consumed atomically before dispatch. An
+   isolate-local replay cache or composite nonce-pair key is never sufficient.
 3. Capabilities are strict ES256, exact issuer/audience/type/key, at most 300 seconds and one call.
 4. Principal, agent, device, grant, and connection status, relationship, or epoch/version mismatch
    blocks at call time.
@@ -18,13 +19,18 @@
     support.
 11. Principal creation and device approval require no email. Passkey and recovery remain real
     interfaces, not simulated production recovery.
-12. MCP discovery is not authorization. Every MCP request is bound to exact authority, route and
-    received bytes, consumed once, and rechecks policy/epochs using operation-time rather than
-    authentication-time.
+12. MCP discovery is not authorization. Every MCP request is parsed exactly once from the signed
+    received bytes, bound to exact authority and route, consumed once, and rechecks policy/epochs
+    using operation-time rather than authentication-time. No independent parsed-body input exists.
 13. Device and agent signed requests bind method, configured authority, exact path, an explicitly
     empty query, a digest recomputed from received bytes, gateway audience, grant, both identities,
     nonce, timestamp, and (when present) the independently hashed capability.
 14. Reusable bearer values are never carried in URLs or WebSockets. No public-key reclaim occurs
     without a fresh challenge and proof of possession; agent and device keys remain distinct.
-15. Enrollment request and approval commits atomically recheck active principal, agent, approving
-    admin, epochs, key thumbprints, and the exact candidate transaction before creating state.
+15. Bootstrap, enrollment request, and approval commits recompute RFC 7638 thumbprints from the
+    authoritative JWK values, enforce distinct agent/device signing roles, and atomically recheck
+    active principal, agent, approving admin, epochs, and the exact candidate transaction.
+16. The policy-core trust brand and mint are private to the executable bridge; callers cannot bind
+    genuine authentication to substituted stores, clocks, or invocation services.
+17. The committed MCP contract gate consumes every immutable fixture leaf and validates the actual
+    lifecycle and call-result envelope rules; any new or mutated unconsumed constraint fails CI.

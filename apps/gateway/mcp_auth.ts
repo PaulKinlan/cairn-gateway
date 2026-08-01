@@ -3,6 +3,7 @@ import type { MetadataStore } from "../../packages/core/src/store/store.ts";
 import type { DualProof } from "../../packages/core/src/policy/invocation.ts";
 import { bodyHash, verifyRequestProof } from "../../packages/core/src/crypto/request_proof.ts";
 import { sha256 } from "../../packages/core/src/crypto/encoding.ts";
+import { jwkThumbprint } from "../../packages/core/src/crypto/thumbprint.ts";
 
 const verified = new WeakMap<object, { consumed: boolean }>();
 export interface VerifiedMcpAuth {
@@ -69,9 +70,14 @@ export async function verifyMcpAuth(
   const agent = await store.getAgent(input.context, grant.agentId),
     device = await store.getDevice(input.context, grant.deviceId),
     connection = await store.getConnection(input.context, grant.connectionId);
+  if (!agent || !device) throw new Error("MCP authentication denied");
+  const agentThumbprint = await jwkThumbprint(agent.publicJwk);
+  const deviceThumbprint = await jwkThumbprint(device.publicJwk);
   if (
-    !agent || agent.status !== "active" || !device || device.status !== "active" ||
-    device.agentId !== agent.id || !connection || connection.status !== "active"
+    agent.status !== "active" || device.status !== "active" ||
+    agentThumbprint !== agent.thumbprint || deviceThumbprint !== device.thumbprint ||
+    agentThumbprint === deviceThumbprint || device.agentId !== agent.id || !connection ||
+    connection.status !== "active"
   ) throw new Error("MCP authentication denied");
   const authority = input.authority ?? "fixture.cairn.invalid";
   const path = input.path ?? "/mcp";
@@ -94,9 +100,12 @@ export async function verifyMcpAuth(
     !await verifyRequestProof(input.proofs.agent, agent.publicJwk, expected, input.now)
   ) throw new Error("MCP authentication denied");
   if (
-    !await store.consumeNonce(
+    !await store.consumeNonces(
       input.context,
-      await sha256(`mcp:${input.proofs.device.payload.nonce}:${input.proofs.agent.payload.nonce}`),
+      [
+        await sha256(`mcp:device:${input.proofs.device.payload.nonce}`),
+        await sha256(`mcp:agent:${input.proofs.agent.payload.nonce}`),
+      ],
       input.now + 600,
       input.now,
     )

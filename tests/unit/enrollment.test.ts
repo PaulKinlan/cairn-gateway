@@ -12,6 +12,10 @@ import {
 import type { DeviceSigner } from "../../packages/core/src/crypto/device_signer.ts";
 import { base64url, canonical, encoder } from "../../packages/core/src/crypto/encoding.ts";
 import { jwkThumbprint, shortFingerprint } from "../../packages/core/src/crypto/thumbprint.ts";
+import type {
+  BootstrapCommit,
+  EnrollmentRequestCommit,
+} from "../../packages/core/src/store/store.ts";
 const ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("principal_7Yp9") },
   now = 2_000_000_000;
 const principal: Principal = {
@@ -497,4 +501,230 @@ Deno.test("approval commit denies candidate transaction mutation at linearizatio
     "denied",
   );
   equals(await store.getDevice(ctx, candidateId), undefined);
+});
+
+Deno.test("authoritative request recomputes candidate JWK thumbprint", async () => {
+  const backend = new MemoryAuthorityBackend();
+  await boot(backend);
+  const replacement = await fixtureDeviceSigner(0);
+  const replacementJwk = await replacement.publicJwk();
+  class SubstitutingRequestStore extends MemoryStore {
+    override async commitEnrollmentRequest(
+      context: TenantContext,
+      challengeId: string,
+      hash: string,
+      value: EnrollmentRequestCommit,
+      at: number,
+    ) {
+      return await super.commitEnrollmentRequest(context, challengeId, hash, {
+        ...value,
+        request: { ...value.request, candidateJwk: replacementJwk },
+      }, at);
+    }
+  }
+  const service = new DeviceEnrollmentService(new SubstitutingRequestStore(backend));
+  const candidate = await fixtureDeviceSigner(1), candidateJwk = await candidate.publicJwk();
+  const value = {
+    id: "enroll_substitution",
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    agentId: ids.agent("agent_a"),
+    candidateJwk,
+    expiresAt: now + 600,
+  };
+  const candidateJkt = await jwkThumbprint(candidateJwk);
+  const tx = {
+    action: "enroll",
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    request_id: value.id,
+    agent_id: value.agentId,
+    agent_jkt: (await serviceStore(service).getAgent(ctx, value.agentId))!.thumbprint,
+    candidate_jkt: candidateJkt,
+    expires_at: value.expiresAt,
+  };
+  const challenge = await service.requestChallenge(ctx, value, now);
+  const candidateProof = await proof(candidate, tx, challenge);
+  await rejects(
+    () => service.request(ctx, value, candidateProof, now),
+    "denied",
+  );
+  equals(await serviceStore(service).getEnrollment(ctx, value.id), undefined);
+});
+
+Deno.test("agent key cannot be enrolled as a device key", async () => {
+  const { service, agent } = await boot();
+  const agentJwk = await agent.publicJwk();
+  const value = {
+    id: "enroll_role_collapse",
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    agentId: ids.agent("agent_a"),
+    candidateJwk: agentJwk,
+    expiresAt: now + 600,
+  };
+  await rejects(() => service.requestChallenge(ctx, value, now), "keys must differ");
+});
+
+Deno.test("approval recomputes stored candidate JWK thumbprint", async () => {
+  const backend = new MemoryAuthorityBackend();
+  const { store, service, device: admin } = await boot(backend);
+  const { candidateJkt, result } = await pending(service);
+  const requestKey = [...backend.enrollments.keys()].find((key) => key.endsWith("/enroll_b"))!;
+  const request = backend.enrollments.get(requestKey)!;
+  const replacement = await fixtureDeviceSigner(0);
+  backend.enrollments.set(requestKey, {
+    ...request,
+    candidateJwk: await replacement.publicJwk(),
+  });
+  const approver = (await store.getDevice(ctx, "device_a"))!;
+  const candidateId = ids.device("device_b");
+  const tx = {
+    action: "approve_enrollment",
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    request_id: "enroll_b",
+    approver_id: approver.id,
+    approver_jkt: approver.thumbprint,
+    agent_id: ids.agent("agent_a"),
+    candidate_id: candidateId,
+    candidate_jkt: candidateJkt,
+    fingerprint: result.fingerprint,
+    expires_at: now + 600,
+  };
+  const challenge = await service.approvalChallenge(
+    ctx,
+    "enroll_b",
+    approver.id,
+    candidateId,
+    result.fingerprint,
+    now,
+  );
+  const signed = await proof(admin, tx, challenge);
+  await rejects(
+    () =>
+      service.approve(
+        ctx,
+        "enroll_b",
+        approver.id,
+        candidateId,
+        result.fingerprint,
+        signed,
+        now,
+      ),
+    "denied",
+  );
+  equals(await store.getDevice(ctx, candidateId), undefined);
+});
+
+Deno.test("authoritative bootstrap recomputes both key thumbprints and roles", async () => {
+  const agent = await fixtureAgentSigner();
+  const agentJwk = await agent.publicJwk();
+  class SubstitutingBootstrapStore extends MemoryStore {
+    override async commitBootstrap(
+      context: TenantContext,
+      challengeId: string,
+      hash: string,
+      value: BootstrapCommit,
+      at: number,
+    ) {
+      return await super.commitBootstrap(context, challengeId, hash, {
+        ...value,
+        device: { ...value.device, publicJwk: agentJwk },
+      }, at);
+    }
+  }
+  const store = new SubstitutingBootstrapStore();
+  const service = new DeviceEnrollmentService(store);
+  const device = await fixtureDeviceSigner(0);
+  const deviceJwk = await device.publicJwk();
+  const agentId = ids.agent("agent_a"), deviceId = ids.device("device_a");
+  const tx = {
+    action: "bootstrap",
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    principal_id: principal.id,
+    agent_id: agentId,
+    agent_jkt: await jwkThumbprint(agentJwk),
+    device_id: deviceId,
+    device_jkt: await jwkThumbprint(deviceJwk),
+  };
+  const challenge = await service.bootstrapChallenge(
+    ctx,
+    principal,
+    agentId,
+    agentJwk,
+    deviceId,
+    deviceJwk,
+    now,
+  );
+  const deviceProof = await proof(device, tx, challenge);
+  const agentProof = await proof(agent, tx, challenge);
+  await rejects(
+    () =>
+      service.bootstrap(
+        ctx,
+        principal,
+        agentId,
+        agentJwk,
+        deviceId,
+        deviceJwk,
+        deviceProof,
+        agentProof,
+        now,
+      ),
+    "denied",
+  );
+  equals(await store.getPrincipal(ctx, ctx.userId), undefined);
+});
+
+Deno.test("authoritative candidate commit denies agent thumbprint role collapse", async () => {
+  const backend = new MemoryAuthorityBackend();
+  const booted = await boot(backend);
+  const agentJwk = await booted.agent.publicJwk();
+  const agentThumbprint = await jwkThumbprint(agentJwk);
+  class CollapsingRequestStore extends MemoryStore {
+    override async commitEnrollmentRequest(
+      context: TenantContext,
+      challengeId: string,
+      hash: string,
+      value: EnrollmentRequestCommit,
+      at: number,
+    ) {
+      return await super.commitEnrollmentRequest(context, challengeId, hash, {
+        ...value,
+        request: {
+          ...value.request,
+          candidateJwk: agentJwk,
+          thumbprint: agentThumbprint,
+        },
+      }, at);
+    }
+  }
+  const service = new DeviceEnrollmentService(new CollapsingRequestStore(backend));
+  const candidate = await fixtureDeviceSigner(1), candidateJwk = await candidate.publicJwk();
+  const value = {
+    id: "enroll_authoritative_role",
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    agentId: ids.agent("agent_a"),
+    candidateJwk,
+    expiresAt: now + 600,
+  };
+  const tx = {
+    action: "enroll",
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    request_id: value.id,
+    agent_id: value.agentId,
+    agent_jkt: agentThumbprint,
+    candidate_jkt: await jwkThumbprint(candidateJwk),
+    expires_at: value.expiresAt,
+  };
+  const challenge = await service.requestChallenge(ctx, value, now);
+  const candidateProof = await proof(candidate, tx, challenge);
+  await rejects(
+    () => service.request(ctx, value, candidateProof, now),
+    "denied",
+  );
 });

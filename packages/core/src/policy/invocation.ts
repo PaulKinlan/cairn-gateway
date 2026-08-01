@@ -5,6 +5,7 @@ import { type CapabilityClaims, signCapability, verifyCapability } from "../cryp
 import type { DetachedProof } from "../crypto/request_proof.ts";
 import { bodyHash, verifyRequestProof } from "../crypto/request_proof.ts";
 import { sha256 } from "../crypto/encoding.ts";
+import { jwkThumbprint } from "../crypto/thumbprint.ts";
 import type { CustodyAdapter, CustodyBinding } from "../custody/custody_adapter.ts";
 import { type GithubResult, invokeGithubUserRead } from "../connectors/github_user.ts";
 import type { SafeLogger } from "../logging/safe_logger.ts";
@@ -39,9 +40,14 @@ export class InvocationService {
     const agent = await this.store.getAgent(ctx, grant.agentId),
       device = await this.store.getDevice(ctx, grant.deviceId),
       connection = await this.store.getConnection(ctx, grant.connectionId);
+    if (!agent || !device) throw new Error("grant denied");
+    const agentThumbprint = await jwkThumbprint(agent.publicJwk);
+    const deviceThumbprint = await jwkThumbprint(device.publicJwk);
     if (
-      !agent || agent.status !== "active" || !device || device.status !== "active" ||
-      device.agentId !== agent.id || !connection || connection.status !== "active"
+      agent.status !== "active" || device.status !== "active" ||
+      agentThumbprint !== agent.thumbprint || deviceThumbprint !== device.thumbprint ||
+      agentThumbprint === deviceThumbprint || device.agentId !== agent.id || !connection ||
+      connection.status !== "active"
     ) throw new Error("grant denied");
     const expected = {
       v: 1 as const,
@@ -140,8 +146,12 @@ export class InvocationService {
         agent = await this.store.getAgent(ctx, claims.agent_id),
         device = await this.store.getDevice(ctx, claims.device_id),
         connection = await this.store.getConnection(ctx, claims.connection_id);
+      const agentThumbprint = agent ? await jwkThumbprint(agent.publicJwk) : undefined;
+      const deviceThumbprint = device ? await jwkThumbprint(device.publicJwk) : undefined;
       if (
-        !principal || !agent || !device || !connection || claims.cnf.jkt !== device.thumbprint ||
+        !principal || !agent || !device || !connection ||
+        agentThumbprint !== agent.thumbprint || deviceThumbprint !== device.thumbprint ||
+        agentThumbprint === deviceThumbprint || claims.cnf.jkt !== device.thumbprint ||
         device.agentId !== agent.id
       ) {
         emitClosed("deny", "binding_denied", claims);
@@ -198,7 +208,8 @@ export class InvocationService {
         connectionId: claims.connection_id,
         connectionEpoch: claims.connection_epoch,
         operation: "github.user.read",
-        nonceHash: await sha256(`${proofs.device.payload.nonce}:${proofs.agent.payload.nonce}`),
+        deviceNonceHash: await sha256(`invoke:device:${proofs.device.payload.nonce}`),
+        agentNonceHash: await sha256(`invoke:agent:${proofs.agent.payload.nonce}`),
         nonceExpiresAt: now + 600,
         jtiHash: await sha256(claims.jti),
         jtiExpiresAt: claims.exp,
