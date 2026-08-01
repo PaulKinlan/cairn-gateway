@@ -39,7 +39,7 @@
     "org": "paulkinlan-ea",
     "app": "cairn-gateway",
     "runtime": {
-      "type": "dynamic",
+      "mode": "dynamic",
       "entrypoint": "preview/main.ts"
     }
   },
