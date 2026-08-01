@@ -601,7 +601,7 @@ export function assertAuthorityEnvelope(
         !clean(v.request.agentId) ||
         !plain(v.request.candidateJwk) || !clean(v.request.thumbprint) ||
         !["pending", "approved", "rejected"].includes(String(v.request.status)) ||
-        !safe(v.request.expiresAt, 1) ||
+        !safe(v.request.expiresAt, 1) || v.request.expiresAt - envelope.effectiveNow > 600 ||
         !(v.approvedDeviceId === null || clean(v.approvedDeviceId)) ||
         (v.request.status === "approved") !== (v.approvedDeviceId !== null)
       ) {
@@ -646,13 +646,24 @@ export function assertAuthorityEnvelope(
     if (!connections.has(connectionKey)) throw new Error("custody connection relation denied");
   }
   for (const [subjectKey, subject] of subjects) {
-    if (subject.kind === "agent") continue;
+    const [tenantId, userId] = subjectKey.split("/");
     if (subject.kind === "device") {
       const identity = subject.identity as Record<string, unknown>;
-      const [tenantId, userId] = subjectKey.split("/");
       if (!subjects.has(`${tenantId}/${userId}/agent/${identity.agentId}`)) {
         throw new Error("device agent relation denied");
       }
+    } else if (subject.kind === "grant") {
+      const identity = subject.identity as Record<string, unknown>;
+      const agent = subjects.get(`${tenantId}/${userId}/agent/${identity.agentId}`);
+      const device = subjects.get(`${tenantId}/${userId}/device/${identity.deviceId}`);
+      const connection = subjects.get(
+        `${tenantId}/${userId}/connection/${identity.connectionId}`,
+      );
+      if (
+        !agent || !device || !connection || !plain(device.identity) ||
+        device.identity.agentId !== identity.agentId || identity.operation !== "github.user.read" ||
+        !safe(identity.expiresAt, 1)
+      ) throw new Error("grant authority relation denied");
     }
   }
   for (const { tenantId, userId, value } of attempts) {
@@ -690,10 +701,13 @@ export function assertAuthorityEnvelope(
   }
   for (const { tenantId, userId, request } of enrollments) {
     const agent = subjects.get(`${tenantId}/${userId}/agent/${request.agentId}`);
-    if (!agent || agent.status !== "active") throw new Error("enrollment agent relation denied");
+    if (!agent || (request.status === "pending" && agent.status !== "active")) {
+      throw new Error("enrollment agent relation denied");
+    }
     if (request.status === "approved") {
       const enrollment = parsed.find((item) =>
-        item.kind === "enrollment" && item.tenantId === tenantId && item.id === request.id
+        item.kind === "enrollment" && item.tenantId === tenantId && item.userId === userId &&
+        item.id === request.id
       )!.record.value as Record<string, unknown>;
       const approved = subjects.get(
         `${tenantId}/${userId}/device/${String(enrollment.approvedDeviceId)}`,

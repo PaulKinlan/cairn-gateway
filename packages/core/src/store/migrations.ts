@@ -35,7 +35,10 @@ function assertSemanticMonotonic(currentValue: unknown, candidateValue: unknown)
   const after = data(candidateValue);
   if (typeof before.kind === "string" && subjectStatus({ value: before })) {
     if (after.kind !== before.kind || after.id !== before.id) throw new Error("subject changed");
-    if (Number(after.version) < Number(before.version)) throw new Error("subject version rollback");
+    if (
+      Number(after.version) < Number(before.version) ||
+      (after.status !== before.status && Number(after.version) <= Number(before.version))
+    ) throw new Error("subject version rollback");
     const beforeMetadata = data(before.identity);
     const afterMetadata = data(after.identity);
     const versionField = before.kind === "grant" ? "version" : "epoch";
@@ -132,15 +135,6 @@ function assertRecordsMonotonic(
       throw new Error("changed durable payload at equal version denied");
     }
     assertSemanticMonotonic(currentRecord.value, candidateRecord.value);
-    const beforeStatus = subjectStatus(currentRecord);
-    const afterStatus = subjectStatus(candidateRecord);
-    if (
-      beforeStatus && afterStatus &&
-      ((beforeStatus === "revoked" && afterStatus !== "revoked") ||
-        (beforeStatus === "disabled" && afterStatus === "active"))
-    ) {
-      throw new Error("forbidden authority status transition");
-    }
   }
 }
 

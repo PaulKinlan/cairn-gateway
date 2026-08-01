@@ -58,11 +58,6 @@ const ctx = (owner = alice): TenantContext => ({
   tenantId: ids.tenant(owner.tenantId),
   userId: ids.user(owner.userId),
 });
-const maintenanceContext = (owner = alice): AuthorityMaintenanceContext => ({
-  tenant: ctx(owner),
-  privilege: "offline_authority_maintenance",
-});
-
 async function run(input: WorkerInput): Promise<WorkerResult> {
   const output = await new Deno.Command(Deno.execPath(), {
     args: [
@@ -311,7 +306,25 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     const candidate = createCandidateAdapter(root);
     const adapter: DurableAuthorityTransactions = candidate.transactions;
     const maintenance: DurableAuthorityMaintenance = candidate.maintenance;
-    const exported = await maintenance.exportAuthority(maintenanceContext());
+    const authorize = (
+      purpose:
+        | "export"
+        | "inspect"
+        | "initialize"
+        | "restore"
+        | "prepare_migration"
+        | "advance_migration"
+        | "fail_migration"
+        | "recover_migration",
+      owner = alice,
+    ) =>
+      candidate.fixture.issueMaintenanceContext({
+        tenant: ctx(owner),
+        actorId: "durability_operator",
+        purpose,
+      });
+    const exportContext = authorize("export");
+    const exported = await maintenance.exportAuthority(exportContext);
     assertCurrentEnvelope(exported);
     assert(Object.isFrozen(exported));
     assert(Object.isFrozen(exported.records));
@@ -334,9 +347,78 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     await rejects(() =>
       maintenance.exportAuthority({
         tenant: ctx(),
-        privilege: "ambient",
+        actorId: "durability_operator",
+        purpose: "export",
       } as unknown as AuthorityMaintenanceContext)
     );
+    let capabilityReads = 0;
+    const proxiedContext = new Proxy(exportContext, {
+      get(target, property, receiver) {
+        capabilityReads++;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    await rejects(() => maintenance.exportAuthority(proxiedContext));
+    equals(capabilityReads, 0);
+    await rejects(() => maintenance.exportAuthority(authorize("inspect")));
+    await rejects(() =>
+      candidate.fixture.issueMaintenanceContext({
+        tenant: ctx(),
+        actorId: "invalid actor",
+        purpose: "export",
+      })
+    );
+    await rejects(() => maintenance.exportAuthority(authorize("export", bob)));
+    const foreignContext = createCandidateAdapter(root).fixture.issueMaintenanceContext({
+      tenant: ctx(),
+      actorId: "durability_operator",
+      purpose: "export",
+    });
+    await rejects(() => maintenance.exportAuthority(foreignContext));
+    for (
+      const [purpose, invoke] of [
+        [
+          "inspect",
+          (capability: AuthorityMaintenanceContext) => maintenance.inspectAuthority(capability),
+        ],
+        [
+          "prepare_migration",
+          (capability: AuthorityMaintenanceContext) =>
+            maintenance.prepareMigration(capability, {
+              expectedSchemaVersion: 2,
+              targetSchemaVersion: 3,
+            }),
+        ],
+        [
+          "advance_migration",
+          (capability: AuthorityMaintenanceContext) => maintenance.advanceMigration(capability),
+        ],
+        [
+          "fail_migration",
+          (capability: AuthorityMaintenanceContext) => maintenance.failMigration(capability),
+        ],
+        [
+          "recover_migration",
+          (capability: AuthorityMaintenanceContext) => maintenance.recoverMigration(capability),
+        ],
+      ] as const
+    ) {
+      await rejects(() => invoke(authorize(purpose, bob)));
+    }
+    equals(
+      outcome(await maintenance.restoreAuthority(authorize("restore", bob), exported)),
+      "denied",
+    );
+    const pristine = createCandidateAdapter(`${root}/pristine`);
+    const crossTenantInitialize = await pristine.maintenance.initializeAuthority(
+      pristine.fixture.issueMaintenanceContext({
+        tenant: ctx(bob),
+        actorId: "durability_operator",
+        purpose: "initialize",
+      }),
+      exported,
+    );
+    equals(outcome(crossTenantInitialize), "denied");
     equals((await inspect(root)).exists, true);
   },
   "DUR-02": async (root) => {
@@ -564,6 +646,9 @@ const cases: Record<string, (root: string) => Promise<void>> = {
   },
   "DUR-08": async (root) => {
     await setup(root);
+    // A crash before atomic hard-link acquisition may leave a prepared claimant, never a lock.
+    await Deno.writeTextFile(`${root}/authority.lock.orphan.claim`, "orphan");
+    equals(outcome(await reserve(root, "orphan_claimant")), "reserved");
     const result = await run({
       action: "reserveFault",
       root,
@@ -572,7 +657,14 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       fault: "abrupt_before_commit",
     });
     equals(result.code, 75);
-    await Deno.stat(`${root}/authority.lock`);
+    const lock = await Deno.stat(`${root}/authority.lock`);
+    assert(lock.isFile);
+    const owner = JSON.parse(await Deno.readTextFile(`${root}/authority.lock`)) as Record<
+      string,
+      unknown
+    >;
+    assert(Number.isSafeInteger(owner.pid) && Number(owner.pid) > 0);
+    assert(Number.isSafeInteger(owner.acquiredAt));
     const recoveryStarted = Date.now();
     equals(
       outcome(
@@ -588,8 +680,12 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     const tenant = tenantOf(await inspect(root));
     assert(Date.now() - recoveryStarted < 2_000);
     await rejects(() => Deno.stat(`${root}/authority.lock`));
-    equals(Object.keys(tenant.attempts as object).length, 0);
-    equals(Object.keys(tenant.replay as object).length, 0);
+    equals(Object.keys(tenant.attempts as object), ["orphan_claimant"]);
+    equals(Object.keys(tenant.replay as object).sort(), [
+      "jti/jti_orphan_claimant",
+      "nonce/agent_orphan_claimant",
+      "nonce/device_orphan_claimant",
+    ]);
   },
   "DUR-09": async (root) => {
     await setup(root);
@@ -782,20 +878,6 @@ const cases: Record<string, (root: string) => Promise<void>> = {
   },
   "DUR-14": async (root) => {
     await setup(root);
-    await ok({
-      action: "transition",
-      root,
-      owner: alice,
-      transaction: {
-        subjectType: "device",
-        subjectId: "device",
-        expectedVersion: 1,
-        nextVersion: 2,
-        nextStatus: "revoked",
-        reason: "operator",
-        now: 20,
-      },
-    });
     equals(
       outcome(
         await ok({
@@ -805,16 +887,37 @@ const cases: Record<string, (root: string) => Promise<void>> = {
           transaction: {
             subjectType: "device",
             subjectId: "device",
-            expectedVersion: 2,
+            expectedVersion: 1,
             nextVersion: 2,
-            nextStatus: "active",
+            nextStatus: "revoked",
             reason: "operator",
-            now: 21,
+            now: 20,
           },
         }),
       ),
-      "denied",
+      "committed",
     );
+    for (const [expectedVersion, nextVersion] of [[2, 2], [1, 2]] as const) {
+      equals(
+        outcome(
+          await ok({
+            action: "transition",
+            root,
+            owner: alice,
+            transaction: {
+              subjectType: "device",
+              subjectId: "device",
+              expectedVersion,
+              nextVersion,
+              nextStatus: "active",
+              reason: "operator",
+              now: 21,
+            },
+          }),
+        ),
+        "denied",
+      );
+    }
     equals(
       outcome(
         await ok({
@@ -828,12 +931,17 @@ const cases: Record<string, (root: string) => Promise<void>> = {
             nextVersion: 3,
             nextStatus: "active",
             reason: "operator",
-            now: 21,
+            now: 22,
           },
         }),
       ),
-      "denied",
+      "committed",
     );
+    const device = (tenantOf(await inspect(root)).subjects as Record<
+      string,
+      Record<string, unknown>
+    >).device!;
+    equals({ status: device.status, version: device.version }, { status: "active", version: 3 });
   },
   "DUR-15": async (root) => {
     await setup(root);
@@ -946,6 +1054,132 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     );
     equals(Object.keys(tenantOf(await inspect(invalidRoot)).subjects as object).length, 0);
 
+    const frozenRoot = `${root}/frozen_enrollment`;
+    await setup(frozenRoot);
+    const unbounded = enrollmentValue(alice, "unbounded");
+    unbounded.request.expiresAt = 10_000;
+    const unboundedMutation = { kind: "enrollment", value: unbounded };
+    await ok({
+      action: "issue",
+      root: frozenRoot,
+      owner: alice,
+      transaction: await challenge(
+        alice,
+        "unbounded",
+        "enroll_candidate",
+        10,
+        unboundedMutation,
+      ),
+    });
+    equals(
+      outcome(
+        await ok({
+          action: "commit",
+          root: frozenRoot,
+          owner: alice,
+          transaction: {
+            challengeId: "unbounded",
+            purpose: "enroll_candidate",
+            now: 20,
+            mutation: unboundedMutation,
+          },
+        }),
+      ),
+      "denied",
+    );
+    const boundedMutation = {
+      kind: "enrollment",
+      value: enrollmentValue(alice, "epoch_request"),
+    };
+    await ok({
+      action: "issue",
+      root: frozenRoot,
+      owner: alice,
+      transaction: await challenge(alice, "bounded", "enroll_candidate", 10, boundedMutation),
+    });
+    equals(
+      outcome(
+        await ok({
+          action: "commit",
+          root: frozenRoot,
+          owner: alice,
+          transaction: {
+            challengeId: "bounded",
+            purpose: "enroll_candidate",
+            now: 20,
+            mutation: boundedMutation,
+          },
+        }),
+      ),
+      "committed",
+    );
+    equals(
+      (await run({
+        action: "transition",
+        root: frozenRoot,
+        owner: alice,
+        transaction: {
+          subjectType: "agent",
+          subjectId: "agent",
+          expectedVersion: 1,
+          nextVersion: 2,
+          nextStatus: "revoked",
+          reason: "compromise",
+          now: 20,
+        },
+      })).outcome,
+      "denied",
+    );
+    const epochSeven = approvalValue(alice, "epoch_request");
+    epochSeven.device.epoch = 7;
+    const epochSevenMutation = { kind: "approval", value: epochSeven };
+    await ok({
+      action: "issue",
+      root: frozenRoot,
+      owner: alice,
+      transaction: await challenge(
+        alice,
+        "epoch_seven",
+        "approve_enrollment",
+        10,
+        epochSevenMutation,
+      ),
+    });
+    equals(
+      outcome(
+        await ok({
+          action: "commit",
+          root: frozenRoot,
+          owner: alice,
+          transaction: {
+            challengeId: "epoch_seven",
+            purpose: "approve_enrollment",
+            now: 20,
+            mutation: epochSevenMutation,
+          },
+        }),
+      ),
+      "denied",
+    );
+    const importedUnbounded = await ok({
+      action: "export",
+      root: frozenRoot,
+    }) as DurableAuthorityEnvelope;
+    const importedRequest = importedUnbounded.records[
+      entityKey(ctx(), "enrollment", "epoch_request")
+    ]!.value as Record<string, Record<string, unknown>>;
+    importedRequest.request!.expiresAt = 10_000;
+    equals(
+      outcome(
+        await ok({
+          action: "initializeAuthority",
+          root: `${frozenRoot}/imported_unbounded`,
+          transaction: importedUnbounded,
+        }),
+      ),
+      "denied",
+    );
+
     const ceremonies = [
       ["boot", "bootstrap", { kind: "bootstrap", value: bootstrapValue(alice) }],
       ["enroll", "enroll_candidate", {
@@ -1054,6 +1288,49 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       status: "revoked",
       identityStatus: "revoked",
     });
+    equals(
+      outcome(
+        await ok({
+          action: "transition",
+          root,
+          owner: alice,
+          transaction: {
+            subjectType: "agent",
+            subjectId: "agent",
+            expectedVersion: 1,
+            nextVersion: 2,
+            nextStatus: "revoked",
+            reason: "compromise",
+            now: 30,
+          },
+        }),
+      ),
+      "committed",
+    );
+    const historical = await ok({ action: "export", root }) as DurableAuthorityEnvelope;
+    const historicalAgent = historical.records[entityKey(ctx(), "subject", "agent")]!
+      .value as Record<string, unknown>;
+    equals(historicalAgent.status, "revoked");
+    equals(
+      outcome(
+        await ok({
+          action: "initializeAuthority",
+          root: `${root}/historical_copy`,
+          transaction: historical,
+        }),
+      ),
+      "committed",
+    );
+    equals(
+      outcome(
+        await ok({
+          action: "restore",
+          root: `${root}/historical_copy`,
+          transaction: historical,
+        }),
+      ),
+      "committed",
+    );
   },
   "DUR-18": async (root) => {
     const makeLegacy = async (name: string): Promise<DurableAuthorityEnvelope> => {
@@ -1124,6 +1401,60 @@ const cases: Record<string, (root: string) => Promise<void>> = {
       assert(replayKey(ctx(), "nonce", "legacy") in exported.records);
     }
     const legacy = validEnvelope();
+    const legacyAgent = legacy.records[entityKey(ctx(), "subject", "agent")]!;
+    Object.assign(legacyAgent.value as Record<string, unknown>, {
+      status: "revoked",
+      version: 2,
+    });
+    Object.assign((legacyAgent.value as Record<string, Record<string, unknown>>).identity!, {
+      status: "revoked",
+      epoch: 2,
+    });
+    let historicalVersion = Math.max(
+      ...Object.values(legacy.records).map((item) => item.recordVersion),
+    );
+    legacy.records[entityKey(ctx(), "subject", "candidate")] = {
+      tenantId: "tenant_a",
+      userId: "user",
+      recordVersion: ++historicalVersion,
+      authorityGeneration: legacy.authorityGeneration,
+      value: {
+        kind: "device",
+        id: "candidate",
+        status: "revoked",
+        version: 2,
+        identity: {
+          id: "candidate",
+          tenantId: "tenant_a",
+          userId: "user",
+          agentId: "agent",
+          publicJwk: FIXTURE_JWKS.candidate,
+          thumbprint: FIXTURE_THUMBPRINTS.candidate,
+          role: "member",
+          status: "revoked",
+          epoch: 2,
+        },
+      },
+    };
+    legacy.records[entityKey(ctx(), "enrollment", "historical_request")] = {
+      tenantId: "tenant_a",
+      userId: "user",
+      recordVersion: ++historicalVersion,
+      authorityGeneration: legacy.authorityGeneration,
+      value: {
+        request: {
+          id: "historical_request",
+          tenantId: "tenant_a",
+          userId: "user",
+          agentId: "agent",
+          candidateJwk: FIXTURE_JWKS.candidate,
+          thumbprint: FIXTURE_THUMBPRINTS.candidate,
+          status: "approved",
+          expiresAt: 400,
+        },
+        approvedDeviceId: "candidate",
+      },
+    };
     legacy.schemaVersion = 1;
     legacy.highWatermarks.schemaVersion = 1;
     legacy.migration = { status: "idle", generation: 0, fromVersion: 1, toVersion: 1 };
@@ -1357,6 +1688,22 @@ const cases: Record<string, (root: string) => Promise<void>> = {
     const envelope = await ok({ action: "export", root }) as DurableAuthorityEnvelope;
     assertCurrentEnvelope(envelope);
     equals(outcome(await ok({ action: "restore", root, transaction: envelope })), "committed");
+    const reactivated = structuredClone(envelope);
+    reactivated.authorityGeneration++;
+    reactivated.highWatermarks.authorityGeneration = reactivated.authorityGeneration;
+    const reactivatedDevice = reactivated.records[entityKey(ctx(), "subject", "device")]!;
+    reactivatedDevice.recordVersion++;
+    reactivatedDevice.authorityGeneration = reactivated.authorityGeneration;
+    Object.assign(reactivatedDevice.value as Record<string, unknown>, {
+      status: "active",
+      version: 3,
+    });
+    Object.assign(
+      (reactivatedDevice.value as Record<string, Record<string, unknown>>).identity!,
+      { status: "active", epoch: 3 },
+    );
+    assertCurrentEnvelope(reactivated);
+    equals(outcome(await ok({ action: "restore", root, transaction: reactivated })), "committed");
     const stale = structuredClone(envelope);
     stale.effectiveNow--;
     await rejects(() => assertRestoreNotStale(stale, envelope));
@@ -1635,6 +1982,57 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         (item.identity as Record<string, unknown>).status = "revoked";
       },
       (value) => {
+        delete value.records[entityKey(ctx(), "subject", "agent")];
+      },
+      (value) => {
+        delete value.records[entityKey(ctx(), "subject", "device")];
+      },
+      (value) => {
+        delete value.records[entityKey(ctx(), "subject", "connection")];
+      },
+      (value) => {
+        const grant = value.records[entityKey(ctx(), "subject", "grant")]!.value as Record<
+          string,
+          Record<string, unknown>
+        >;
+        grant.identity!.agentId = "missing_agent";
+      },
+      (value) => {
+        const grant = value.records[entityKey(ctx(), "subject", "grant")]!.value as Record<
+          string,
+          Record<string, unknown>
+        >;
+        grant.identity!.deviceId = "connection";
+      },
+      (value) => {
+        const grant = value.records[entityKey(ctx(), "subject", "grant")]!.value as Record<
+          string,
+          Record<string, unknown>
+        >;
+        grant.identity!.connectionId = "device";
+      },
+      (value) => {
+        const grant = value.records[entityKey(ctx(), "subject", "grant")]!.value as Record<
+          string,
+          Record<string, unknown>
+        >;
+        grant.identity!.expiresAt = 0;
+      },
+      (value) => {
+        const grant = value.records[entityKey(ctx(), "subject", "grant")]!.value as Record<
+          string,
+          Record<string, unknown>
+        >;
+        grant.identity!.operation = "wrong.operation";
+      },
+      (value) => {
+        const grant = value.records[entityKey(ctx(), "subject", "grant")]!.value as Record<
+          string,
+          Record<string, unknown>
+        >;
+        grant.identity!.tenantId = "tenant_b";
+      },
+      (value) => {
         const bobReplay = replayKey(ctx(bob), "nonce", "device_attempt");
         value.records[bobReplay] = {
           tenantId: "tenant_b",
@@ -1663,10 +2061,20 @@ const cases: Record<string, (root: string) => Promise<void>> = {
         };
       },
     ];
-    for (const corrupt of corruptions) {
+    for (const [index, corrupt] of corruptions.entries()) {
       const candidate = structuredClone(envelope);
       corrupt(candidate);
       await rejects(() => assertCurrentEnvelope(candidate));
+      equals(
+        outcome(
+          await ok({
+            action: "initializeAuthority",
+            root: `${root}/pristine_${index}`,
+            transaction: candidate,
+          }),
+        ),
+        "denied",
+      );
     }
     await setup(root);
     await ok({

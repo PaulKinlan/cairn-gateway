@@ -6,14 +6,18 @@
 
 Production authority implements `DurableAuthorityTransactions` and `DurableAuthorityMaintenance`;
 the Stage 0 `MetadataStore` remains fixture-only. Every tenant transaction requires `TenantContext`.
-Whole-authority export, inspection, migration, initialization, and restore require an explicit
-`AuthorityMaintenanceContext` containing both a tenant audit context and the closed
-`offline_authority_maintenance` privilege; they are never ambient zero-context operations. Each
-transaction must atomically validate owner, subject status/epoch/version, device-agent linkage,
-grant agent/device/connection/operation/expiry, and connection provider/adapter/custody linkage,
-then mutate all affected challenge, identity, revocation, replay, reservation, or finalization
-records. Production composition may not assemble authorization from separate check and consume
-calls.
+Whole-authority export, inspection, migration, initialization, and restore require an opaque,
+issuer-identity-checked `AuthorityMaintenanceContext` bound to one tenant owner, actor, and exact
+operation purpose; no public literal or structurally reproducible object grants authority. The
+custody-neutral issuer is held outside the ordinary maintenance interface, and every imported or
+exported envelope must be wholly owned by the capability's tenant owner. Each transaction must
+atomically validate owner, subject status/epoch/version, device-agent linkage, grant
+agent/device/connection/operation/expiry, and connection provider/adapter/custody linkage, then
+mutate all affected challenge, identity, revocation, replay, reservation, or finalization records.
+Enrollment requests expire within 600 seconds of commit, approvals create epoch-1 devices, and
+immutable approved-enrollment linkage survives later agent/device revocation. Authority may be
+reactivated only at the exact next logical version; stale or same-version activation is denied.
+Production composition may not assemble authorization from separate check and consume calls.
 
 A reservation result is exactly `reserved`, `denied`, `already_consumed`, or `unknown_commit`.
 Reservation alone never authorizes a connector. The adapter atomically writes both proof nonces,

@@ -22,18 +22,21 @@ authorization. The permit hash/binding and one dispatch-start marker/count are p
 envelope. Both claim and start revalidate the graph and expiry so later revocation/expiry denies
 dispatch. `unknown_commit` and `dispatch_unknown` never trigger automatic retry. Purpose-bound
 bootstrap, enrollment, approval, and removal ceremonies recompute the canonical mutation hash,
-derive JWK thumbprints, enforce epoch/namespace continuity, consume challenges once, and atomically
-preserve cross-record enrollment history through later device revocation. The persisted effective
-clock governs replay and every challenge. Snapshot, inspection, initialization, restore, migration,
-and recovery scenarios use the adapter-neutral maintenance interface and the same persisted
-`DurableAuthorityEnvelope`. Schema, migration, record, authority, replay, revocation,
-subject/identity, attempt, enrollment, ceremony, and ownership state is monotonic; partial
-migration, higher-outer-version logical rollback, stale restore, per-record deletion/rollback,
-nested corruption, and clock rollback fail closed. The unchanged conformance path uses a candidate
-adapter factory; concrete seed/view helpers remain behind its explicitly fixture-only driver. Crash
-scenarios use abrupt worker exit while holding the lock and bounded stale lock recovery. They
-qualify logical commit boundaries only: there is still no fsync or power-loss claim. Whole-authority
-maintenance carries explicit tenant audit and closed privilege context.
+derive JWK thumbprints, enforce the 600-second enrollment-request bound and initial epoch-1
+continuity, consume challenges once, and atomically preserve immutable enrollment linkage through
+later agent/device revocation. Disabled or revoked authority may reactivate only at its exact next
+logical version. The persisted effective clock governs replay and every challenge. Snapshot,
+inspection, initialization, restore, migration, and recovery scenarios use the adapter-neutral
+maintenance interface and the same persisted `DurableAuthorityEnvelope`. Schema, migration, record,
+authority, replay, revocation, subject/identity, attempt, enrollment, ceremony, and ownership state
+is monotonic; partial migration, higher-outer-version logical rollback, stale restore, per-record
+deletion/rollback, nested corruption, and clock rollback fail closed. The unchanged conformance path
+uses a candidate adapter factory; concrete seed/view/issuer helpers remain behind its explicitly
+fixture-only driver. Crash scenarios use abrupt worker exit while holding a lock acquired by an
+atomic hard link whose complete owner record was prepared first, plus bounded dead-owner recovery.
+They qualify logical commit boundaries only: there is still no fsync or power-loss claim.
+Whole-authority maintenance uses opaque issuer identity bound to the exact tenant owner, actor, and
+operation purpose, and rejects cross-tenant envelope ownership.
 
 ## Still blocked
 

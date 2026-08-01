@@ -133,10 +133,30 @@ export interface DispatchRecoveryTransaction {
   now: number;
 }
 
-/** Explicit privilege presented for whole-authority offline maintenance operations. */
+export type AuthorityMaintenancePurpose =
+  | "export"
+  | "inspect"
+  | "initialize"
+  | "restore"
+  | "prepare_migration"
+  | "advance_migration"
+  | "fail_migration"
+  | "recover_migration";
+
+/**
+ * Opaque adapter-issued authority for one tenant, actor, and maintenance purpose. The runtime
+ * issuer must authenticate object identity; no public property or literal grants authority.
+ */
+declare const authorityMaintenanceContextBrand: unique symbol;
 export interface AuthorityMaintenanceContext {
+  readonly [authorityMaintenanceContextBrand]: never;
+}
+
+/** Input to a custody-neutral issuer held outside the ordinary maintenance caller surface. */
+export interface AuthorityMaintenanceAuthorization {
   tenant: TenantContext;
-  privilege: "offline_authority_maintenance";
+  actorId: string;
+  purpose: AuthorityMaintenancePurpose;
 }
 
 /** Adapter-neutral maintenance result; no concrete storage handle crosses the boundary. */

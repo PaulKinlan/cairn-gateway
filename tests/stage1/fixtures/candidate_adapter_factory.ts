@@ -1,4 +1,6 @@
 import type {
+  AuthorityMaintenanceAuthorization,
+  AuthorityMaintenanceContext,
   DurableAuthorityMaintenance,
   DurableAuthorityTransactions,
 } from "../../../packages/core/src/store/authority_transaction.ts";
@@ -19,6 +21,7 @@ export interface CandidateFixtureDriver {
   seed(owner: Owner, custodyRef?: string): Promise<boolean>;
   inspect(owner: Owner): Promise<Record<string, unknown>>;
   writeLegacy(owner: Owner): Promise<void>;
+  issueMaintenanceContext(input: AuthorityMaintenanceAuthorization): AuthorityMaintenanceContext;
   readonly statePath: string;
   readonly lockPath: string;
 }

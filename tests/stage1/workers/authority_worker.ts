@@ -1,6 +1,7 @@
 import type {
   AttemptFinalization,
   AuthorityMaintenanceContext,
+  AuthorityMaintenancePurpose,
   AuthorityTransition,
   ChallengeCreationTransaction,
   ChallengeTransaction,
@@ -47,12 +48,13 @@ const ctx = (): TenantContext => ({
   tenantId: ids.tenant(owner().tenantId),
   userId: ids.user(owner().userId),
 });
-const maintenanceCtx = (): AuthorityMaintenanceContext => {
+const maintenanceCtx = (purpose: AuthorityMaintenancePurpose): AuthorityMaintenanceContext => {
   const value = input.owner ?? { tenantId: "tenant_a", userId: "user" };
-  return {
+  return fixture.issueMaintenanceContext({
     tenant: { tenantId: ids.tenant(value.tenantId), userId: ids.user(value.userId) },
-    privilege: "offline_authority_maintenance",
-  };
+    actorId: "stage1_worker",
+    purpose,
+  });
 };
 const envelopeFromPath = async (): Promise<DurableAuthorityEnvelope> =>
   JSON.parse(await Deno.readTextFile(input.path!)) as DurableAuthorityEnvelope;
@@ -71,10 +73,13 @@ try {
       break;
     case "inspectAuthority":
     case "raw":
-      value = await maintenance.inspectAuthority(maintenanceCtx(), input.transaction !== false);
+      value = await maintenance.inspectAuthority(
+        maintenanceCtx("inspect"),
+        input.transaction !== false,
+      );
       break;
     case "export":
-      value = await maintenance.exportAuthority(maintenanceCtx());
+      value = await maintenance.exportAuthority(maintenanceCtx("export"));
       break;
     case "consumeReplay":
       value = await transactions.consumeReplay(ctx(), input.transaction as ReplayTransaction);
@@ -140,36 +145,36 @@ try {
       break;
     case "initializeAuthority":
       value = await maintenance.initializeAuthority(
-        maintenanceCtx(),
+        maintenanceCtx("initialize"),
         input.path ? await envelopeFromPath() : input.transaction as DurableAuthorityEnvelope,
       );
       break;
     case "prepareMigration":
       value = await maintenance.prepareMigration(
-        maintenanceCtx(),
+        maintenanceCtx("prepare_migration"),
         input.transaction as MigrationPreparation,
       );
       break;
     case "advanceMigration":
-      value = await maintenance.advanceMigration(maintenanceCtx());
+      value = await maintenance.advanceMigration(maintenanceCtx("advance_migration"));
       break;
     case "failMigration":
-      value = await maintenance.failMigration(maintenanceCtx());
+      value = await maintenance.failMigration(maintenanceCtx("fail_migration"));
       break;
     case "recoverMigration":
     case "migrate":
-      value = await maintenance.recoverMigration(maintenanceCtx());
+      value = await maintenance.recoverMigration(maintenanceCtx("recover_migration"));
       break;
     case "snapshot":
       await Deno.writeFile(
         input.path!,
-        serializeDurableAuthority(await maintenance.exportAuthority(maintenanceCtx())),
+        serializeDurableAuthority(await maintenance.exportAuthority(maintenanceCtx("export"))),
       );
       value = true;
       break;
     case "restore":
       value = await maintenance.restoreAuthority(
-        maintenanceCtx(),
+        maintenanceCtx("restore"),
         input.path ? await envelopeFromPath() : input.transaction as DurableAuthorityEnvelope,
       );
       break;

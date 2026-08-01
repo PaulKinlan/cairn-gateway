@@ -1,7 +1,9 @@
 import type {
   AtomicAuthorityResult,
   AttemptFinalization,
+  AuthorityMaintenanceAuthorization,
   AuthorityMaintenanceContext,
+  AuthorityMaintenancePurpose,
   AuthorityMaintenanceResult,
   AuthorityTransition,
   ChallengeCreationTransaction,
@@ -124,15 +126,6 @@ const maintenanceDenied = (reason: string): AuthorityMaintenanceResult => ({
   outcome: "denied",
   reason,
 });
-function privileged(input: AuthorityMaintenanceContext): AuthorityMaintenanceContext {
-  const value = snapshotDurableInput(input);
-  if (value.privilege !== "offline_authority_maintenance") {
-    throw new Error("maintenance privilege denied");
-  }
-  context(value.tenant);
-  return value;
-}
-
 function nextVersion(state: DurableAuthorityEnvelope): number {
   return Math.max(0, ...Object.values(state.records).map((record) => record.recordVersion)) + 1;
 }
@@ -266,9 +259,66 @@ export class OfflineReferenceAuthority
   implements DurableAuthorityTransactions, DurableAuthorityMaintenance {
   readonly statePath: string;
   readonly lockPath: string;
+  private readonly maintenanceContexts = new WeakMap<object, AuthorityMaintenanceAuthorization>();
   constructor(readonly root: string, private readonly injectedFault?: FaultPoint) {
     this.statePath = `${root}/authority.json`;
     this.lockPath = `${root}/authority.lock`;
+  }
+
+  /** Test-only issuer kept behind the fixture driver, never on the maintenance interface. */
+  issueMaintenanceContext(
+    input: AuthorityMaintenanceAuthorization,
+  ): AuthorityMaintenanceContext {
+    const value = snapshotDurableInput(input);
+    const tenant = context(value.tenant);
+    const purposes: readonly AuthorityMaintenancePurpose[] = [
+      "export",
+      "inspect",
+      "initialize",
+      "restore",
+      "prepare_migration",
+      "advance_migration",
+      "fail_migration",
+      "recover_migration",
+    ];
+    clean(value.actorId);
+    if (!purposes.includes(value.purpose)) throw new Error("maintenance purpose denied");
+    const capability = Object.freeze(Object.create(null)) as AuthorityMaintenanceContext;
+    this.maintenanceContexts.set(
+      capability,
+      Object.freeze({
+        tenant,
+        actorId: value.actorId,
+        purpose: value.purpose,
+      }),
+    );
+    return capability;
+  }
+
+  private privileged(
+    input: AuthorityMaintenanceContext,
+    purpose: AuthorityMaintenancePurpose,
+  ): AuthorityMaintenanceAuthorization {
+    if (!input || typeof input !== "object") throw new Error("maintenance privilege denied");
+    const authorization = this.maintenanceContexts.get(input as object);
+    if (!authorization || authorization.purpose !== purpose) {
+      throw new Error("maintenance privilege denied");
+    }
+    context(authorization.tenant);
+    clean(authorization.actorId);
+    return authorization;
+  }
+
+  private assertTenantOwnership(
+    state: DurableAuthorityEnvelope,
+    authorization: AuthorityMaintenanceAuthorization,
+  ): void {
+    for (const item of Object.values(state.records)) {
+      if (
+        item.tenantId !== authorization.tenant.tenantId ||
+        item.userId !== authorization.tenant.userId
+      ) throw new Error("maintenance tenant ownership denied");
+    }
   }
 
   async initialize(): Promise<void> {
@@ -306,32 +356,39 @@ export class OfflineReferenceAuthority
   ): Promise<T> {
     await this.initialize();
     for (let attempt = 0;; attempt++) {
+      const claimant = `${this.lockPath}.${Deno.pid}.${crypto.randomUUID()}.claim`;
       try {
-        await Deno.mkdir(this.lockPath);
+        // The complete owner record exists before one atomic hard-link acquisition. A crash before
+        // link leaves no lock; a crash after link leaves recoverable owner metadata at lockPath.
         await Deno.writeTextFile(
-          `${this.lockPath}/owner.json`,
+          claimant,
           JSON.stringify({ pid: Deno.pid, acquiredAt: Date.now() }),
+          { createNew: true },
         );
+        await Deno.link(claimant, this.lockPath);
+        await Deno.remove(claimant);
         break;
       } catch (error) {
+        await Deno.remove(claimant).catch(() => undefined);
         if (!(error instanceof Deno.errors.AlreadyExists) || attempt >= 5000) throw error;
         try {
           const lockOwner = JSON.parse(
-            await Deno.readTextFile(`${this.lockPath}/owner.json`),
-          ) as { pid: number };
+            await Deno.readTextFile(this.lockPath),
+          ) as { pid?: unknown; acquiredAt?: unknown };
+          if (!safe(lockOwner.pid, 1) || !safe(lockOwner.acquiredAt)) {
+            throw new Error("lock owner metadata denied");
+          }
           const alive = await new Deno.Command("kill", {
             args: ["-0", String(lockOwner.pid)],
             stdout: "null",
             stderr: "null",
           }).output();
           if (!alive.success) {
-            await Deno.remove(this.lockPath, { recursive: true });
+            await Deno.remove(this.lockPath);
             continue;
           }
         } catch (probeError) {
-          if (
-            !(probeError instanceof Deno.errors.NotFound) && !(probeError instanceof SyntaxError)
-          ) throw probeError;
+          if (!(probeError instanceof Deno.errors.NotFound)) throw probeError;
         }
         await new Promise((resolve) => setTimeout(resolve, 1 + attempt % 7));
       }
@@ -343,7 +400,7 @@ export class OfflineReferenceAuthority
       await this.write(state, fault ?? this.injectedFault);
       return result;
     } finally {
-      await Deno.remove(this.lockPath, { recursive: true }).catch(() => undefined);
+      await Deno.remove(this.lockPath).catch(() => undefined);
     }
   }
 
@@ -805,7 +862,8 @@ export class OfflineReferenceAuthority
         await jwkThumbprint(request.candidateJwk) === request.thumbprint &&
         request.tenantId === ctx.tenantId &&
         request.userId === ctx.userId && request.agentId === agent!.id &&
-        request.status === "pending" && request.expiresAt > now &&
+        request.status === "pending" && safe(request.expiresAt, 1) && request.expiresAt > now &&
+        request.expiresAt - now <= 600 &&
         clean(request.id) === request.id && clean(request.thumbprint) === request.thumbprint &&
         request.thumbprint !== value.agentThumbprint &&
         !deviceThumbprints.includes(request.thumbprint) &&
@@ -835,7 +893,7 @@ export class OfflineReferenceAuthority
         sameDurableValue(enrollment!.candidateJwk, device.publicJwk) &&
         device.id !== value.approverId && device.tenantId === ctx.tenantId &&
         device.userId === ctx.userId && device.agentId === agent!.id &&
-        device.status === "active" && device.role === "member" && safe(device.epoch, 1) &&
+        device.status === "active" && device.role === "member" && device.epoch === 1 &&
         device.thumbprint !== value.agentThumbprint &&
         device.thumbprint !== value.approverThumbprint && !subject(state, ctx, device.id);
     }
@@ -982,9 +1040,7 @@ export class OfflineReferenceAuthority
       const item = record<SubjectValue>(state, recordKey);
       if (
         !item || item.value.kind !== tx.subjectType || item.value.version !== tx.expectedVersion ||
-        tx.nextVersion !== tx.expectedVersion + 1 ||
-        item.value.status === "revoked" && tx.nextStatus !== "revoked" ||
-        item.value.status === "disabled" && tx.nextStatus === "active"
+        tx.nextVersion !== tx.expectedVersion + 1
       ) return denied("authority transition denied");
       beginCommit(state);
       const identity = {
@@ -1008,21 +1064,25 @@ export class OfflineReferenceAuthority
   }
 
   async exportAuthority(ctx: AuthorityMaintenanceContext): Promise<DurableAuthorityEnvelope> {
-    privileged(ctx);
-    return frozenDurableSnapshot(await this.read(false));
+    const authorization = this.privileged(ctx, "export");
+    const state = await this.read(false);
+    this.assertTenantOwnership(state, authorization);
+    return frozenDurableSnapshot(state);
   }
   async inspectAuthority(
     ctx: AuthorityMaintenanceContext,
     requireCurrent = true,
   ): Promise<DurableAuthorityEnvelope> {
-    privileged(ctx);
-    return frozenDurableSnapshot(await this.read(requireCurrent));
+    const authorization = this.privileged(ctx, "inspect");
+    const state = await this.read(requireCurrent);
+    this.assertTenantOwnership(state, authorization);
+    return frozenDurableSnapshot(state);
   }
   async initializeAuthority(
     ctx: AuthorityMaintenanceContext,
     candidate: DurableAuthorityEnvelope,
   ): Promise<AuthorityMaintenanceResult> {
-    privileged(ctx);
+    const authorization = this.privileged(ctx, "initialize");
     candidate = snapshotDurableInput(candidate);
     return await this.locked(async (current) => {
       if (
@@ -1033,6 +1093,7 @@ export class OfflineReferenceAuthority
       }
       try {
         assertAuthorityEnvelope(candidate, false);
+        this.assertTenantOwnership(candidate, authorization);
         await assertAuthorityCryptography(candidate);
       } catch {
         return maintenanceDenied("authority import denied");
@@ -1048,11 +1109,13 @@ export class OfflineReferenceAuthority
     ctx: AuthorityMaintenanceContext,
     candidate: DurableAuthorityEnvelope,
   ): Promise<AuthorityMaintenanceResult> {
-    privileged(ctx);
+    const authorization = this.privileged(ctx, "restore");
     candidate = snapshotDurableInput(candidate);
     return await this.locked(async (current) => {
       try {
+        this.assertTenantOwnership(current, authorization);
         assertRestoreNotStale(candidate, current);
+        this.assertTenantOwnership(candidate, authorization);
         await assertAuthorityCryptography(candidate);
       } catch {
         return maintenanceDenied("stale or corrupt restore denied");
@@ -1068,9 +1131,10 @@ export class OfflineReferenceAuthority
     ctx: AuthorityMaintenanceContext,
     tx: MigrationPreparation,
   ): Promise<AuthorityMaintenanceResult> {
-    privileged(ctx);
+    const authorization = this.privileged(ctx, "prepare_migration");
     tx = snapshotDurableInput(tx);
     return await this.locked((state) => {
+      this.assertTenantOwnership(state, authorization);
       if (
         state.schemaVersion !== tx.expectedSchemaVersion || state.migration.status !== "idle" ||
         tx.targetSchemaVersion !== tx.expectedSchemaVersion + 1
@@ -1087,8 +1151,9 @@ export class OfflineReferenceAuthority
     }, false);
   }
   async advanceMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
-    privileged(ctx);
+    const authorization = this.privileged(ctx, "advance_migration");
     return await this.locked((state) => {
+      this.assertTenantOwnership(state, authorization);
       if (state.migration.status === "preparing") {
         beginCommit(state);
         state.migration.status = "committing";
@@ -1102,8 +1167,9 @@ export class OfflineReferenceAuthority
     }, false);
   }
   async failMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
-    privileged(ctx);
+    const authorization = this.privileged(ctx, "fail_migration");
     return await this.locked((state) => {
+      this.assertTenantOwnership(state, authorization);
       if (!["preparing", "committing"].includes(state.migration.status)) {
         return maintenanceDenied("migration failure mark denied");
       }
@@ -1113,25 +1179,36 @@ export class OfflineReferenceAuthority
     }, false);
   }
   async recoverMigration(ctx: AuthorityMaintenanceContext): Promise<AuthorityMaintenanceResult> {
-    ctx = privileged(ctx);
+    const authorization = this.privileged(ctx, "recover_migration");
     for (;;) {
-      const state = await this.read(false);
-      if (state.schemaVersion === 2 && state.migration.status === "idle") {
-        return { outcome: "committed", authorityGeneration: state.authorityGeneration };
+      const result = await this.locked((state) => {
+        this.assertTenantOwnership(state, authorization);
+        if (state.schemaVersion === 2 && state.migration.status === "idle") {
+          return { done: true, authorityGeneration: state.authorityGeneration };
+        }
+        beginCommit(state);
+        if (state.migration.status === "failed") {
+          state.migration.status = "preparing";
+        } else if (state.migration.status === "idle") {
+          state.migration = {
+            status: "preparing",
+            generation: state.migration.generation + 1,
+            fromVersion: state.schemaVersion,
+            toVersion: state.schemaVersion + 1,
+          };
+          state.highWatermarks.migrationGeneration = state.migration.generation;
+        } else if (state.migration.status === "preparing") {
+          state.migration.status = "committing";
+        } else {
+          state.schemaVersion = state.migration.toVersion;
+          state.highWatermarks.schemaVersion = state.schemaVersion;
+          state.migration.status = "idle";
+        }
+        return { done: false, authorityGeneration: state.authorityGeneration };
+      }, false);
+      if (result.done) {
+        return { outcome: "committed", authorityGeneration: result.authorityGeneration };
       }
-      if (state.migration.status === "failed") {
-        await this.locked((value) => {
-          if (value.migration.status === "failed") {
-            beginCommit(value);
-            value.migration.status = "preparing";
-          }
-        }, false);
-      } else if (state.migration.status === "idle") {
-        await this.prepareMigration(ctx, {
-          expectedSchemaVersion: state.schemaVersion,
-          targetSchemaVersion: state.schemaVersion + 1,
-        });
-      } else await this.advanceMigration(ctx);
     }
   }
 
