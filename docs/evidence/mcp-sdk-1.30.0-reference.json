@@ -6,13 +6,15 @@
   "localCachePackageJsonSha256": "0690cbe02511a95d1ff199acf20b5a12ac4dfde1bbe30c82a0de73afa92dffc9",
   "localCacheEsmTypesSha256": "962836b0f8dad85bcd398ad3ddb5ba81a7c7530c706955aa846dd8dfc02dd6a9",
   "sourceFile": "dist/esm/types.js",
+  "vendoredMinimalFixture": "tests/fixtures/mcp-sdk-1.30.0-minimal-schema.json",
+  "fixtureUse": "committed offline regression for initialize request/result, initialized notification, tool input-schema root, and structuredContent root constraints",
   "observedExports": {
     "ToolSchema": "requires root inputSchema.type object",
     "ListToolsResultSchema": "requires tools array of ToolSchema",
     "CallToolResultSchema": "structuredContent is a string-keyed object; tool errors use isError"
   },
   "limitations": [
-    "No package was copied or imported into Cairn.",
+    "No SDK package code was copied or imported into Cairn; only a minimal constraint fixture with source digests was committed.",
     "No 2026-07-28 support or conformance is inferred from this legacy SDK reference.",
     "Exact SDK release selection and named-client validation remain activation blockers."
   ]

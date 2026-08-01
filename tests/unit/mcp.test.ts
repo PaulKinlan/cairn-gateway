@@ -1,4 +1,4 @@
-import { assert, equals } from "../assert.ts";
+import { assert, equals, rejects } from "../assert.ts";
 import {
   handleFixtureMcp,
   LegacyMcpSession,
@@ -21,17 +21,39 @@ import {
   type RequestProofPayload,
   signRequestProof,
 } from "../../packages/core/src/crypto/request_proof.ts";
+import sdkFixture from "../fixtures/mcp-sdk-1.30.0-minimal-schema.json" with { type: "json" };
 const now = 2_000_000_000,
   ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("user_a") };
 const core: McpCore = {
-  search: (query) => Promise.resolve({ operations: [{ id: "github.user.read@v1", query }] }),
-  describe: () => Promise.resolve({ id: "github.user.read@v1", inputSchema: { type: "object" } }),
-  invoke: () => Promise.resolve({ outcome: "success" }),
-  status: () => Promise.resolve({ status: "active" }),
+  accepts: () => true,
+  search: () =>
+    Promise.resolve({
+      operations: [{ id: "github.user.read@v1", connection: "connection_a" }],
+      count: 1,
+    }),
+  describe: () =>
+    Promise.resolve({
+      id: "github.user.read@v1",
+      provider: "github",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      requestUnits: 1,
+    }),
+  invoke: () =>
+    Promise.resolve({
+      outcome: "provider_unavailable",
+      receipt: { decision: "error", reason: "provider_failure", requestUnits: 1 },
+    }),
+  status: () =>
+    Promise.resolve({
+      connection: "connection_a",
+      status: "active",
+      operation: "github.user.read@v1",
+    }),
 };
 async function auth(
   body: Uint8Array,
   path: "/mcp" | "/mcp/legacy" = "/mcp",
+  expiresAt = now + 600,
 ) {
   const store = new MemoryStore(),
     device = await fixtureDeviceSigner(0),
@@ -86,7 +108,7 @@ async function auth(
     operation: "github.user.read",
     status: "active",
     version: 1,
-    expiresAt: now + 600,
+    expiresAt,
   });
   const base: RequestProofPayload = {
     v: 1,
@@ -125,6 +147,17 @@ const modern = (name: string, args: Record<string, unknown> = {}) => ({
     capabilities: {},
   },
 });
+Deno.test("vendored minimal SDK 1.30 legacy schema fixture validates tool contracts", () => {
+  equals(sdkFixture.provenance.version, "1.30.0");
+  equals(
+    sdkFixture.provenance.esmTypesSha256,
+    "962836b0f8dad85bcd398ad3ddb5ba81a7c7530c706955aa846dd8dfc02dd6a9",
+  );
+  for (const tool of TOOLS) {
+    for (const key of sdkFixture.tool.required) assert(key in tool);
+    equals(tool.inputSchema.type, sdkFixture.tool.inputSchemaRootType);
+  }
+});
 Deno.test("all four tools have exact object input schemas", () => {
   equals(TOOLS.map((x) => x.name), [...TOOL_NAMES]);
   for (const tool of TOOLS) {
@@ -132,20 +165,20 @@ Deno.test("all four tools have exact object input schemas", () => {
     equals(tool.inputSchema.additionalProperties, false);
     assert(Array.isArray(tool.inputSchema.required));
     equals(tool.outputSchema.type, "object");
-    equals(tool.outputSchema.additionalProperties, false);
+    assert(Array.isArray(tool.outputSchema.oneOf));
   }
 });
 Deno.test("unverified auth cannot reach MCP", async () => {
   const request = modern("search_capabilities", { query: "github" }),
     bytes = new TextEncoder().encode(JSON.stringify(request)),
     response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", {} as never, core);
-  equals((response.error as { code: number }).code, -32600);
+  equals((response!.error as { code: number }).code, -32600);
 });
 Deno.test("modern result structuredContent is always an object", async () => {
   const request = modern("search_capabilities", { query: "github" }),
     bytes = new TextEncoder().encode(JSON.stringify(request)),
     response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", await auth(bytes), core),
-    content = (response.result as { structuredContent: unknown }).structuredContent;
+    content = (response!.result as { structuredContent: unknown }).structuredContent;
   assert(!!content && typeof content === "object" && !Array.isArray(content));
 });
 Deno.test("legacy tools are unavailable before initialize", async () => {
@@ -160,7 +193,7 @@ Deno.test("legacy tools are unavailable before initialize", async () => {
       core,
       new LegacyMcpSession(),
     );
-  equals((response.error as { code: number }).code, -32002);
+  equals((response!.error as { code: number }).code, -32002);
 });
 Deno.test("legacy 2025-06-18 initialize lifecycle and tools schema", async () => {
   const session = new LegacyMcpSession();
@@ -168,7 +201,11 @@ Deno.test("legacy 2025-06-18 initialize lifecycle and tools schema", async () =>
       jsonrpc: "2.0" as const,
       id: 1,
       method: "initialize",
-      params: { protocolVersion: MCP_LEGACY },
+      params: {
+        protocolVersion: MCP_LEGACY,
+        capabilities: {},
+        clientInfo: { name: "fixture", version: "1" },
+      },
     },
     bytes = new TextEncoder().encode(JSON.stringify(init)),
     response = await handleFixtureMcp(
@@ -180,8 +217,32 @@ Deno.test("legacy 2025-06-18 initialize lifecycle and tools schema", async () =>
       core,
       session,
     );
-  equals((response.result as { protocolVersion: string }).protocolVersion, MCP_LEGACY);
-  const list = { jsonrpc: "2.0" as const, id: 2, method: "tools/list" },
+  equals((response!.result as { protocolVersion: string }).protocolVersion, MCP_LEGACY);
+  const earlyList = { jsonrpc: "2.0" as const, id: 2, method: "tools/list" },
+    earlyBytes = new TextEncoder().encode(JSON.stringify(earlyList)),
+    early = await handleFixtureMcp(
+      earlyList,
+      earlyBytes,
+      MCP_LEGACY,
+      "/mcp/legacy",
+      await auth(earlyBytes, "/mcp/legacy"),
+      core,
+      session,
+    );
+  equals((early!.error as { code: number }).code, -32002);
+  const initialized = { jsonrpc: "2.0" as const, method: "notifications/initialized" },
+    initializedBytes = new TextEncoder().encode(JSON.stringify(initialized)),
+    notificationResponse = await handleFixtureMcp(
+      initialized,
+      initializedBytes,
+      MCP_LEGACY,
+      "/mcp/legacy",
+      await auth(initializedBytes, "/mcp/legacy"),
+      core,
+      session,
+    );
+  equals(notificationResponse, undefined);
+  const list = { jsonrpc: "2.0" as const, id: 3, method: "tools/list" },
     listBytes = new TextEncoder().encode(JSON.stringify(list)),
     listed = await handleFixtureMcp(
       list,
@@ -192,9 +253,58 @@ Deno.test("legacy 2025-06-18 initialize lifecycle and tools schema", async () =>
       core,
       session,
     );
-  for (const tool of (listed.result as { tools: { inputSchema?: unknown }[] }).tools) {
+  for (const tool of (listed!.result as { tools: { inputSchema?: unknown }[] }).tools) {
     assert(tool.inputSchema);
   }
+});
+Deno.test("expired grants cannot authenticate any MCP tool", async () => {
+  const request = modern("search_capabilities", { query: "github" });
+  const bytes = new TextEncoder().encode(JSON.stringify(request));
+  await rejects(() => auth(bytes, "/mcp", now - 1), "authentication denied");
+});
+Deno.test("authenticated session must be bound to the exact policy core", async () => {
+  const request = modern("search_capabilities", { query: "github" });
+  const bytes = new TextEncoder().encode(JSON.stringify(request));
+  const verifiedAuth = await auth(bytes);
+  const response = await handleFixtureMcp(
+    request,
+    bytes,
+    MCP_CURRENT,
+    "/mcp",
+    verifiedAuth,
+    { ...core, accepts: () => false },
+  );
+  equals((response!.error as { code: number }).code, -32600);
+});
+Deno.test("unknown tools are protocol errors and malformed core output is closed", async () => {
+  const unknown = modern("unknown_tool", {});
+  const unknownBytes = new TextEncoder().encode(JSON.stringify(unknown));
+  const unknownResponse = await handleFixtureMcp(
+    unknown,
+    unknownBytes,
+    MCP_CURRENT,
+    "/mcp",
+    await auth(unknownBytes),
+    core,
+  );
+  equals((unknownResponse!.error as { code: number }).code, -32602);
+  const request = modern("connection_status", { connection: "connection_a" });
+  const bytes = new TextEncoder().encode(JSON.stringify(request));
+  const response = await handleFixtureMcp(
+    request,
+    bytes,
+    MCP_CURRENT,
+    "/mcp",
+    await auth(bytes),
+    { ...core, status: () => Promise.resolve({ status: "PROVIDER_SECRET_SENTINEL" }) },
+  );
+  const result = response!.result as {
+    isError: boolean;
+    structuredContent: { category: string };
+  };
+  equals(result.isError, true);
+  equals(result.structuredContent.category, "invalid_output");
+  assert(!JSON.stringify(response).includes("SENTINEL"));
 });
 Deno.test("invalid tool arguments and methods return safe closed errors", async () => {
   const request = modern("invoke_operation", {
@@ -204,6 +314,6 @@ Deno.test("invalid tool arguments and methods return safe closed errors", async 
     }),
     bytes = new TextEncoder().encode(JSON.stringify(request)),
     response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", await auth(bytes), core);
-  equals((response.result as { isError: boolean }).isError, true);
+  equals((response!.result as { isError: boolean }).isError, true);
   assert(!JSON.stringify(response).includes("169.254"));
 });

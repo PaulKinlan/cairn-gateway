@@ -29,6 +29,7 @@ import { encoder, sha256 } from "../../packages/core/src/crypto/encoding.ts";
 import { handleFixtureMcp, MCP_CURRENT } from "../../apps/gateway/mcp.ts";
 import { verifyMcpAuth } from "../../apps/gateway/mcp_auth.ts";
 import { PolicyMcpCore } from "../../apps/gateway/policy_core.ts";
+import { FixtureLocalMcpBridge } from "../../apps/gateway/local_bridge.ts";
 const now = 2_000_000_000,
   ctx: TenantContext = { tenantId: ids.tenant("tenant_a"), userId: ids.user("user_a") };
 const githubBody = encoder.encode(JSON.stringify({
@@ -55,7 +56,7 @@ async function setup(backend = new MemoryAuthorityBackend(), adapter?: CustodyAd
     agentJwk = await agentSigner.publicJwk();
   if (custody instanceof MemoryCustodyFixture) {
     await custody.beginAuthorization({ flowId: "flow_a", binding: binding(), now });
-    const material = custody.fixtureCallbackMaterial("flow_a");
+    const material = custody.fixtureCallbackMaterial(binding(), "flow_a");
     await custody.completeAuthorization({
       flowId: "flow_a",
       binding: binding(),
@@ -335,7 +336,7 @@ Deno.test("callback state PKCE and binding cannot complete another flow", async 
     b = { ...binding("ref_b"), connectionId: "connection_b" };
   await fixture.beginAuthorization({ flowId: "flow_a", binding: a, now });
   await fixture.beginAuthorization({ flowId: "flow_b", binding: b, now });
-  const material = fixture.fixtureCallbackMaterial("flow_a");
+  const material = fixture.fixtureCallbackMaterial(a, "flow_a");
   await rejects(
     () =>
       fixture.completeAuthorization({
@@ -365,6 +366,38 @@ Deno.test("callback state PKCE and binding cannot complete another flow", async 
       }),
     "denied",
   );
+});
+Deno.test("callback flow IDs and fixture material are owner-composite", async () => {
+  const fixture = new MemoryCustodyFixture(githubBody),
+    a = binding("owner_a_ref"),
+    b: CustodyBinding = {
+      ...binding("owner_b_ref"),
+      context: { tenantId: ids.tenant("tenant_b"), userId: ids.user("user_b") },
+      connectionId: "connection_b",
+    };
+  await fixture.beginAuthorization({ flowId: "same_flow", binding: a, now });
+  await fixture.beginAuthorization({ flowId: "same_flow", binding: b, now });
+  const materialA = fixture.fixtureCallbackMaterial(a, "same_flow"),
+    materialB = fixture.fixtureCallbackMaterial(b, "same_flow");
+  assert(materialA.state !== materialB.state);
+  await rejects(
+    () =>
+      fixture.completeAuthorization({
+        flowId: "same_flow",
+        binding: b,
+        ...materialA,
+        code: "fixture_authorization_code",
+        now,
+      }),
+    "denied",
+  );
+  await fixture.completeAuthorization({
+    flowId: "same_flow",
+    binding: b,
+    ...materialB,
+    code: "fixture_authorization_code",
+    now,
+  });
 });
 Deno.test("actual MCP boundary authenticates and executes typed policy flow", async () => {
   const env = await setup(), capability = await issue(env, 0, "issue_mcp_0123456789012");
@@ -407,16 +440,14 @@ Deno.test("actual MCP boundary authenticates and executes typed policy flow", as
     now,
     capability,
   });
-  const core = new PolicyMcpCore(env.store, env.service, {
-    context: ctx,
-    grantId: "grant_0",
+  const core = new PolicyMcpCore(env.store, env.service, auth, {
     capability,
     proofs,
     now,
     correlationId: "mcp_flow",
   });
   const response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", auth, core),
-    structured = (response.result as { structuredContent: { outcome: string } }).structuredContent;
+    structured = (response!.result as { structuredContent: { outcome: string } }).structuredContent;
   equals(structured.outcome, "success");
   assert(!JSON.stringify(response).includes("custody_ref"));
 });
@@ -469,20 +500,125 @@ Deno.test("MCP stale discovery is denied at call time after revocation", async (
     MCP_CURRENT,
     "/mcp",
     auth,
-    new PolicyMcpCore(env.store, env.service, {
-      context: ctx,
-      grantId: "grant_0",
+    new PolicyMcpCore(env.store, env.service, auth, {
       capability,
       proofs,
       now,
       correlationId: "stale_flow",
     }),
   );
-  equals((response.result as { isError: boolean }).isError, true);
+  equals((response!.result as { isError: boolean }).isError, true);
   equals(
-    (response.result as { structuredContent: { category: string } }).structuredContent.category,
+    (response!.result as { structuredContent: { category: string } }).structuredContent.category,
     "policy_denied",
   );
+});
+Deno.test("fixture bridge acquires capability, dual-signs and binds exact authenticated core", async () => {
+  const env = await setup();
+  const request = {
+    jsonrpc: "2.0" as const,
+    id: 9,
+    method: "tools/call",
+    params: {
+      name: "connection_status",
+      arguments: { connection: "connection_a" },
+    },
+    _meta: {
+      protocolVersion: MCP_CURRENT,
+      clientInfo: { name: "fixture-bridge", version: "1" },
+      capabilities: {},
+    },
+  };
+  const bytes = encoder.encode(JSON.stringify(request));
+  const bridge = new FixtureLocalMcpBridge(
+    env.store,
+    env.service,
+    ctx,
+    "grant_0",
+    env.signers[0]!,
+    env.agentSigner,
+  );
+  const { auth, core } = await bridge.authorize(bytes, now);
+  const response = await handleFixtureMcp(request, bytes, MCP_CURRENT, "/mcp", auth, core);
+  equals(
+    (response!.result as { structuredContent: { status: string } }).structuredContent.status,
+    "active",
+  );
+  assert(!("capability" in (bridge as unknown as Record<string, unknown>)));
+});
+Deno.test("malformed custody values map closed with exactly one sanitized error receipt", async () => {
+  const variants: Array<() => unknown> = [
+    () => null,
+    () => ({ outcome: "PROVIDER_SECRET_SENTINEL" }),
+    () => ({
+      outcome: "success",
+      status: "200",
+      contentType: "application/json",
+      body: githubBody,
+    }),
+    () =>
+      Object.defineProperty({}, "outcome", {
+        get: () => {
+          throw new Error("PROVIDER_SECRET_SENTINEL");
+        },
+      }),
+  ];
+  for (const make of variants) {
+    const hostile: CustodyAdapter = {
+      beginAuthorization: () =>
+        Promise.resolve({ handle: "x", callbackOwnership: "gateway", expiresAt: now + 1 }),
+      completeAuthorization: () => Promise.resolve({ status: "active" }),
+      connectionStatus: () => Promise.resolve({ status: "active" }),
+      proxyOperation: () => Promise.resolve(make() as never),
+      revokeConnection: () => Promise.resolve({ status: "revoked" }),
+    };
+    const env = await setup(undefined, hostile);
+    const output = await invoke(
+      env,
+      0,
+      await issue(env, 0, `issue_hostile_${crypto.randomUUID().replaceAll("-", "")}`),
+      `invoke_hostile_${crypto.randomUUID().replaceAll("-", "")}`,
+    );
+    equals(output.result.outcome, "provider_unavailable");
+    equals(env.logger.events.length, 1);
+    assert(!JSON.stringify(env.logger.events).includes("SENTINEL"));
+  }
+});
+Deno.test("malformed detached signatures emit exactly one sanitized deny receipt", async () => {
+  const env = await setup(),
+    capability = await issue(env, 0, "issue_malformed_012345678"),
+    body = encoder.encode("{}"),
+    payload: RequestProofPayload = {
+      v: 1,
+      method: "POST",
+      authority: "fixture.cairn.invalid",
+      path: "/mcp",
+      query: "",
+      audience: "urn:cairn:gateway",
+      body_sha256: await bodyHash(body),
+      issued_at: now,
+      nonce: "invoke_malformed_0123456",
+      device_id: "device_0",
+      agent_id: "agent_a",
+      grant_id: "grant_0",
+      capability_sha256: await sha256(capability),
+    },
+    proofs = await dualProof(env.signers[0]!, env.agentSigner, payload);
+  await rejects(
+    () =>
+      env.service.invoke(
+        ctx,
+        capability,
+        { ...proofs, device: { ...proofs.device, signature: "!" } },
+        {},
+        body,
+        now,
+        "malformed_proof",
+      ),
+    "device proof denied",
+  );
+  equals(env.logger.events.length, 1);
+  assert(!JSON.stringify(env.logger.events).includes("invalid base64"));
 });
 Deno.test("provider exception maps closed and emits metadata-only error receipt", async () => {
   const throwing: CustodyAdapter = {

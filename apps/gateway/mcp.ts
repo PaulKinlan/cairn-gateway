@@ -7,6 +7,7 @@ export const TOOL_NAMES = Object.freeze(
 export type ToolName = typeof TOOL_NAMES[number];
 export type Structured = Record<string, unknown>;
 export interface McpCore {
+  accepts(auth: VerifiedMcpAuth): boolean;
   search(query: string): Promise<Structured>;
   describe(operation: string): Promise<Structured>;
   invoke(
@@ -18,25 +19,37 @@ export interface McpCore {
   status(connection: string): Promise<Structured>;
 }
 export class LegacyMcpSession {
-  #initialized = false;
-  initialize(): void {
-    this.#initialized = true;
+  #state: "new" | "negotiating" | "ready" = "new";
+  begin(): boolean {
+    if (this.#state !== "new") return false;
+    this.#state = "negotiating";
+    return true;
+  }
+  complete(): boolean {
+    if (this.#state !== "negotiating") return false;
+    this.#state = "ready";
+    return true;
   }
   get initialized(): boolean {
-    return this.#initialized;
+    return this.#state === "ready";
   }
 }
 interface Rpc {
   jsonrpc: "2.0";
-  id: string | number;
+  id?: string | number;
   method: string;
   params?: Record<string, unknown>;
   _meta?: Record<string, unknown>;
 }
+const emptyArgumentsSchema = Object.freeze({
+  type: "object",
+  properties: Object.freeze({}),
+  additionalProperties: false,
+});
 const schemas: Record<ToolName, Record<string, unknown>> = {
   search_capabilities: {
     type: "object",
-    properties: { query: { type: "string", maxLength: 200 } },
+    properties: { query: { type: "string", minLength: 1, maxLength: 200 } },
     required: ["query"],
     additionalProperties: false,
   },
@@ -51,7 +64,7 @@ const schemas: Record<ToolName, Record<string, unknown>> = {
     properties: {
       operation: { type: "string", const: "github.user.read@v1" },
       connection: { type: "string", minLength: 1, maxLength: 128 },
-      arguments: { type: "object", properties: {}, additionalProperties: false },
+      arguments: emptyArgumentsSchema,
     },
     required: ["operation", "connection", "arguments"],
     additionalProperties: false,
@@ -63,10 +76,44 @@ const schemas: Record<ToolName, Record<string, unknown>> = {
     additionalProperties: false,
   },
 };
-const outputSchemas: Record<ToolName, Record<string, unknown>> = {
+const errorSchema = {
+  type: "object",
+  properties: {
+    outcome: { const: "denied" },
+    category: { enum: ["invalid_input", "policy_denied", "invalid_output"] },
+  },
+  required: ["outcome", "category"],
+  additionalProperties: false,
+};
+const receiptSchema = {
+  type: "object",
+  properties: {
+    decision: { enum: ["allow", "deny", "error"] },
+    reason: { type: "string", minLength: 1, maxLength: 64 },
+    requestUnits: { enum: [0, 1] },
+  },
+  required: ["decision", "reason", "requestUnits"],
+  additionalProperties: false,
+};
+const successSchemas: Record<ToolName, Record<string, unknown>> = {
   search_capabilities: {
     type: "object",
-    properties: { operations: { type: "array" }, count: { type: "integer", minimum: 0 } },
+    properties: {
+      operations: {
+        type: "array",
+        maxItems: 1,
+        items: {
+          type: "object",
+          properties: {
+            id: { const: "github.user.read@v1" },
+            connection: { type: "string", minLength: 1, maxLength: 128 },
+          },
+          required: ["id", "connection"],
+          additionalProperties: false,
+        },
+      },
+      count: { enum: [0, 1] },
+    },
     required: ["operations", "count"],
     additionalProperties: false,
   },
@@ -75,26 +122,52 @@ const outputSchemas: Record<ToolName, Record<string, unknown>> = {
     properties: {
       id: { const: "github.user.read@v1" },
       provider: { const: "github" },
-      inputSchema: { type: "object" },
+      inputSchema: { const: emptyArgumentsSchema },
       requestUnits: { const: 1 },
     },
     required: ["id", "provider", "inputSchema", "requestUnits"],
     additionalProperties: false,
   },
   invoke_operation: {
-    type: "object",
-    properties: {
-      outcome: { type: "string" },
-      user: { type: "object" },
-      receipt: { type: "object" },
-    },
-    required: ["outcome", "receipt"],
-    additionalProperties: false,
+    oneOf: [
+      {
+        type: "object",
+        properties: {
+          outcome: { const: "success" },
+          user: {
+            type: "object",
+            properties: {
+              id: { type: "integer" },
+              login: { type: "string", maxLength: 100 },
+              name: { type: ["string", "null"] },
+              html_url: { type: "string" },
+              avatar_url: { type: "string" },
+            },
+            required: ["id", "login", "name", "html_url", "avatar_url"],
+            additionalProperties: false,
+          },
+          receipt: receiptSchema,
+        },
+        required: ["outcome", "user", "receipt"],
+        additionalProperties: false,
+      },
+      {
+        type: "object",
+        properties: {
+          outcome: {
+            enum: ["auth_required", "rate_limited", "provider_denied", "provider_unavailable"],
+          },
+          receipt: receiptSchema,
+        },
+        required: ["outcome", "receipt"],
+        additionalProperties: false,
+      },
+    ],
   },
   connection_status: {
     type: "object",
     properties: {
-      connection: { type: "string" },
+      connection: { type: "string", minLength: 1, maxLength: 128 },
       status: { const: "active" },
       operation: { const: "github.user.read@v1" },
     },
@@ -102,13 +175,19 @@ const outputSchemas: Record<ToolName, Record<string, unknown>> = {
     additionalProperties: false,
   },
 };
+export const OUTPUT_SCHEMAS: Record<ToolName, Record<string, unknown>> = Object.fromEntries(
+  TOOL_NAMES.map((name) => [
+    name,
+    Object.freeze({ type: "object", oneOf: [successSchemas[name], errorSchema] }),
+  ]),
+) as unknown as Record<ToolName, Record<string, unknown>>;
 export const TOOLS = Object.freeze(
   TOOL_NAMES.map((name) =>
     Object.freeze({
       name,
       description: name.replaceAll("_", " "),
       inputSchema: schemas[name],
-      outputSchema: outputSchemas[name],
+      outputSchema: OUTPUT_SCHEMAS[name],
     })
   ),
 );
@@ -125,36 +204,49 @@ export async function handleFixtureMcp(
   auth: VerifiedMcpAuth,
   core: McpCore,
   legacySession?: LegacyMcpSession,
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, unknown> | undefined> {
   if (!isVerifiedMcpAuth(auth) || Array.isArray(body) || !body || typeof body !== "object") {
     return rpcError(null, -32600, "request denied");
   }
-  const request = body as Rpc,
-    id = request.id ?? null,
-    required = route === "/mcp" ? MCP_CURRENT : MCP_LEGACY;
-  if (headerRevision !== required || request.jsonrpc !== "2.0" || request.id === undefined) {
+  const request = body as Rpc;
+  const id = request.id ?? null;
+  const required = route === "/mcp" ? MCP_CURRENT : MCP_LEGACY;
+  if (
+    headerRevision !== required || request.jsonrpc !== "2.0" || typeof request.method !== "string"
+  ) {
     return rpcError(id, -32600, "protocol denied");
   }
-  if (route === "/mcp/legacy" && request.method === "initialize") {
+  if (!core.accepts(auth)) return rpcError(id, -32600, "authentication binding denied");
+
+  if (route === "/mcp/legacy") {
     if (!legacySession) return rpcError(id, -32002, "legacy session required");
-    legacySession.initialize();
-    return {
-      jsonrpc: "2.0",
-      id: request.id,
-      result: {
-        protocolVersion: MCP_LEGACY,
-        capabilities: { tools: {} },
-        serverInfo: { name: "cairn-fixture", version: "0.0.0-stage0" },
-      },
-    };
+    if (request.method === "initialize") {
+      if (request.id === undefined || !validInitialize(request.params) || !legacySession.begin()) {
+        return rpcError(id, -32602, "initialize denied");
+      }
+      return {
+        jsonrpc: "2.0",
+        id: request.id,
+        result: {
+          protocolVersion: MCP_LEGACY,
+          capabilities: { tools: {} },
+          serverInfo: { name: "cairn-fixture", version: "0.0.0-stage0" },
+        },
+      };
+    }
+    if (request.method === "notifications/initialized") {
+      if (request.id !== undefined || !legacySession.complete()) {
+        return request.id === undefined ? undefined : rpcError(id, -32600, "notification denied");
+      }
+      return undefined;
+    }
+    if (!legacySession.initialized) return rpcError(id, -32002, "initialize required");
   }
-  if (route === "/mcp/legacy" && !legacySession?.initialized) {
-    return rpcError(id, -32002, "initialize required");
-  }
+  if (request.id === undefined) return undefined;
   if (
     route === "/mcp" &&
-    (request._meta?.protocolVersion !== MCP_CURRENT || !request._meta.clientInfo ||
-      !request._meta.capabilities)
+    (request._meta?.protocolVersion !== MCP_CURRENT || !plainObject(request._meta.clientInfo) ||
+      !plainObject(request._meta.capabilities))
   ) return rpcError(id, -32600, "metadata denied");
   if (request.method === "tools/list") {
     return { jsonrpc: "2.0", id: request.id, result: { tools: TOOLS } };
@@ -162,18 +254,12 @@ export async function handleFixtureMcp(
   if (request.method !== "tools/call" || typeof request.params?.name !== "string") {
     return rpcError(id, -32601, "method denied");
   }
-  const name = request.params.name as ToolName, input = request.params.arguments;
-  if (!TOOL_NAMES.includes(name) || !validInput(name, input)) {
-    return {
-      jsonrpc: "2.0",
-      id: request.id,
-      result: {
-        isError: true,
-        content: [{ type: "text", text: "request denied" }],
-        structuredContent: { outcome: "denied", category: "invalid_input" },
-      },
-    };
+  if (!TOOL_NAMES.includes(request.params.name as ToolName)) {
+    return rpcError(id, -32602, "unknown tool");
   }
+  const name = request.params.name as ToolName;
+  const input = request.params.arguments;
+  if (!validInput(name, input)) return toolError(request.id, name, "invalid_input");
   try {
     const value = input as Record<string, unknown>;
     let structuredContent: Structured;
@@ -196,41 +282,116 @@ export async function handleFixtureMcp(
         structuredContent = await core.status(value.connection as string);
         break;
     }
+    if (!validOutput(name, structuredContent)) return toolError(request.id, name, "invalid_output");
     return {
       jsonrpc: "2.0",
       id: request.id,
       result: { content: [{ type: "text", text: "ok" }], structuredContent },
     };
   } catch {
-    return {
-      jsonrpc: "2.0",
-      id: request.id,
-      result: {
-        isError: true,
-        content: [{ type: "text", text: "request denied" }],
-        structuredContent: { outcome: "denied", category: "policy_denied" },
-      },
-    };
+    return toolError(request.id, name, "policy_denied");
   }
 }
+function toolError(id: string | number, name: ToolName, category: string) {
+  const structuredContent = { outcome: "denied", category };
+  if (!validOutput(name, structuredContent)) throw new Error("internal error schema mismatch");
+  return {
+    jsonrpc: "2.0",
+    id,
+    result: {
+      isError: true,
+      content: [{ type: "text", text: "request denied" }],
+      structuredContent,
+    },
+  };
+}
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+function exactKeys(value: Record<string, unknown>, required: string[], optional: string[] = []) {
+  return required.every((key) => key in value) &&
+    Object.keys(value).every((key) => required.includes(key) || optional.includes(key));
+}
+function validInitialize(value: unknown): boolean {
+  if (!plainObject(value) || !exactKeys(value, ["protocolVersion", "capabilities", "clientInfo"])) {
+    return false;
+  }
+  return value.protocolVersion === MCP_LEGACY && plainObject(value.capabilities) &&
+    plainObject(value.clientInfo) && typeof value.clientInfo.name === "string" &&
+    typeof value.clientInfo.version === "string";
+}
 function validInput(name: ToolName, value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const input = value as Record<string, unknown>;
-  if (
-    Object.keys(input).some((key) =>
-      !Object.keys((schemas[name].properties ?? {}) as object).includes(key)
-    )
-  ) return false;
+  if (!plainObject(value)) return false;
+  const input = value;
   if (name === "search_capabilities") {
-    return typeof input.query === "string" && input.query.length <= 200;
+    return exactKeys(input, ["query"]) && typeof input.query === "string" &&
+      input.query.length > 0 && input.query.length <= 200;
   }
-  if (name === "describe_operation") return input.operation === "github.user.read@v1";
+  if (name === "describe_operation") {
+    return exactKeys(input, ["operation"]) && input.operation === "github.user.read@v1";
+  }
   if (name === "connection_status") {
-    return typeof input.connection === "string" && input.connection.length > 0 &&
-      input.connection.length <= 128;
+    return exactKeys(input, ["connection"]) && validId(input.connection);
   }
-  return input.operation === "github.user.read@v1" && typeof input.connection === "string" &&
-    input.connection.length > 0 && input.connection.length <= 128 && !!input.arguments &&
-    typeof input.arguments === "object" && !Array.isArray(input.arguments) &&
-    Object.keys(input.arguments as object).length === 0;
+  return exactKeys(input, ["operation", "connection", "arguments"]) &&
+    input.operation === "github.user.read@v1" && validId(input.connection) &&
+    plainObject(input.arguments) && Object.keys(input.arguments).length === 0;
+}
+function validId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 128;
+}
+function validOutput(name: ToolName, value: unknown): value is Structured {
+  if (!plainObject(value)) return false;
+  if (
+    exactKeys(value, ["outcome", "category"]) && value.outcome === "denied" &&
+    ["invalid_input", "policy_denied", "invalid_output"].includes(String(value.category))
+  ) return true;
+  if (name === "search_capabilities") {
+    if (!exactKeys(value, ["operations", "count"]) || !Array.isArray(value.operations)) {
+      return false;
+    }
+    if (value.count !== value.operations.length || ![0, 1].includes(Number(value.count))) {
+      return false;
+    }
+    return value.operations.every((item) =>
+      plainObject(item) && exactKeys(item, ["id", "connection"]) &&
+      item.id === "github.user.read@v1" && validId(item.connection)
+    );
+  }
+  if (name === "describe_operation") {
+    return exactKeys(value, ["id", "provider", "inputSchema", "requestUnits"]) &&
+      value.id === "github.user.read@v1" && value.provider === "github" &&
+      value.requestUnits === 1 &&
+      JSON.stringify(value.inputSchema) === JSON.stringify(emptyArgumentsSchema);
+  }
+  if (name === "connection_status") {
+    return exactKeys(value, ["connection", "status", "operation"]) && validId(value.connection) &&
+      value.status === "active" && value.operation === "github.user.read@v1";
+  }
+  if (!exactKeys(value, ["outcome", "receipt"], ["user"])) return false;
+  if (
+    ![
+      "success",
+      "auth_required",
+      "rate_limited",
+      "provider_denied",
+      "provider_unavailable",
+    ].includes(String(value.outcome)) || !validReceipt(value.receipt)
+  ) return false;
+  if (value.outcome !== "success") return !("user" in value);
+  return validUser(value.user);
+}
+function validReceipt(value: unknown): boolean {
+  return plainObject(value) && exactKeys(value, ["decision", "reason", "requestUnits"]) &&
+    ["allow", "deny", "error"].includes(String(value.decision)) &&
+    typeof value.reason === "string" && value.reason.length > 0 && value.reason.length <= 64 &&
+    (value.requestUnits === 0 || value.requestUnits === 1);
+}
+function validUser(value: unknown): boolean {
+  return plainObject(value) &&
+    exactKeys(value, ["id", "login", "name", "html_url", "avatar_url"]) &&
+    Number.isSafeInteger(value.id) && typeof value.login === "string" &&
+    value.login.length <= 100 &&
+    (value.name === null || typeof value.name === "string") &&
+    typeof value.html_url === "string" && typeof value.avatar_url === "string";
 }

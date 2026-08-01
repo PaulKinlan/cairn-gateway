@@ -88,13 +88,15 @@ export class MemoryStore implements MetadataStore {
   }
   async putConnection(ctx: TenantContext, value: Connection): Promise<void> {
     this.#owned(ctx, value);
-    for (const item of this.backend.connections.values()) {
-      if (
-        item.custodyRef === value.custodyRef &&
-        (item.tenantId !== ctx.tenantId || item.userId !== ctx.userId || item.id !== value.id)
-      ) throw new Error("custody ownership denied");
-    }
-    this.backend.connections.set(entityKey(ctx, "connection", value.id), structuredClone(value));
+    await this.backend.exclusive(() => {
+      for (const item of this.backend.connections.values()) {
+        if (
+          item.custodyRef === value.custodyRef &&
+          (item.tenantId !== ctx.tenantId || item.userId !== ctx.userId || item.id !== value.id)
+        ) throw new Error("custody ownership denied");
+      }
+      this.backend.connections.set(entityKey(ctx, "connection", value.id), structuredClone(value));
+    });
   }
   async getConnection(ctx: TenantContext, id: string): Promise<Connection | undefined> {
     return structuredClone(this.backend.connections.get(entityKey(ctx, "connection", id)));
@@ -282,21 +284,34 @@ export class MemoryStore implements MetadataStore {
   ): Promise<void> {
     return this.#update(ctx, this.backend.grants, "grant", value, value.version, reason, at);
   }
-  updateConnection(
+  async updateConnection(
     ctx: TenantContext,
     value: Connection,
     reason?: RevocationEvent["reason"],
-    at?: number,
+    at = 0,
   ): Promise<void> {
-    return this.#update(
-      ctx,
-      this.backend.connections,
-      "connection",
-      value,
-      value.epoch,
-      reason,
-      at,
-    );
+    this.#owned(ctx, value);
+    await this.backend.exclusive(() => {
+      const key = entityKey(ctx, "connection", value.id);
+      const previous = this.backend.connections.get(key);
+      if (!previous) throw new Error("connection not found");
+      // Custody references are owner-bound immutable handles. Rotation is a new
+      // connection ceremony, never a metadata update.
+      if (value.custodyRef !== previous.custodyRef) throw new Error("custody ownership denied");
+      if (value.epoch <= previous.epoch) throw new Error("version must increase");
+      this.backend.connections.set(key, structuredClone(value));
+      if (value.status !== "active") {
+        this.backend.revocations.push({
+          tenantId: ctx.tenantId,
+          userId: ctx.userId,
+          subjectType: "connection",
+          subjectId: value.id,
+          version: value.epoch,
+          reason: reason ?? "operator",
+          at,
+        });
+      }
+    });
   }
   consumeNonce(
     ctx: TenantContext,

@@ -127,6 +127,30 @@ Deno.test("ownership and custody references cannot cross tenants", async () => {
     "custody ownership",
   );
 });
+Deno.test("connection updates cannot rotate or alias custody references", async () => {
+  const backend = new MemoryAuthorityBackend(),
+    a = new MemoryStore(backend),
+    b = new MemoryStore(backend);
+  const { connection } = await seed(a);
+  const otherConnection: Connection = {
+    ...connection,
+    id: ids.connection("connection_b"),
+    tenantId: other.tenantId,
+    userId: other.userId,
+    custodyRef: "opaque_fixture_ref_b",
+  };
+  await b.putConnection(other, otherConnection);
+  await rejects(
+    () =>
+      b.updateConnection(other, {
+        ...otherConnection,
+        custodyRef: connection.custodyRef,
+        epoch: 2,
+      }),
+    "custody ownership",
+  );
+  equals((await b.getConnection(other, otherConnection.id))!.custodyRef, "opaque_fixture_ref_b");
+});
 Deno.test("parallel nonce consumption through shared facades has one winner", async () => {
   const backend = new MemoryAuthorityBackend(),
     a = new MemoryStore(backend),

@@ -53,11 +53,15 @@ export class MemoryCustodyFixture implements CustodyAdapter {
   #key(binding: CustodyBinding): string {
     return `${binding.context.tenantId}/${binding.context.userId}/${binding.connectionId}/${binding.connectionRef}`;
   }
+  #flowKey(binding: CustodyBinding, flowId: string): string {
+    return `${this.#key(binding)}/flow/${flowId}`;
+  }
   async beginAuthorization(
     input: { flowId: string; binding: CustodyBinding; now: number },
   ): Promise<AuthorizationStart> {
     return await this.#exclusive(async () => {
-      if (this.#flows.has(input.flowId) || this.#connections.has(this.#key(input.binding))) {
+      const flowKey = this.#flowKey(input.binding, input.flowId);
+      if (this.#flows.has(flowKey) || this.#connections.has(this.#key(input.binding))) {
         throw new Error("authorization start denied");
       }
       const state = base64url(crypto.getRandomValues(new Uint8Array(32))),
@@ -65,7 +69,7 @@ export class MemoryCustodyFixture implements CustodyAdapter {
       const challenge = base64url(
         new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(verifier))),
       );
-      this.#flows.set(input.flowId, {
+      this.#flows.set(flowKey, {
         bindingHash: await this.#bindingHash(input.binding),
         stateHash: await sha256(state),
         challenge,
@@ -73,14 +77,17 @@ export class MemoryCustodyFixture implements CustodyAdapter {
         used: false,
         connectionRef: this.#key(input.binding),
       });
-      this.#materials.set(input.flowId, { state, verifier });
+      this.#materials.set(flowKey, { state, verifier });
       this.#connections.set(this.#key(input.binding), { status: "pending" });
       return { handle: input.flowId, callbackOwnership: "gateway", expiresAt: input.now + 600 };
     });
   }
   /** Fixture harness only; never part of CustodyAdapter or a runtime export surface. */
-  fixtureCallbackMaterial(flowId: string): Readonly<CallbackMaterial> {
-    const value = this.#materials.get(flowId);
+  fixtureCallbackMaterial(
+    binding: CustodyBinding,
+    flowId: string,
+  ): Readonly<CallbackMaterial> {
+    const value = this.#materials.get(this.#flowKey(binding, flowId));
     if (!value) throw new Error("fixture flow absent");
     return { ...value };
   }
@@ -95,7 +102,8 @@ export class MemoryCustodyFixture implements CustodyAdapter {
     },
   ): Promise<AuthorizationCompletion> {
     return await this.#exclusive(async () => {
-      const flow = this.#flows.get(input.flowId),
+      const flowKey = this.#flowKey(input.binding, input.flowId);
+      const flow = this.#flows.get(flowKey),
         challenge = base64url(
           new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(input.verifier))),
         );
@@ -106,8 +114,8 @@ export class MemoryCustodyFixture implements CustodyAdapter {
         input.code !== "fixture_authorization_code"
       ) throw new Error("authorization completion denied");
       flow.used = true;
-      this.#flows.set(input.flowId, flow);
-      this.#materials.delete(input.flowId);
+      this.#flows.set(flowKey, flow);
+      this.#materials.delete(flowKey);
       this.#connections.set(flow.connectionRef, { status: "active" });
       return { status: "active" };
     });

@@ -74,7 +74,7 @@ Deno.test("capability signature tamper is denied", async () => {
   const keyring = await fixtureCapabilityKeyring();
   const token = await signCapability(keyring, await claims());
   const parts = token.split(".");
-  parts[2] = `${parts[2]!.slice(0, -1)}A`;
+  parts[2] = `${parts[2]![0] === "A" ? "B" : "A"}${parts[2]!.slice(1)}`;
   await rejects(() => verifyCapability(keyring, parts.join("."), now), "invalid");
 });
 Deno.test("algorithm substitution is denied", async () => {
@@ -221,6 +221,26 @@ Deno.test("receipt runtime gate sanitizes identifiers and rejects open reasons",
     denied = true;
   }
   assert(denied);
+  for (
+    const patch of [
+      { decision: "maybe" },
+      { operation: "generic.http" },
+      { latency: "raw" },
+      { statusClass: "PROVIDER_SECRET_SENTINEL" },
+      { responseSize: "unbounded" },
+      { requestUnits: 2 },
+      { retryCount: 1 },
+      { redactionPolicyVersion: 2 },
+    ]
+  ) {
+    let rejected = false;
+    try {
+      makeReceipt({ ...base, ...patch } as never);
+    } catch {
+      rejected = true;
+    }
+    assert(rejected);
+  }
 });
 Deno.test("flow PKCE material uses bound non-extractable AEAD", async () => {
   const key = await generateFlowKey();

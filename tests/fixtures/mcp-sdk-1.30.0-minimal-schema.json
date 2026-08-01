@@ -1,0 +1,32 @@
+{
+  "provenance": {
+    "package": "@modelcontextprotocol/sdk",
+    "version": "1.30.0",
+    "sourceFile": "dist/esm/types.js",
+    "packageJsonSha256": "0690cbe02511a95d1ff199acf20b5a12ac4dfde1bbe30c82a0de73afa92dffc9",
+    "esmTypesSha256": "962836b0f8dad85bcd398ad3ddb5ba81a7c7530c706955aa846dd8dfc02dd6a9",
+    "scope": "minimal immutable legacy 2025-06-18 fixture; not SDK or transport conformance"
+  },
+  "initializeRequest": {
+    "method": "initialize",
+    "requiredParams": ["protocolVersion", "capabilities", "clientInfo"],
+    "clientInfoRequired": ["name", "version"]
+  },
+  "initializeResult": {
+    "required": ["protocolVersion", "capabilities", "serverInfo"],
+    "serverInfoRequired": ["name", "version"]
+  },
+  "initializedNotification": {
+    "method": "notifications/initialized",
+    "mustNotHaveId": true,
+    "mustNotProduceResponse": true
+  },
+  "tool": {
+    "required": ["name", "inputSchema"],
+    "inputSchemaRootType": "object"
+  },
+  "callToolResult": {
+    "structuredContentRootType": "object",
+    "errorFlag": "isError"
+  }
+}

@@ -52,9 +52,29 @@ const reasons = new Set<ReceiptReason>([
   "capability_replay",
   "provider_failure",
 ]);
-const safeId = (value: string): string => /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : "invalid";
+const decisions = new Set(["allow", "deny", "error"]),
+  operations = new Set(["github.user.read"]),
+  latencies = new Set(["lt100ms", "lt1s", "gte1s"]),
+  outcomes = new Set([
+    "success",
+    "auth_required",
+    "rate_limited",
+    "provider_denied",
+    "provider_unavailable",
+    "policy_denied",
+  ]),
+  sizes = new Set(["none", "lt4k", "lt64k"]);
+const safeId = (value: string): string =>
+  typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value) ? value : "invalid";
 export function makeReceipt(input: Receipt): Receipt {
-  if (!reasons.has(input.reason) || !Number.isInteger(input.at) || input.at < 0) {
+  if (
+    !input || typeof input !== "object" || !reasons.has(input.reason) ||
+    !decisions.has(input.decision) || !operations.has(input.operation) ||
+    !latencies.has(input.latency) || !outcomes.has(input.statusClass) ||
+    !sizes.has(input.responseSize) || !Number.isInteger(input.at) || input.at < 0 ||
+    (input.requestUnits !== 0 && input.requestUnits !== 1) || input.retryCount !== 0 ||
+    input.redactionPolicyVersion !== 1
+  ) {
     throw new Error("invalid receipt metadata");
   }
   return Object.freeze({

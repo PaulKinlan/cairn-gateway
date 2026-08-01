@@ -37,45 +37,64 @@ export async function invokeGithubUserRead(
   if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length !== 0) {
     throw new Error("arguments denied");
   }
-  let response;
   try {
-    response = await adapter.proxyOperation(binding, {
+    // The adapter is an untrusted boundary. Awaiting, property access, typed
+    // array checks, decoding, projection, and URL parsing all stay inside one
+    // catch-all so hostile getters and malformed resolved values cannot escape.
+    const raw: unknown = await adapter.proxyOperation(binding, {
       operation: "github.user.read",
       integration: "github-cairn-v1",
       path: "/user",
       method: "GET",
     });
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return { outcome: "provider_unavailable" };
+    }
+    const response = raw as Record<string, unknown>;
+    const outcome = response.outcome;
+    if (
+      outcome !== "success" && outcome !== "auth_required" && outcome !== "rate_limited" &&
+      outcome !== "provider_denied" && outcome !== "provider_unavailable"
+    ) return { outcome: "provider_unavailable" };
+    if (outcome !== "success") return { outcome };
+    const body = response.body;
+    const contentType = response.contentType;
+    const status = response.status;
+    if (
+      !(body instanceof Uint8Array) || typeof contentType !== "string" ||
+      typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599 ||
+      body.byteLength > GITHUB_USER_READ.maxResponseBytes ||
+      contentType.split(";")[0]?.trim() !== "application/json"
+    ) return { outcome: "provider_unavailable" };
+    const input: unknown = JSON.parse(new TextDecoder().decode(body));
+    if (
+      !input || typeof input !== "object" || Array.isArray(input) ||
+      !Number.isSafeInteger((input as Record<string, unknown>).id) ||
+      typeof (input as Record<string, unknown>).login !== "string" ||
+      ((input as Record<string, unknown>).login as string).length > 100 ||
+      !((input as Record<string, unknown>).name === null ||
+        typeof (input as Record<string, unknown>).name === "string") ||
+      typeof (input as Record<string, unknown>).html_url !== "string" ||
+      typeof (input as Record<string, unknown>).avatar_url !== "string"
+    ) return { outcome: "provider_unavailable" };
+    const projected = input as Record<string, unknown>;
+    if (
+      !safeGithubUrl(projected.html_url as string) ||
+      !safeAvatarUrl(projected.avatar_url as string)
+    ) return { outcome: "provider_unavailable" };
+    return {
+      outcome: "success",
+      user: {
+        id: projected.id as number,
+        login: projected.login as string,
+        name: projected.name as string | null,
+        html_url: projected.html_url as string,
+        avatar_url: stripQuery(projected.avatar_url as string),
+      },
+    };
   } catch {
     return { outcome: "provider_unavailable" };
   }
-  if (response.outcome !== "success") return { outcome: response.outcome };
-  if (
-    response.body.byteLength > GITHUB_USER_READ.maxResponseBytes ||
-    response.contentType.split(";")[0]?.trim() !== "application/json"
-  ) return { outcome: "provider_unavailable" };
-  let input: Record<string, unknown>;
-  try {
-    input = JSON.parse(new TextDecoder().decode(response.body));
-  } catch {
-    return { outcome: "provider_unavailable" };
-  }
-  if (
-    !input || typeof input !== "object" || Array.isArray(input) ||
-    !Number.isSafeInteger(input.id) || typeof input.login !== "string" ||
-    input.login.length > 100 || !(input.name === null || typeof input.name === "string") ||
-    typeof input.html_url !== "string" || typeof input.avatar_url !== "string" ||
-    !safeGithubUrl(input.html_url) || !safeAvatarUrl(input.avatar_url)
-  ) return { outcome: "provider_unavailable" };
-  return {
-    outcome: "success",
-    user: {
-      id: input.id as number,
-      login: input.login,
-      name: input.name as string | null,
-      html_url: input.html_url,
-      avatar_url: stripQuery(input.avatar_url),
-    },
-  };
 }
 function safeGithubUrl(value: string): boolean {
   try {

@@ -8,6 +8,7 @@ export interface VerifiedMcpAuth {
   readonly authenticated: true;
   readonly context: TenantContext;
   readonly grantId: string;
+  readonly sessionId: string;
 }
 export function isVerifiedMcpAuth(value: unknown): value is VerifiedMcpAuth {
   return !!value && typeof value === "object" && verified.has(value as object);
@@ -27,7 +28,10 @@ export async function verifyMcpAuth(
 ): Promise<VerifiedMcpAuth> {
   const grant = await store.getGrant(input.context, input.grantId),
     principal = await store.getPrincipal(input.context, input.context.userId);
-  if (!grant || grant.status !== "active" || !principal || principal.status !== "active") {
+  if (
+    !grant || grant.status !== "active" || grant.expiresAt < input.now || !principal ||
+    principal.status !== "active"
+  ) {
     throw new Error("MCP authentication denied");
   }
   const agent = await store.getAgent(input.context, grant.agentId),
@@ -64,8 +68,9 @@ export async function verifyMcpAuth(
   ) throw new Error("MCP authentication replay");
   const result: VerifiedMcpAuth = Object.freeze({
     authenticated: true,
-    context: input.context,
+    context: Object.freeze({ ...input.context }),
     grantId: input.grantId,
+    sessionId: crypto.randomUUID(),
   });
   verified.add(result);
   return result;

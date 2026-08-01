@@ -109,115 +109,146 @@ export class InvocationService {
     correlationId: string,
   ): Promise<{ result: GithubResult; receipt: Receipt }> {
     const started = performance.now();
-    if (!this.invocationEnabled) {
-      this.#receipt(ctx, correlationId, now, "deny", "invocation_disabled");
-      throw new Error("invocation disabled");
-    }
-    let claims: CapabilityClaims;
+    let receiptEmitted = false;
+    const emitClosed = (
+      decision: "deny" | "error",
+      reason: ReceiptReason,
+      claims?: CapabilityClaims,
+    ) => {
+      if (receiptEmitted) return;
+      receiptEmitted = true;
+      this.#receipt(ctx, correlationId, now, decision, reason, claims);
+    };
     try {
-      claims = await verifyCapability(this.keys, capability, now);
-    } catch {
-      this.#receipt(ctx, correlationId, now, "deny", "capability_invalid");
-      throw new Error("capability invalid");
+      if (!this.invocationEnabled) {
+        emitClosed("deny", "invocation_disabled");
+        throw new Error("invocation disabled");
+      }
+      let claims: CapabilityClaims;
+      try {
+        claims = await verifyCapability(this.keys, capability, now);
+      } catch {
+        emitClosed("deny", "capability_invalid");
+        throw new Error("capability invalid");
+      }
+      if (claims.tenant_id !== ctx.tenantId || claims.user_id !== ctx.userId) {
+        emitClosed("deny", "ownership_denied", claims);
+        throw new Error("ownership denied");
+      }
+      const principal = await this.store.getPrincipal(ctx, ctx.userId),
+        agent = await this.store.getAgent(ctx, claims.agent_id),
+        device = await this.store.getDevice(ctx, claims.device_id),
+        connection = await this.store.getConnection(ctx, claims.connection_id);
+      if (
+        !principal || !agent || !device || !connection || claims.cnf.jkt !== device.thumbprint ||
+        device.agentId !== agent.id
+      ) {
+        emitClosed("deny", "binding_denied", claims);
+        throw new Error("binding denied");
+      }
+      if (
+        !args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length !== 0
+      ) {
+        emitClosed("deny", "arguments_denied", claims);
+        throw new Error("arguments denied");
+      }
+      const expected = {
+        v: 1 as const,
+        method: "POST" as const,
+        authority: this.authority,
+        path: "/mcp" as const,
+        query: "" as const,
+        audience: "urn:cairn:gateway" as const,
+        body_sha256: await bodyHash(receivedBody),
+        device_id: device.id,
+        agent_id: agent.id,
+        grant_id: claims.grant_id,
+        capability_sha256: await sha256(capability),
+      };
+      let deviceProofValid = false;
+      try {
+        deviceProofValid = await verifyRequestProof(proofs.device, device.publicJwk, expected, now);
+      } catch {
+        // Malformed encodings are authentication denials, never raw exceptions.
+      }
+      if (!deviceProofValid) {
+        emitClosed("deny", "device_proof_denied", claims);
+        throw new Error("device proof denied");
+      }
+      let agentProofValid = false;
+      try {
+        agentProofValid = await verifyRequestProof(proofs.agent, agent.publicJwk, expected, now);
+      } catch {
+        // Preserve the closed receipt taxonomy for hostile detached proofs.
+      }
+      if (!agentProofValid) {
+        emitClosed("deny", "agent_proof_denied", claims);
+        throw new Error("agent proof denied");
+      }
+      const consumed = await this.store.consumeInvocation(ctx, {
+        principalId: ctx.userId,
+        principalEpoch: claims.principal_epoch,
+        agentId: claims.agent_id,
+        agentEpoch: claims.agent_epoch,
+        deviceId: claims.device_id,
+        deviceEpoch: claims.device_epoch,
+        grantId: claims.grant_id,
+        grantVersion: claims.grant_version,
+        connectionId: claims.connection_id,
+        connectionEpoch: claims.connection_epoch,
+        operation: "github.user.read",
+        nonceHash: await sha256(`${proofs.device.payload.nonce}:${proofs.agent.payload.nonce}`),
+        nonceExpiresAt: now + 600,
+        jtiHash: await sha256(claims.jti),
+        jtiExpiresAt: claims.exp,
+        now,
+      });
+      if (!consumed.ok) {
+        const reason = closedReason(consumed.reason);
+        emitClosed("deny", reason, claims);
+        throw new Error(consumed.reason);
+      }
+      const binding: CustodyBinding = {
+        context: ctx,
+        connectionId: connection.id,
+        connectionRef: connection.custodyRef,
+        integration: "github-cairn-v1",
+        redirectUri: "https://fixture.cairn.invalid/oauth/github/callback",
+      };
+      const result = await invokeGithubUserRead(this.custody, binding, args),
+        duration = performance.now() - started;
+      const isError = result.outcome === "provider_unavailable";
+      const bytes = result.outcome === "success"
+        ? new TextEncoder().encode(JSON.stringify(result.user)).byteLength
+        : 0;
+      const receipt = makeReceipt({
+        correlationId,
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        agentId: claims.agent_id,
+        deviceId: claims.device_id,
+        connectionId: claims.connection_id,
+        operation: "github.user.read",
+        decision: isError ? "error" : "allow",
+        reason: isError ? "provider_failure" : "policy_allow",
+        at: now,
+        latency: duration < 100 ? "lt100ms" : duration < 1000 ? "lt1s" : "gte1s",
+        statusClass: result.outcome,
+        responseSize: bytes === 0 ? "none" : bytes < 4096 ? "lt4k" : "lt64k",
+        requestUnits: 1,
+        retryCount: 0,
+        redactionPolicyVersion: 1,
+      });
+      receiptEmitted = true;
+      this.logger.emit({ type: "receipt", receipt });
+      return { result, receipt };
+    } catch (error) {
+      if (!receiptEmitted) {
+        emitClosed("error", "binding_denied");
+        throw new Error("invocation denied");
+      }
+      throw error;
     }
-    if (claims.tenant_id !== ctx.tenantId || claims.user_id !== ctx.userId) {
-      this.#receipt(ctx, correlationId, now, "deny", "ownership_denied", claims);
-      throw new Error("ownership denied");
-    }
-    const principal = await this.store.getPrincipal(ctx, ctx.userId),
-      agent = await this.store.getAgent(ctx, claims.agent_id),
-      device = await this.store.getDevice(ctx, claims.device_id),
-      connection = await this.store.getConnection(ctx, claims.connection_id);
-    if (
-      !principal || !agent || !device || !connection || claims.cnf.jkt !== device.thumbprint ||
-      device.agentId !== agent.id
-    ) {
-      this.#receipt(ctx, correlationId, now, "deny", "binding_denied", claims);
-      throw new Error("binding denied");
-    }
-    if (
-      !args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length !== 0
-    ) {
-      this.#receipt(ctx, correlationId, now, "deny", "arguments_denied", claims);
-      throw new Error("arguments denied");
-    }
-    const expected = {
-      v: 1 as const,
-      method: "POST" as const,
-      authority: this.authority,
-      path: "/mcp" as const,
-      query: "" as const,
-      audience: "urn:cairn:gateway" as const,
-      body_sha256: await bodyHash(receivedBody),
-      device_id: device.id,
-      agent_id: agent.id,
-      grant_id: claims.grant_id,
-      capability_sha256: await sha256(capability),
-    };
-    if (!await verifyRequestProof(proofs.device, device.publicJwk, expected, now)) {
-      this.#receipt(ctx, correlationId, now, "deny", "device_proof_denied", claims);
-      throw new Error("device proof denied");
-    }
-    if (!await verifyRequestProof(proofs.agent, agent.publicJwk, expected, now)) {
-      this.#receipt(ctx, correlationId, now, "deny", "agent_proof_denied", claims);
-      throw new Error("agent proof denied");
-    }
-    const consumed = await this.store.consumeInvocation(ctx, {
-      principalId: ctx.userId,
-      principalEpoch: claims.principal_epoch,
-      agentId: claims.agent_id,
-      agentEpoch: claims.agent_epoch,
-      deviceId: claims.device_id,
-      deviceEpoch: claims.device_epoch,
-      grantId: claims.grant_id,
-      grantVersion: claims.grant_version,
-      connectionId: claims.connection_id,
-      connectionEpoch: claims.connection_epoch,
-      operation: "github.user.read",
-      nonceHash: await sha256(`${proofs.device.payload.nonce}:${proofs.agent.payload.nonce}`),
-      nonceExpiresAt: now + 600,
-      jtiHash: await sha256(claims.jti),
-      jtiExpiresAt: claims.exp,
-      now,
-    });
-    if (!consumed.ok) {
-      const reason = closedReason(consumed.reason);
-      this.#receipt(ctx, correlationId, now, "deny", reason, claims);
-      throw new Error(consumed.reason);
-    }
-    const binding: CustodyBinding = {
-      context: ctx,
-      connectionId: connection.id,
-      connectionRef: connection.custodyRef,
-      integration: "github-cairn-v1",
-      redirectUri: "https://fixture.cairn.invalid/oauth/github/callback",
-    };
-    const result = await invokeGithubUserRead(this.custody, binding, args),
-      duration = performance.now() - started;
-    const isError = result.outcome === "provider_unavailable";
-    const bytes = result.outcome === "success"
-      ? new TextEncoder().encode(JSON.stringify(result.user)).byteLength
-      : 0;
-    const receipt = makeReceipt({
-      correlationId,
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentId: claims.agent_id,
-      deviceId: claims.device_id,
-      connectionId: claims.connection_id,
-      operation: "github.user.read",
-      decision: isError ? "error" : "allow",
-      reason: isError ? "provider_failure" : "policy_allow",
-      at: now,
-      latency: duration < 100 ? "lt100ms" : duration < 1000 ? "lt1s" : "gte1s",
-      statusClass: result.outcome,
-      responseSize: bytes === 0 ? "none" : bytes < 4096 ? "lt4k" : "lt64k",
-      requestUnits: 1,
-      retryCount: 0,
-      redactionPolicyVersion: 1,
-    });
-    this.logger.emit({ type: "receipt", receipt });
-    return { result, receipt };
   }
   #receipt(
     ctx: TenantContext,
