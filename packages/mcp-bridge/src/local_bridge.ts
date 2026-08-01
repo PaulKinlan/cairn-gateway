@@ -288,8 +288,15 @@ function closedFixtureFacade(
   let legacySession: LegacyMcpSession | undefined;
   const dispatch = async (
     receivedBody: Uint8Array,
-    path: "/mcp" | "/mcp/legacy" = "/mcp",
+    path: unknown = "/mcp",
   ) => {
+    if (path !== "/mcp" && path !== "/mcp/legacy") {
+      return {
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32600, message: "route denied" },
+      };
+    }
     const mcp = await import("../../../apps/gateway/mcp.ts");
     const { auth, core } = await bridge.authorize(receivedBody, path);
     const session = path === "/mcp/legacy"

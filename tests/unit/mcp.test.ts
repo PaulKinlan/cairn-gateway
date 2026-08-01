@@ -170,10 +170,44 @@ Deno.test("public dispatch keeps exact-body authorization and core behind one op
   equals(denied, {
     jsonrpc: "2.0",
     id: null,
-    error: { code: -32700, message: "parse denied" },
+    error: { code: -32600, message: "route denied" },
   });
   assert(!("result" in (denied as Record<string, unknown>)));
 });
+Deno.test("public dispatch denies every unsupported runtime path before all tool handling", async () => {
+  const harness = await createFixtureGatewayHarness();
+  const runtimeDispatch = harness.dispatch as unknown as (
+    body: Uint8Array,
+    path: unknown,
+  ) => Promise<Record<string, unknown> | undefined>;
+  const denied = {
+    jsonrpc: "2.0",
+    id: null,
+    error: { code: -32600, message: "route denied" },
+  };
+  const requests = [
+    modern("search_capabilities", { query: "github" }),
+    modern("describe_operation", { operation: "github.user.read@v1" }),
+    modern("connection_status", { connection: "connection_a" }),
+    modern("invoke_operation", {
+      operation: "github.user.read@v1",
+      connection: "connection_a",
+      arguments: {},
+    }),
+  ];
+  for (const request of requests) {
+    equals(
+      await runtimeDispatch(encoder.encode(JSON.stringify(request)), "/attacker-selected"),
+      denied,
+    );
+  }
+  const searchBytes = encoder.encode(JSON.stringify(requests[0]));
+  for (const path of [null, 0, false, {}, [], Symbol("route")]) {
+    equals(await runtimeDispatch(searchBytes, path), denied);
+  }
+  assert("result" in (await harness.dispatch(searchBytes, "/mcp"))!);
+});
+
 Deno.test("legacy lifecycle requires initialized notification with internal per-request auth", async () => {
   const harness = await createFixtureGatewayHarness();
   const init = {
@@ -288,7 +322,7 @@ Deno.test("MCP public dispatch has no split body or direct core calling conventi
   equals(denied, {
     jsonrpc: "2.0",
     id: null,
-    error: { code: -32700, message: "parse denied" },
+    error: { code: -32600, message: "route denied" },
   });
   assert(!("result" in denied!));
   assert(!("authorize" in harness));

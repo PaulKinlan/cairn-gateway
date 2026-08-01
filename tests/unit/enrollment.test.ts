@@ -121,6 +121,63 @@ Deno.test("server challenge atomically bootstraps one opaque principal and binds
       (await store.getDevice(ctx, "device_a"))?.thumbprint,
   );
 });
+Deno.test("bootstrap requires an empty owner identity namespace", async () => {
+  const store = new MemoryStore();
+  const service = new DeviceEnrollmentService(store);
+  const device = await fixtureDeviceSigner(0), agent = await fixtureAgentSigner();
+  const deviceJwk = await device.publicJwk(), agentJwk = await agent.publicJwk();
+  await store.putAgent(ctx, {
+    id: ids.agent("agent_existing"),
+    tenantId: ctx.tenantId,
+    userId: ctx.userId,
+    publicJwk: deviceJwk,
+    thumbprint: await jwkThumbprint(deviceJwk),
+    status: "active",
+    epoch: 1,
+  });
+  const agentId = ids.agent("agent_bootstrap"), deviceId = ids.device("device_bootstrap");
+  const tx = {
+    action: "bootstrap",
+    principal_epoch: 1,
+    agent_epoch: 1,
+    device_epoch: 1,
+    tenant_id: ctx.tenantId,
+    user_id: ctx.userId,
+    principal_id: principal.id,
+    agent_id: agentId,
+    agent_jkt: await jwkThumbprint(agentJwk),
+    device_id: deviceId,
+    device_jkt: await jwkThumbprint(deviceJwk),
+  };
+  const challenge = await service.bootstrapChallenge(
+    ctx,
+    principal,
+    agentId,
+    agentJwk,
+    deviceId,
+    deviceJwk,
+    now,
+  );
+  await rejects(
+    async () =>
+      service.bootstrap(
+        ctx,
+        principal,
+        agentId,
+        agentJwk,
+        deviceId,
+        deviceJwk,
+        await proof(device, tx, challenge),
+        await proof(agent, tx, challenge),
+        now,
+      ),
+    "bootstrap denied",
+  );
+  equals(await store.getPrincipal(ctx, ctx.userId), undefined);
+  equals(await store.getAgent(ctx, agentId), undefined);
+  equals(await store.getDevice(ctx, deviceId), undefined);
+});
+
 Deno.test("two service instances sharing authority cannot race bootstrap", async () => {
   const backend = new MemoryAuthorityBackend(),
     a = new DeviceEnrollmentService(new MemoryStore(backend)),

@@ -29,6 +29,56 @@ import type {
   RemovalCommit,
 } from "./store.ts";
 
+function assertPlainData(value: unknown, active = new WeakSet<object>()): void {
+  if (value === null || ["string", "number", "boolean", "undefined"].includes(typeof value)) {
+    return;
+  }
+  if (typeof value !== "object") throw new Error("plain data denied");
+  const object = value as object;
+  if (active.has(object)) throw new Error("plain data denied");
+  active.add(object);
+  try {
+    const array = Array.isArray(object);
+    const prototype = Object.getPrototypeOf(object);
+    if (prototype !== (array ? Array.prototype : Object.prototype)) {
+      throw new Error("plain data denied");
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(object);
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key === "symbol") throw new Error("plain data denied");
+      const descriptor = descriptors[key];
+      if (!descriptor || !("value" in descriptor)) throw new Error("plain data denied");
+      if (!array && !descriptor.enumerable) throw new Error("plain data denied");
+      if (array && key !== "length" && !descriptor.enumerable) throw new Error("plain data denied");
+      assertPlainData(descriptor.value, active);
+    }
+  } finally {
+    active.delete(object);
+  }
+}
+
+function freezePlainData(value: unknown, seen = new WeakSet<object>()): void {
+  if (!value || typeof value !== "object" || seen.has(value as object)) return;
+  const object = value as Record<PropertyKey, unknown>;
+  seen.add(object);
+  for (const key of Reflect.ownKeys(object)) freezePlainData(object[key], seen);
+  Object.freeze(object);
+}
+
+/** Rejects accessors, exotic prototypes, symbols, cycles, and proxies before use. */
+function plainDataSnapshot<T>(value: T): Readonly<T> {
+  try {
+    assertPlainData(value);
+    // structuredClone rejects proxies even when their reflection traps imitate a plain record.
+    const snapshot = structuredClone(value);
+    assertPlainData(snapshot);
+    freezePlainData(snapshot);
+    return snapshot;
+  } catch {
+    throw new Error("plain data denied");
+  }
+}
+
 /** Authoritative fixture backend. Multiple service/store facades must share this object. */
 export class MemoryAuthorityBackend {
   principals = new Map<string, Principal>();
@@ -63,18 +113,20 @@ export class MemoryStore implements MetadataStore {
     }
   }
   async putPrincipal(ctx: TenantContext, value: Principal): Promise<void> {
-    this.#owned(ctx, { ...value, userId: value.id });
-    this.backend.principals.set(entityKey(ctx, "principal", value.id), structuredClone(value));
+    const snapshot = plainDataSnapshot(value);
+    this.#owned(ctx, { ...snapshot, userId: snapshot.id });
+    this.backend.principals.set(entityKey(ctx, "principal", snapshot.id), snapshot);
   }
   async getPrincipal(ctx: TenantContext, id: string): Promise<Principal | undefined> {
     return structuredClone(this.backend.principals.get(entityKey(ctx, "principal", id)));
   }
   async putAgent(ctx: TenantContext, value: Agent): Promise<void> {
-    this.#owned(ctx, value);
-    const thumbprint = await jwkThumbprint(value.publicJwk);
-    if (thumbprint !== value.thumbprint) throw new Error("agent key denied");
+    const snapshot = plainDataSnapshot(value);
+    this.#owned(ctx, snapshot);
+    const thumbprint = await jwkThumbprint(snapshot.publicJwk);
+    if (thumbprint !== snapshot.thumbprint) throw new Error("agent key denied");
     await this.backend.exclusive(async () => {
-      const key = entityKey(ctx, "agent", value.id);
+      const key = entityKey(ctx, "agent", snapshot.id);
       if (this.backend.agents.has(key)) throw new Error("agent exists");
       for (const device of this.backend.devices.values()) {
         if (device.tenantId !== ctx.tenantId || device.userId !== ctx.userId) continue;
@@ -82,18 +134,19 @@ export class MemoryStore implements MetadataStore {
         if (deviceThumbprint !== device.thumbprint) throw new Error("device key denied");
         if (deviceThumbprint === thumbprint) throw new Error("agent and device keys must differ");
       }
-      this.backend.agents.set(key, structuredClone(value));
+      this.backend.agents.set(key, snapshot);
     });
   }
   async getAgent(ctx: TenantContext, id: string): Promise<Agent | undefined> {
     return structuredClone(this.backend.agents.get(entityKey(ctx, "agent", id)));
   }
   async putDevice(ctx: TenantContext, value: Device): Promise<void> {
-    this.#owned(ctx, value);
-    const thumbprint = await jwkThumbprint(value.publicJwk);
-    if (thumbprint !== value.thumbprint) throw new Error("device key denied");
+    const snapshot = plainDataSnapshot(value);
+    this.#owned(ctx, snapshot);
+    const thumbprint = await jwkThumbprint(snapshot.publicJwk);
+    if (thumbprint !== snapshot.thumbprint) throw new Error("device key denied");
     await this.backend.exclusive(async () => {
-      const key = entityKey(ctx, "device", value.id);
+      const key = entityKey(ctx, "device", snapshot.id);
       if (this.backend.devices.has(key)) throw new Error("device exists");
       let referencedAgent: Agent | undefined;
       for (const agent of this.backend.agents.values()) {
@@ -101,10 +154,10 @@ export class MemoryStore implements MetadataStore {
         const agentThumbprint = await jwkThumbprint(agent.publicJwk);
         if (agentThumbprint !== agent.thumbprint) throw new Error("agent key denied");
         if (agentThumbprint === thumbprint) throw new Error("agent and device keys must differ");
-        if (agent.id === value.agentId) referencedAgent = agent;
+        if (agent.id === snapshot.agentId) referencedAgent = agent;
       }
       if (!referencedAgent) throw new Error("device agent denied");
-      this.backend.devices.set(key, structuredClone(value));
+      this.backend.devices.set(key, snapshot);
     });
   }
   async getDevice(ctx: TenantContext, id: string): Promise<Device | undefined> {
@@ -117,8 +170,9 @@ export class MemoryStore implements MetadataStore {
     ) => structuredClone(value));
   }
   async putEnrollment(ctx: TenantContext, value: EnrollmentRequest): Promise<void> {
-    this.#owned(ctx, value);
-    this.backend.enrollments.set(entityKey(ctx, "enrollment", value.id), structuredClone(value));
+    const snapshot = plainDataSnapshot(value);
+    this.#owned(ctx, snapshot);
+    this.backend.enrollments.set(entityKey(ctx, "enrollment", snapshot.id), snapshot);
   }
   async getEnrollment(ctx: TenantContext, id: string): Promise<EnrollmentRequest | undefined> {
     return structuredClone(this.backend.enrollments.get(entityKey(ctx, "enrollment", id)));
@@ -198,9 +252,11 @@ export class MemoryStore implements MetadataStore {
         value.device.thumbprint !== transaction.device_jkt ||
         transaction.agent_jkt === transaction.device_jkt ||
         this.backend.principals.has(entityKey(ctx, "principal", ctx.userId)) ||
-        this.backend.agents.has(entityKey(ctx, "agent", value.agent.id)) ||
-        [...this.backend.devices.keys()].some((key) =>
-          key.startsWith(`${ownerPrefix(ctx)}/device/`)
+        [...this.backend.agents.values()].some((agent) =>
+          agent.tenantId === ctx.tenantId && agent.userId === ctx.userId
+        ) ||
+        [...this.backend.devices.values()].some((device) =>
+          device.tenantId === ctx.tenantId && device.userId === ctx.userId
         )
       ) return false;
       if (!this.#consumeChallenge(ctx, challengeId, hash, "bootstrap", now)) return false;
@@ -437,7 +493,7 @@ export class MemoryStore implements MetadataStore {
         ? Number(previous.epoch)
         : Number((previous as unknown as Grant).version);
       if (version <= oldVersion) throw new Error("version must increase");
-      map.set(key, structuredClone(value));
+      map.set(key, value);
       if (value.status !== "active") {
         this.backend.revocations.push({
           tenantId: ctx.tenantId,
@@ -457,7 +513,16 @@ export class MemoryStore implements MetadataStore {
     reason?: RevocationEvent["reason"],
     at?: number,
   ): Promise<void> {
-    return this.#update(ctx, this.backend.principals, "principal", value, value.epoch, reason, at);
+    const snapshot = plainDataSnapshot(value);
+    return this.#update(
+      ctx,
+      this.backend.principals,
+      "principal",
+      snapshot,
+      snapshot.epoch,
+      reason,
+      at,
+    );
   }
   updateAgent(
     ctx: TenantContext,
@@ -465,7 +530,16 @@ export class MemoryStore implements MetadataStore {
     reason?: RevocationEvent["reason"],
     at?: number,
   ): Promise<void> {
-    return this.#update(ctx, this.backend.agents, "agent", value, value.epoch, reason, at);
+    const snapshot = plainDataSnapshot(value);
+    return this.#update(
+      ctx,
+      this.backend.agents,
+      "agent",
+      snapshot,
+      snapshot.epoch,
+      reason,
+      at,
+    );
   }
   updateDevice(
     ctx: TenantContext,
@@ -473,7 +547,16 @@ export class MemoryStore implements MetadataStore {
     reason?: RevocationEvent["reason"],
     at?: number,
   ): Promise<void> {
-    return this.#update(ctx, this.backend.devices, "device", value, value.epoch, reason, at);
+    const snapshot = plainDataSnapshot(value);
+    return this.#update(
+      ctx,
+      this.backend.devices,
+      "device",
+      snapshot,
+      snapshot.epoch,
+      reason,
+      at,
+    );
   }
   updateGrant(
     ctx: TenantContext,

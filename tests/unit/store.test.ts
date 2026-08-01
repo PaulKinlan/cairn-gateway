@@ -1,6 +1,7 @@
 import { assert, equals, rejects } from "../assert.ts";
 import { MemoryAuthorityBackend, MemoryStore } from "../../packages/core/src/store/memory_store.ts";
 import {
+  type Agent,
   type Connection,
   type Device,
   type Grant,
@@ -252,6 +253,107 @@ Deno.test("raw identity writes cannot drift or rotate JWK thumbprints", async ()
       }),
     "keys must differ",
   );
+});
+
+Deno.test("raw identity writes reject accessors, proxies, symbols, and exotic prototypes", async () => {
+  const store = new MemoryStore();
+  const { agent, device } = await seed(store);
+  const memberSigner = await fixtureDeviceSigner(1);
+  const memberJwk = await memberSigner.publicJwk();
+  const member: Device = {
+    ...device,
+    id: ids.device("device_hostile_member"),
+    publicJwk: memberJwk,
+    thumbprint: await jwkThumbprint(memberJwk),
+    role: "member",
+  };
+  await store.putDevice(ctx, member);
+  let roleReads = 0, agentIdReads = 0, jwkReads = 0, thumbprintReads = 0;
+
+  const roleAccessor = { ...member, epoch: 2 } as Device;
+  Object.defineProperty(roleAccessor, "role", {
+    enumerable: true,
+    get: () => {
+      roleReads++;
+      return roleReads === 1 ? "member" : "admin";
+    },
+  });
+  await rejects(() => store.updateDevice(ctx, roleAccessor), "plain data denied");
+
+  const agentIdAccessor = { ...member, epoch: 2 } as Device;
+  Object.defineProperty(agentIdAccessor, "agentId", {
+    enumerable: true,
+    get: () => {
+      agentIdReads++;
+      return agentIdReads === 1 ? agent.id : ids.agent("agent_other");
+    },
+  });
+  await rejects(() => store.updateDevice(ctx, agentIdAccessor), "plain data denied");
+
+  const jwkAccessor = { ...agent, id: ids.agent("agent_jwk_accessor") } as Agent;
+  Object.defineProperty(jwkAccessor, "publicJwk", {
+    enumerable: true,
+    get: () => {
+      jwkReads++;
+      return agent.publicJwk;
+    },
+  });
+  await rejects(() => store.putAgent(ctx, jwkAccessor), "plain data denied");
+
+  const thumbprintAccessor = { ...device, id: ids.device("device_jkt_accessor") } as Device;
+  Object.defineProperty(thumbprintAccessor, "thumbprint", {
+    enumerable: true,
+    get: () => {
+      thumbprintReads++;
+      return device.thumbprint;
+    },
+  });
+  await rejects(() => store.putDevice(ctx, thumbprintAccessor), "plain data denied");
+  equals([roleReads, agentIdReads, jwkReads, thumbprintReads], [0, 0, 0, 0]);
+
+  await rejects(
+    () =>
+      store.putAgent(
+        ctx,
+        new Proxy({ ...agent, id: ids.agent("agent_proxy") }, {}) as Agent,
+      ),
+    "plain data denied",
+  );
+  await rejects(
+    () =>
+      store.putAgent(ctx, {
+        ...agent,
+        id: ids.agent("agent_jwk_proxy"),
+        publicJwk: new Proxy(agent.publicJwk, {}),
+      }),
+    "plain data denied",
+  );
+  await rejects(
+    () =>
+      store.putAgent(
+        ctx,
+        new Proxy({ ...agent, id: ids.agent("agent_trap") }, {
+          ownKeys: () => {
+            throw new Error("trap ran");
+          },
+        }) as Agent,
+      ),
+    "plain data denied",
+  );
+
+  const symbolRecord = { ...agent, id: ids.agent("agent_symbol") } as Agent & {
+    [key: symbol]: string;
+  };
+  symbolRecord[Symbol("hidden")] = "denied";
+  await rejects(() => store.putAgent(ctx, symbolRecord), "plain data denied");
+  const exotic = Object.assign(Object.create({ inherited: true }), {
+    ...agent,
+    id: ids.agent("agent_exotic"),
+  }) as Agent;
+  await rejects(() => store.putAgent(ctx, exotic), "plain data denied");
+
+  equals((await store.getDevice(ctx, member.id))!.role, "member");
+  equals((await store.getDevice(ctx, member.id))!.agentId, agent.id);
 });
 
 Deno.test("device role, parent agent, and owner-wide agent/device key roles are immutable", async () => {
