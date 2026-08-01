@@ -36,6 +36,8 @@
     "check": "deno task check:stage0 && deno task check:stage1 && deno task check:preview"
   },
   "deploy": {
+    "org": "paulkinlan-ea",
+    "app": "cairn-gateway",
     "runtime": {
       "type": "dynamic",
       "entrypoint": "preview/main.ts"
