@@ -1,0 +1,9 @@
+{
+  "id": 123456,
+  "login": "fixture-user",
+  "name": "Fixture User",
+  "html_url": "https://github.com/fixture-user",
+  "avatar_url": "https://avatars.githubusercontent.com/u/123456?v=4",
+  "private_provider_field": "MUST_NOT_PROJECT",
+  "access_token": "PROVIDER_TOKEN_SENTINEL"
+}

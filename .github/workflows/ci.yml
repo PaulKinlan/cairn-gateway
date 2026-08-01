@@ -1,0 +1,12 @@
+name: offline-ci
+on: [push, pull_request]
+permissions: { contents: read }
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: denoland/setup-deno@667a34cdef165d8d2b2e98dde39547c9daac7282 # v2.0.5
+        with: { deno-version: "2.9.0" }
+      - run: deno task check
+      - run: git diff --exit-code -- deno.lock
