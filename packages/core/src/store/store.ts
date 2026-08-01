@@ -2,6 +2,7 @@ import type {
   Agent,
   Connection,
   Device,
+  EnrollmentChallenge,
   EnrollmentRequest,
   Grant,
   Principal,
@@ -10,6 +11,10 @@ import type {
 } from "../domain/types.ts";
 
 export interface InvocationBinding {
+  principalId: string;
+  principalEpoch: number;
+  agentId: string;
+  agentEpoch: number;
   deviceId: string;
   deviceEpoch: number;
   grantId: string;
@@ -24,6 +29,15 @@ export interface InvocationBinding {
   now: number;
 }
 export type InvocationDecision = { ok: true } | { ok: false; reason: string };
+export interface BootstrapCommit {
+  principal: Principal;
+  agent: Agent;
+  device: Device;
+}
+export interface ApprovalCommit {
+  requestId: string;
+  device: Device;
+}
 
 export interface MetadataStore {
   putPrincipal(ctx: TenantContext, value: Principal): Promise<void>;
@@ -39,12 +53,74 @@ export interface MetadataStore {
   getConnection(ctx: TenantContext, id: string): Promise<Connection | undefined>;
   putGrant(ctx: TenantContext, value: Grant): Promise<void>;
   getGrant(ctx: TenantContext, id: string): Promise<Grant | undefined>;
-  updateDevice(ctx: TenantContext, value: Device, event?: RevocationEvent): Promise<void>;
-  updateGrant(ctx: TenantContext, value: Grant, event?: RevocationEvent): Promise<void>;
-  updateConnection(ctx: TenantContext, value: Connection, event?: RevocationEvent): Promise<void>;
+  issueChallenge(ctx: TenantContext, value: EnrollmentChallenge): Promise<void>;
+  commitBootstrap(
+    ctx: TenantContext,
+    challengeId: string,
+    transactionHash: string,
+    value: BootstrapCommit,
+    now: number,
+  ): Promise<boolean>;
+  commitEnrollmentRequest(
+    ctx: TenantContext,
+    challengeId: string,
+    transactionHash: string,
+    value: EnrollmentRequest,
+    now: number,
+  ): Promise<boolean>;
+  commitApproval(
+    ctx: TenantContext,
+    challengeId: string,
+    transactionHash: string,
+    value: ApprovalCommit,
+    now: number,
+  ): Promise<boolean>;
+  consumeChallenge(
+    ctx: TenantContext,
+    challengeId: string,
+    transactionHash: string,
+    purpose: EnrollmentChallenge["purpose"],
+    now: number,
+  ): Promise<boolean>;
+  updatePrincipal(
+    ctx: TenantContext,
+    value: Principal,
+    reason?: RevocationEvent["reason"],
+    at?: number,
+  ): Promise<void>;
+  updateAgent(
+    ctx: TenantContext,
+    value: Agent,
+    reason?: RevocationEvent["reason"],
+    at?: number,
+  ): Promise<void>;
+  updateDevice(
+    ctx: TenantContext,
+    value: Device,
+    reason?: RevocationEvent["reason"],
+    at?: number,
+  ): Promise<void>;
+  updateGrant(
+    ctx: TenantContext,
+    value: Grant,
+    reason?: RevocationEvent["reason"],
+    at?: number,
+  ): Promise<void>;
+  updateConnection(
+    ctx: TenantContext,
+    value: Connection,
+    reason?: RevocationEvent["reason"],
+    at?: number,
+  ): Promise<void>;
   consumeNonce(
     ctx: TenantContext,
     nonceHash: string,
+    expiresAt: number,
+    now: number,
+  ): Promise<boolean>;
+  consumeNonces(
+    ctx: TenantContext,
+    nonceHashes: string[],
     expiresAt: number,
     now: number,
   ): Promise<boolean>;

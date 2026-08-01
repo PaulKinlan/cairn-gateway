@@ -2,6 +2,7 @@ import { assert, rejects } from "../assert.ts";
 import { invokeGithubUserRead } from "../../packages/core/src/connectors/github_user.ts";
 import type {
   CustodyAdapter,
+  CustodyBinding,
   CustodyResponse,
   FixedOperationInput,
 } from "../../packages/core/src/custody/custody_adapter.ts";
@@ -17,7 +18,7 @@ class ResponseFixture implements CustodyAdapter {
   connectionStatus() {
     return Promise.resolve({ status: "active" as const });
   }
-  proxyOperation(_ref: string, input: FixedOperationInput) {
+  proxyOperation(_binding: CustodyBinding, input: FixedOperationInput) {
     assert(
       input.path === "/user" && input.method === "GET" && input.integration === "github-cairn-v1",
     );
@@ -27,6 +28,13 @@ class ResponseFixture implements CustodyAdapter {
     return Promise.resolve({ status: "revoked" as const });
   }
 }
+const binding: CustodyBinding = {
+  context: { tenantId: "tenant_a" as never, userId: "user_a" as never },
+  connectionId: "connection_a",
+  connectionRef: "ref",
+  integration: "github-cairn-v1",
+  redirectUri: "https://fixture.cairn.invalid/oauth/github/callback",
+};
 const response = (body: unknown, contentType = "application/json"): CustodyResponse => ({
   outcome: "success",
   status: 200,
@@ -52,7 +60,7 @@ Deno.test("SSRF-shaped connector arguments are rejected before custody", async (
     ]
   ) {
     await rejects(
-      () => invokeGithubUserRead(new ResponseFixture(response(good)), "ref", args),
+      () => invokeGithubUserRead(new ResponseFixture(response(good)), binding, args),
       "arguments denied",
     );
   }
@@ -69,7 +77,7 @@ Deno.test("projector rejects unsafe reflected URLs", async () => {
   ) {
     const result = await invokeGithubUserRead(
       new ResponseFixture(response({ ...good, html_url: url })),
-      "ref",
+      binding,
       {},
     );
     assert(result.outcome === "provider_unavailable");
@@ -77,7 +85,7 @@ Deno.test("projector rejects unsafe reflected URLs", async () => {
 });
 Deno.test("projector denies wrong content type and oversized response", async () => {
   assert(
-    (await invokeGithubUserRead(new ResponseFixture(response(good, "text/html")), "ref", {}))
+    (await invokeGithubUserRead(new ResponseFixture(response(good, "text/html")), binding, {}))
       .outcome === "provider_unavailable",
   );
   const oversized: CustodyResponse = {
@@ -87,14 +95,14 @@ Deno.test("projector denies wrong content type and oversized response", async ()
     body: new Uint8Array(65_537),
   };
   assert(
-    (await invokeGithubUserRead(new ResponseFixture(oversized), "ref", {})).outcome ===
+    (await invokeGithubUserRead(new ResponseFixture(oversized), binding, {})).outcome ===
       "provider_unavailable",
   );
 });
 Deno.test("projector drops unknown provider fields and sentinels", async () => {
   const result = await invokeGithubUserRead(
     new ResponseFixture(response({ ...good, tokenish_field: "PROVIDER_SENTINEL_9x" })),
-    "ref",
+    binding,
     {},
   );
   assert(result.outcome === "success" && !JSON.stringify(result).includes("PROVIDER_SENTINEL_9x"));
@@ -111,7 +119,7 @@ Deno.test("schema poisoning types fail safely", async () => {
     ]
   ) {
     assert(
-      (await invokeGithubUserRead(new ResponseFixture(response(poisoned)), "ref", {})).outcome ===
+      (await invokeGithubUserRead(new ResponseFixture(response(poisoned)), binding, {})).outcome ===
         "provider_unavailable",
     );
   }
@@ -143,7 +151,7 @@ Deno.test("property sweep of hostile argument keys always denies", async () => {
   for (let i = 0; i < 128; i++) {
     const key = `${alphabet[i % alphabet.length]}_${i}`;
     await rejects(() =>
-      invokeGithubUserRead(new ResponseFixture(response(good)), "ref", { [key]: `value_${i}` })
+      invokeGithubUserRead(new ResponseFixture(response(good)), binding, { [key]: `value_${i}` })
     );
   }
 });

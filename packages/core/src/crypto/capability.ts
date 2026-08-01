@@ -19,6 +19,8 @@ export interface CapabilityClaims {
   cnf: { jkt: string };
   grant_id: string;
   grant_version: number;
+  principal_epoch: number;
+  agent_epoch: number;
   device_epoch: number;
   connection_epoch: number;
   policy_version: number;
@@ -29,6 +31,7 @@ export interface CapabilityKeyring {
   verificationKey(kid: string, at: number): Promise<JsonWebKey | undefined>;
 }
 const claimKeys = [
+  "agent_epoch",
   "agent_id",
   "aud",
   "cnf",
@@ -46,6 +49,7 @@ const claimKeys = [
   "nbf",
   "operations",
   "policy_version",
+  "principal_epoch",
   "schema_version",
   "sub",
   "tenant_id",
@@ -116,7 +120,7 @@ function validateClaims(claims: CapabilityClaims, now: number): void {
     !claims.cnf || !exactKeys(claims.cnf as unknown as Record<string, unknown>, ["jkt"]) ||
     typeof claims.cnf.jkt !== "string" || claims.exp - claims.iat > 300 ||
     claims.exp <= claims.iat ||
-    claims.nbf < claims.iat || now < claims.nbf - 30 || now > claims.exp + 30 ||
+    claims.nbf < claims.iat || now < claims.nbf - 30 || now > claims.exp ||
     !Number.isInteger(claims.iat) || !Number.isInteger(claims.nbf) || !Number.isInteger(claims.exp)
   ) {
     throw new Error("invalid capability");

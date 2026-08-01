@@ -1,9 +1,17 @@
+import type { TenantContext } from "../domain/types.ts";
 export type SafeOutcome =
   | "success"
   | "auth_required"
   | "rate_limited"
   | "provider_denied"
   | "provider_unavailable";
+export interface CustodyBinding {
+  context: TenantContext;
+  connectionId: string;
+  connectionRef: string;
+  integration: "github-cairn-v1";
+  redirectUri: "https://fixture.cairn.invalid/oauth/github/callback";
+}
 export interface AuthorizationStart {
   handle: string;
   callbackOwnership: "gateway" | "custodian";
@@ -29,12 +37,19 @@ export interface CustodyResponse {
 }
 export interface CustodyAdapter {
   beginAuthorization(
-    input: { flowId: string; connectionRef: string; now: number },
+    input: { flowId: string; binding: CustodyBinding; now: number },
   ): Promise<AuthorizationStart>;
   completeAuthorization(
-    input: { flowId: string; state: string; code: string; verifier: string; now: number },
+    input: {
+      flowId: string;
+      binding: CustodyBinding;
+      state: string;
+      code: string;
+      verifier: string;
+      now: number;
+    },
   ): Promise<AuthorizationCompletion>;
-  connectionStatus(connectionRef: string): Promise<ConnectionHealth>;
-  proxyOperation(connectionRef: string, input: FixedOperationInput): Promise<CustodyResponse>;
-  revokeConnection(connectionRef: string): Promise<{ status: "revoked" }>;
+  connectionStatus(binding: CustodyBinding): Promise<ConnectionHealth>;
+  proxyOperation(binding: CustodyBinding, input: FixedOperationInput): Promise<CustodyResponse>;
+  revokeConnection(binding: CustodyBinding): Promise<{ status: "revoked" }>;
 }

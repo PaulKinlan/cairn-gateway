@@ -11,10 +11,11 @@
     "test:integration": "deno test tests/integration",
     "test:security": "deno test --allow-read=. --allow-run=git tests/security",
     "test": "deno task test:unit && deno task test:integration && deno task test:security",
-    "coverage": "deno test --coverage=.coverage tests/unit tests/integration && deno coverage .coverage --detailed",
+    "coverage": "rm -rf .coverage && deno test --allow-read=. --allow-run=git --coverage=.coverage tests/unit tests/integration tests/security && deno coverage .coverage --detailed --threshold=70",
     "security": "deno task test:security && deno run --allow-read=. --allow-run=git scripts/security_check.ts",
-    "audit": "deno info --json packages/core/mod.ts >/dev/null",
-    "check": "deno task fmt && deno task lint && deno task typecheck && deno task test && deno task security && deno task audit"
+    "dependency-graph": "deno info --json packages/core/mod.ts >/dev/null",
+    "dependency-audit": "deno audit",
+    "check": "deno task fmt && deno task lint && deno task typecheck && deno task test && deno task security && deno task dependency-graph && deno task dependency-audit && deno task coverage"
   },
   "lock": { "frozen": true }
 }

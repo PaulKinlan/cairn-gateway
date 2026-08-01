@@ -1,0 +1,19 @@
+{
+  "capturedAt": "2026-08-01",
+  "purpose": "offline schema reference only; not a dependency or conformance attestation",
+  "package": "@modelcontextprotocol/sdk",
+  "version": "1.30.0",
+  "localCachePackageJsonSha256": "0690cbe02511a95d1ff199acf20b5a12ac4dfde1bbe30c82a0de73afa92dffc9",
+  "localCacheEsmTypesSha256": "962836b0f8dad85bcd398ad3ddb5ba81a7c7530c706955aa846dd8dfc02dd6a9",
+  "sourceFile": "dist/esm/types.js",
+  "observedExports": {
+    "ToolSchema": "requires root inputSchema.type object",
+    "ListToolsResultSchema": "requires tools array of ToolSchema",
+    "CallToolResultSchema": "structuredContent is a string-keyed object; tool errors use isError"
+  },
+  "limitations": [
+    "No package was copied or imported into Cairn.",
+    "No 2026-07-28 support or conformance is inferred from this legacy SDK reference.",
+    "Exact SDK release selection and named-client validation remain activation blockers."
+  ]
+}

@@ -31,6 +31,12 @@ Deno.test("runtime has no network, environment, live KV, or remote dependency ac
     assert(!/from\s+["'](?:https?:|npm:|jsr:)/.test(source), file);
   }
 });
+Deno.test("public core excludes raw store and fixture mutation surfaces", async () => {
+  const source = await Deno.readTextFile("packages/core/mod.ts");
+  assert(!source.includes("store/store.ts"));
+  assert(!source.includes("store/memory_store.ts"));
+  assert(!source.includes("custody/memory_fixture.ts"));
+});
 Deno.test("MCP surface remains exact and fixture-only", () => {
   equals([...TOOL_NAMES], [
     "search_capabilities",

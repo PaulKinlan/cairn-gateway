@@ -8,7 +8,6 @@ export interface TenantContext {
   tenantId: TenantId;
   userId: UserId;
 }
-
 export type Status = "active" | "disabled" | "revoked";
 export interface Principal {
   id: UserId;
@@ -16,6 +15,7 @@ export interface Principal {
   kind: "cryptographic";
   status: Status;
   emailRequired: false;
+  epoch: number;
 }
 export interface Agent {
   id: AgentId;
@@ -24,6 +24,7 @@ export interface Agent {
   publicJwk: JsonWebKey;
   thumbprint: string;
   status: Status;
+  epoch: number;
 }
 export interface Device {
   id: DeviceId;
@@ -58,6 +59,20 @@ export interface Grant {
   version: number;
   expiresAt: number;
 }
+export type ChallengePurpose =
+  | "bootstrap"
+  | "enroll_candidate"
+  | "approve_enrollment"
+  | "remove_device";
+export interface EnrollmentChallenge {
+  id: string;
+  tenantId: TenantId;
+  userId: UserId;
+  purpose: ChallengePurpose;
+  transactionHash: string;
+  expiresAt: number;
+  used: boolean;
+}
 export interface EnrollmentRequest {
   id: string;
   tenantId: TenantId;
@@ -65,13 +80,13 @@ export interface EnrollmentRequest {
   agentId: AgentId;
   candidateJwk: JsonWebKey;
   thumbprint: string;
-  challenge: string;
   status: "pending" | "approved" | "rejected";
   expiresAt: number;
 }
 export interface RevocationEvent {
   tenantId: TenantId;
-  subjectType: "device" | "grant" | "connection";
+  userId: UserId;
+  subjectType: "principal" | "agent" | "device" | "grant" | "connection";
   subjectId: string;
   version: number;
   reason: "operator" | "compromise" | "expired";

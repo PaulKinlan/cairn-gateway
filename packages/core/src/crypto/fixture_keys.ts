@@ -484,8 +484,17 @@ export async function fixtureAgentSigner(): Promise<DeviceSigner> {
       ),
   };
 }
+let fixtureIssuerPair: Promise<CryptoKeyPair> | undefined;
+function issuerPair(): Promise<CryptoKeyPair> {
+  fixtureIssuerPair ??= crypto.subtle.generateKey(
+    { name: "ECDSA", namedCurve: "P-256" },
+    false,
+    ["sign", "verify"],
+  );
+  return fixtureIssuerPair;
+}
 export async function fixtureCapabilityKeyring(): Promise<CapabilityKeyring> {
-  const pair = await importPair(2);
+  const pair = await issuerPair();
   const publicJwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
   return {
     active: () => Promise.resolve({ kid: "fixture-2026-08", privateKey: pair.privateKey }),

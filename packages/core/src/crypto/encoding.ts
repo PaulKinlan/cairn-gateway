@@ -33,7 +33,7 @@ export function canonical(value: unknown): string {
     const entries = Object.entries(value as Record<string, unknown>).filter(([, item]) =>
       item !== undefined
     )
-      .sort(([a], [b]) => a.localeCompare(b));
+      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
     return `{${
       entries.map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")
     }}`;

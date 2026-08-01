@@ -3,13 +3,16 @@ import type { MetadataStore } from "../store/store.ts";
 import type { CapabilityKeyring } from "../crypto/capability.ts";
 import { type CapabilityClaims, signCapability, verifyCapability } from "../crypto/capability.ts";
 import type { DetachedProof } from "../crypto/request_proof.ts";
-import { verifyRequestProof } from "../crypto/request_proof.ts";
+import { bodyHash, verifyRequestProof } from "../crypto/request_proof.ts";
 import { sha256 } from "../crypto/encoding.ts";
-import type { CustodyAdapter } from "../custody/custody_adapter.ts";
+import type { CustodyAdapter, CustodyBinding } from "../custody/custody_adapter.ts";
 import { type GithubResult, invokeGithubUserRead } from "../connectors/github_user.ts";
 import type { SafeLogger } from "../logging/safe_logger.ts";
-import { makeReceipt, type Receipt } from "../receipts/receipt.ts";
-
+import { makeReceipt, type Receipt, type ReceiptReason } from "../receipts/receipt.ts";
+export interface DualProof {
+  device: DetachedProof;
+  agent: DetachedProof;
+}
 export class InvocationService {
   constructor(
     private readonly store: MetadataStore,
@@ -22,19 +25,24 @@ export class InvocationService {
   async issue(
     ctx: TenantContext,
     grantId: string,
-    proof: DetachedProof,
+    proofs: DualProof,
+    receivedBody: Uint8Array,
     now: number,
   ): Promise<string> {
     if (!this.invocationEnabled) throw new Error("invocation disabled");
-    const grant = await this.store.getGrant(ctx, grantId);
-    if (!grant || grant.status !== "active" || grant.expiresAt < now) {
-      throw new Error("grant denied");
-    }
-    const device = await this.store.getDevice(ctx, grant.deviceId);
-    const connection = await this.store.getConnection(ctx, grant.connectionId);
-    if (!device || device.status !== "active" || !connection || connection.status !== "active") {
-      throw new Error("grant denied");
-    }
+    const grant = await this.store.getGrant(ctx, grantId),
+      principal = await this.store.getPrincipal(ctx, ctx.userId);
+    if (
+      !grant || grant.status !== "active" || grant.expiresAt < now || !principal ||
+      principal.status !== "active"
+    ) throw new Error("grant denied");
+    const agent = await this.store.getAgent(ctx, grant.agentId),
+      device = await this.store.getDevice(ctx, grant.deviceId),
+      connection = await this.store.getConnection(ctx, grant.connectionId);
+    if (
+      !agent || agent.status !== "active" || !device || device.status !== "active" ||
+      device.agentId !== agent.id || !connection || connection.status !== "active"
+    ) throw new Error("grant denied");
     const expected = {
       v: 1 as const,
       method: "POST" as const,
@@ -42,16 +50,28 @@ export class InvocationService {
       path: "/internal/capabilities" as const,
       query: "" as const,
       audience: "urn:cairn:gateway" as const,
-      body_sha256: proof.payload.body_sha256,
+      body_sha256: await bodyHash(receivedBody),
       device_id: device.id,
+      agent_id: agent.id,
       grant_id: grant.id,
     };
-    if (!await verifyRequestProof(proof, device.publicJwk, expected, now)) {
+    if (!await verifyRequestProof(proofs.device, device.publicJwk, expected, now)) {
       throw new Error("device proof denied");
     }
-    if (!await this.store.consumeNonce(ctx, await sha256(proof.payload.nonce), now + 600, now)) {
-      throw new Error("nonce replay");
+    if (!await verifyRequestProof(proofs.agent, agent.publicJwk, expected, now)) {
+      throw new Error("agent proof denied");
     }
+    if (
+      !await this.store.consumeNonces(
+        ctx,
+        [
+          await sha256(`device:${proofs.device.payload.nonce}`),
+          await sha256(`agent:${proofs.agent.payload.nonce}`),
+        ],
+        now + 600,
+        now,
+      )
+    ) throw new Error("nonce replay");
     const claims: CapabilityClaims = {
       iss: "urn:cairn:gateway",
       aud: "urn:cairn:invoke",
@@ -70,6 +90,8 @@ export class InvocationService {
       cnf: { jkt: device.thumbprint },
       grant_id: grant.id,
       grant_version: grant.version,
+      principal_epoch: principal.epoch,
+      agent_epoch: agent.epoch,
       device_epoch: device.epoch,
       connection_epoch: connection.epoch,
       policy_version: 1,
@@ -80,37 +102,43 @@ export class InvocationService {
   async invoke(
     ctx: TenantContext,
     capability: string,
-    proof: DetachedProof,
+    proofs: DualProof,
     args: unknown,
+    receivedBody: Uint8Array,
     now: number,
     correlationId: string,
   ): Promise<{ result: GithubResult; receipt: Receipt }> {
     const started = performance.now();
     if (!this.invocationEnabled) {
-      this.#deny(ctx, correlationId, now, "invocation_disabled");
+      this.#receipt(ctx, correlationId, now, "deny", "invocation_disabled");
       throw new Error("invocation disabled");
     }
     let claims: CapabilityClaims;
     try {
       claims = await verifyCapability(this.keys, capability, now);
     } catch {
-      this.#deny(ctx, correlationId, now, "capability_invalid");
+      this.#receipt(ctx, correlationId, now, "deny", "capability_invalid");
       throw new Error("capability invalid");
     }
     if (claims.tenant_id !== ctx.tenantId || claims.user_id !== ctx.userId) {
-      this.#deny(ctx, correlationId, now, "ownership_denied", claims);
+      this.#receipt(ctx, correlationId, now, "deny", "ownership_denied", claims);
       throw new Error("ownership denied");
     }
-    const device = await this.store.getDevice(ctx, claims.device_id);
-    const connection = await this.store.getConnection(ctx, claims.connection_id);
-    if (!device || !connection || claims.cnf.jkt !== device.thumbprint) {
-      this.#deny(ctx, correlationId, now, "binding_denied", claims);
+    const principal = await this.store.getPrincipal(ctx, ctx.userId),
+      agent = await this.store.getAgent(ctx, claims.agent_id),
+      device = await this.store.getDevice(ctx, claims.device_id),
+      connection = await this.store.getConnection(ctx, claims.connection_id);
+    if (
+      !principal || !agent || !device || !connection || claims.cnf.jkt !== device.thumbprint ||
+      device.agentId !== agent.id
+    ) {
+      this.#receipt(ctx, correlationId, now, "deny", "binding_denied", claims);
       throw new Error("binding denied");
     }
     if (
       !args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length !== 0
     ) {
-      this.#deny(ctx, correlationId, now, "arguments_denied", claims);
+      this.#receipt(ctx, correlationId, now, "deny", "arguments_denied", claims);
       throw new Error("arguments denied");
     }
     const expected = {
@@ -120,16 +148,25 @@ export class InvocationService {
       path: "/mcp" as const,
       query: "" as const,
       audience: "urn:cairn:gateway" as const,
-      body_sha256: proof.payload.body_sha256,
+      body_sha256: await bodyHash(receivedBody),
       device_id: device.id,
+      agent_id: agent.id,
       grant_id: claims.grant_id,
       capability_sha256: await sha256(capability),
     };
-    if (!await verifyRequestProof(proof, device.publicJwk, expected, now)) {
-      this.#deny(ctx, correlationId, now, "device_proof_denied", claims);
+    if (!await verifyRequestProof(proofs.device, device.publicJwk, expected, now)) {
+      this.#receipt(ctx, correlationId, now, "deny", "device_proof_denied", claims);
       throw new Error("device proof denied");
     }
+    if (!await verifyRequestProof(proofs.agent, agent.publicJwk, expected, now)) {
+      this.#receipt(ctx, correlationId, now, "deny", "agent_proof_denied", claims);
+      throw new Error("agent proof denied");
+    }
     const consumed = await this.store.consumeInvocation(ctx, {
+      principalId: ctx.userId,
+      principalEpoch: claims.principal_epoch,
+      agentId: claims.agent_id,
+      agentEpoch: claims.agent_epoch,
       deviceId: claims.device_id,
       deviceEpoch: claims.device_epoch,
       grantId: claims.grant_id,
@@ -137,18 +174,30 @@ export class InvocationService {
       connectionId: claims.connection_id,
       connectionEpoch: claims.connection_epoch,
       operation: "github.user.read",
-      nonceHash: await sha256(proof.payload.nonce),
+      nonceHash: await sha256(`${proofs.device.payload.nonce}:${proofs.agent.payload.nonce}`),
       nonceExpiresAt: now + 600,
       jtiHash: await sha256(claims.jti),
-      jtiExpiresAt: claims.exp + 30,
+      jtiExpiresAt: claims.exp,
       now,
     });
     if (!consumed.ok) {
-      this.#deny(ctx, correlationId, now, consumed.reason.replaceAll(" ", "_"), claims);
+      const reason = closedReason(consumed.reason);
+      this.#receipt(ctx, correlationId, now, "deny", reason, claims);
       throw new Error(consumed.reason);
     }
-    const result = await invokeGithubUserRead(this.custody, connection.custodyRef, args);
-    const duration = performance.now() - started;
+    const binding: CustodyBinding = {
+      context: ctx,
+      connectionId: connection.id,
+      connectionRef: connection.custodyRef,
+      integration: "github-cairn-v1",
+      redirectUri: "https://fixture.cairn.invalid/oauth/github/callback",
+    };
+    const result = await invokeGithubUserRead(this.custody, binding, args),
+      duration = performance.now() - started;
+    const isError = result.outcome === "provider_unavailable";
+    const bytes = result.outcome === "success"
+      ? new TextEncoder().encode(JSON.stringify(result.user)).byteLength
+      : 0;
     const receipt = makeReceipt({
       correlationId,
       tenantId: ctx.tenantId,
@@ -157,12 +206,12 @@ export class InvocationService {
       deviceId: claims.device_id,
       connectionId: claims.connection_id,
       operation: "github.user.read",
-      decision: "allow",
-      reason: "policy_allow",
+      decision: isError ? "error" : "allow",
+      reason: isError ? "provider_failure" : "policy_allow",
       at: now,
       latency: duration < 100 ? "lt100ms" : duration < 1000 ? "lt1s" : "gte1s",
       statusClass: result.outcome,
-      responseSize: result.outcome === "success" ? "lt4k" : "none",
+      responseSize: bytes === 0 ? "none" : bytes < 4096 ? "lt4k" : "lt64k",
       requestUnits: 1,
       retryCount: 0,
       redactionPolicyVersion: 1,
@@ -170,31 +219,48 @@ export class InvocationService {
     this.logger.emit({ type: "receipt", receipt });
     return { result, receipt };
   }
-  #deny(
+  #receipt(
     ctx: TenantContext,
     correlationId: string,
     now: number,
-    reason: string,
+    decision: "deny" | "error",
+    reason: ReceiptReason,
     claims?: CapabilityClaims,
   ): void {
-    const receipt = makeReceipt({
-      correlationId,
-      tenantId: ctx.tenantId,
-      userId: ctx.userId,
-      agentId: claims?.agent_id ?? "unknown",
-      deviceId: claims?.device_id ?? "unknown",
-      connectionId: claims?.connection_id ?? "unknown",
-      operation: "github.user.read",
-      decision: "deny",
-      reason,
-      at: now,
-      latency: "lt100ms",
-      statusClass: "policy_denied",
-      responseSize: "none",
-      requestUnits: 0,
-      retryCount: 0,
-      redactionPolicyVersion: 1,
+    this.logger.emit({
+      type: "receipt",
+      receipt: makeReceipt({
+        correlationId,
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        agentId: claims?.agent_id ?? "unknown",
+        deviceId: claims?.device_id ?? "unknown",
+        connectionId: claims?.connection_id ?? "unknown",
+        operation: "github.user.read",
+        decision,
+        reason,
+        at: now,
+        latency: "lt100ms",
+        statusClass: decision === "error" ? "provider_unavailable" : "policy_denied",
+        responseSize: "none",
+        requestUnits: 0,
+        retryCount: 0,
+        redactionPolicyVersion: 1,
+      }),
     });
-    this.logger.emit({ type: "receipt", receipt });
   }
+}
+function closedReason(reason: string): ReceiptReason {
+  const value = reason.replaceAll(" ", "_");
+  return ([
+      "principal_inactive",
+      "agent_inactive",
+      "device_inactive",
+      "grant_inactive",
+      "connection_inactive",
+      "nonce_replay",
+      "capability_replay",
+    ] as string[]).includes(value)
+    ? value as ReceiptReason
+    : "binding_denied";
 }

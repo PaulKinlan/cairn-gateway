@@ -1,5 +1,7 @@
 import { assert, equals, rejects } from "../assert.ts";
+import { makeReceipt } from "../../packages/core/src/receipts/receipt.ts";
 import {
+  fixtureAgentSigner,
   fixtureCapabilityKeyring,
   fixtureDeviceSigner,
 } from "../../packages/core/src/crypto/fixture_keys.ts";
@@ -42,6 +44,8 @@ async function claims(): Promise<CapabilityClaims> {
     cnf: { jkt: await jwkThumbprint(await signer.publicJwk()) },
     grant_id: "grant_a",
     grant_version: 1,
+    principal_epoch: 1,
+    agent_epoch: 1,
     device_epoch: 1,
     connection_epoch: 1,
     policy_version: 1,
@@ -88,7 +92,7 @@ Deno.test("overlong and expired capabilities are denied", async () => {
   await rejects(() => signCapability(keyring, overlong), "invalid");
   const good = await claims();
   const token = await signCapability(keyring, good);
-  await rejects(() => verifyCapability(keyring, token, now + 331), "invalid");
+  await rejects(() => verifyCapability(keyring, token, now + 301), "invalid");
 });
 Deno.test("unknown semantic capability claim is denied", async () => {
   const keyring = await fixtureCapabilityKeyring();
@@ -116,6 +120,7 @@ Deno.test("detached device proof binds query audience grant body and capability"
     issued_at: now,
     nonce: "nonce_012345678901234567890",
     device_id: signer.deviceId,
+    agent_id: "agent_a",
     grant_id: "grant_a",
     capability_sha256: "cap_hash",
   };
@@ -151,6 +156,7 @@ Deno.test("device proof timestamp outside skew is denied", async () => {
     issued_at: now,
     nonce: "nonce_012345678901234567890",
     device_id: signer.deviceId,
+    agent_id: "agent_a",
   };
   assert(
     !await verifyRequestProof(
@@ -160,6 +166,61 @@ Deno.test("device proof timestamp outside skew is denied", async () => {
       now + 31,
     ),
   );
+});
+Deno.test("agent key and capability issuer key are cryptographically distinct", async () => {
+  const agent = await fixtureAgentSigner(), keyring = await fixtureCapabilityKeyring();
+  const issuer = await keyring.verificationKey("fixture-2026-08", now);
+  assert(issuer);
+  assert(await jwkThumbprint(await agent.publicJwk()) !== await jwkThumbprint(issuer));
+});
+Deno.test("request proof rejects unknown semantic members", async () => {
+  const signer = await fixtureDeviceSigner(0),
+    payload: RequestProofPayload = {
+      v: 1,
+      method: "POST",
+      authority: "fixture.cairn.invalid",
+      path: "/mcp",
+      query: "",
+      audience: "urn:cairn:gateway",
+      body_sha256: "hash",
+      issued_at: now,
+      nonce: "nonce_unknown_01234567890",
+      device_id: signer.deviceId,
+      agent_id: "agent_a",
+    };
+  const proof = await signRequestProof(
+    signer,
+    { ...payload, scope: "admin" } as RequestProofPayload,
+  );
+  assert(!await verifyRequestProof(proof, await signer.publicJwk(), payload, now));
+});
+Deno.test("receipt runtime gate sanitizes identifiers and rejects open reasons", () => {
+  const base = {
+    correlationId: "raw\nsecret",
+    tenantId: "tenant",
+    userId: "user",
+    agentId: "agent",
+    deviceId: "device",
+    connectionId: "connection",
+    operation: "github.user.read" as const,
+    decision: "deny" as const,
+    reason: "binding_denied" as const,
+    at: now,
+    latency: "lt100ms" as const,
+    statusClass: "policy_denied" as const,
+    responseSize: "none" as const,
+    requestUnits: 0 as const,
+    retryCount: 0 as const,
+    redactionPolicyVersion: 1 as const,
+  };
+  equals(makeReceipt(base).correlationId, "invalid");
+  let denied = false;
+  try {
+    makeReceipt({ ...base, reason: "raw_provider_error" as never });
+  } catch {
+    denied = true;
+  }
+  assert(denied);
 });
 Deno.test("flow PKCE material uses bound non-extractable AEAD", async () => {
   const key = await generateFlowKey();

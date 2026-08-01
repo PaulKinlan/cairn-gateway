@@ -1,5 +1,4 @@
-import type { CustodyAdapter, SafeOutcome } from "../custody/custody_adapter.ts";
-
+import type { CustodyAdapter, CustodyBinding, SafeOutcome } from "../custody/custody_adapter.ts";
 export const GITHUB_USER_READ = Object.freeze({
   id: "github.user.read@v1",
   operation: "github.user.read" as const,
@@ -30,21 +29,25 @@ export interface GithubUserProjection {
 export type GithubResult = { outcome: "success"; user: GithubUserProjection } | {
   outcome: Exclude<SafeOutcome, "success">;
 };
-
 export async function invokeGithubUserRead(
   adapter: CustodyAdapter,
-  connectionRef: string,
+  binding: CustodyBinding,
   args: unknown,
 ): Promise<GithubResult> {
   if (!args || typeof args !== "object" || Array.isArray(args) || Object.keys(args).length !== 0) {
     throw new Error("arguments denied");
   }
-  const response = await adapter.proxyOperation(connectionRef, {
-    operation: "github.user.read",
-    integration: "github-cairn-v1",
-    path: "/user",
-    method: "GET",
-  });
+  let response;
+  try {
+    response = await adapter.proxyOperation(binding, {
+      operation: "github.user.read",
+      integration: "github-cairn-v1",
+      path: "/user",
+      method: "GET",
+    });
+  } catch {
+    return { outcome: "provider_unavailable" };
+  }
   if (response.outcome !== "success") return { outcome: response.outcome };
   if (
     response.body.byteLength > GITHUB_USER_READ.maxResponseBytes ||
@@ -56,19 +59,13 @@ export async function invokeGithubUserRead(
   } catch {
     return { outcome: "provider_unavailable" };
   }
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return { outcome: "provider_unavailable" };
-  }
   if (
+    !input || typeof input !== "object" || Array.isArray(input) ||
     !Number.isSafeInteger(input.id) || typeof input.login !== "string" ||
-    input.login.length > 100 ||
-    !(input.name === null || typeof input.name === "string") ||
-    typeof input.html_url !== "string" ||
-    typeof input.avatar_url !== "string" || !safeGithubUrl(input.html_url) ||
-    !safeAvatarUrl(input.avatar_url)
-  ) {
-    return { outcome: "provider_unavailable" };
-  }
+    input.login.length > 100 || !(input.name === null || typeof input.name === "string") ||
+    typeof input.html_url !== "string" || typeof input.avatar_url !== "string" ||
+    !safeGithubUrl(input.html_url) || !safeAvatarUrl(input.avatar_url)
+  ) return { outcome: "provider_unavailable" };
   return {
     outcome: "success",
     user: {
@@ -76,7 +73,7 @@ export async function invokeGithubUserRead(
       login: input.login,
       name: input.name as string | null,
       html_url: input.html_url,
-      avatar_url: input.avatar_url,
+      avatar_url: stripQuery(input.avatar_url),
     },
   };
 }
@@ -97,4 +94,9 @@ function safeAvatarUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+function stripQuery(value: string): string {
+  const url = new URL(value);
+  url.search = "";
+  return url.toString();
 }
