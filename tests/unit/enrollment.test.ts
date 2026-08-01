@@ -399,6 +399,9 @@ Deno.test("post-import intrinsic replacement cannot bypass authoritative snapsho
   };
 
   const isProxyDescriptor = Object.getOwnPropertyDescriptor(mutableNodeTypes, "isProxy")!;
+  const errorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "Error")!;
+  const OriginalError = Error;
+  let hostileErrorCalls = 0;
   let bootstrapTraps = 0;
   let approvalTraps = 0;
   const hostileBootstrap = structuredClone(bootstrapValue);
@@ -419,23 +422,37 @@ Deno.test("post-import intrinsic replacement cannot bypass authoritative snapsho
       return Object.getPrototypeOf(target);
     },
   });
+  let bootstrapDenial: unknown;
+  let approvalDenial: unknown;
   try {
     Object.defineProperty(mutableNodeTypes, "isProxy", {
       ...isProxyDescriptor,
       value: () => false,
     });
-    await rejects(
-      () => bootstrapStore.commitBootstrap(ctx, bootstrapChallenge, hostileBootstrap, now),
-      "plain data denied",
-    );
-    await rejects(
-      () => approvalStore.commitApproval(ctx, approvalChallenge, hostileApproval, now),
-      "plain data denied",
-    );
+    Object.defineProperty(globalThis, "Error", {
+      ...errorDescriptor,
+      value: function (...args: unknown[]) {
+        hostileErrorCalls++;
+        return new OriginalError(String(args[0] ?? "hostile Error"));
+      },
+    });
+    try {
+      await bootstrapStore.commitBootstrap(ctx, bootstrapChallenge, hostileBootstrap, now);
+    } catch (error) {
+      bootstrapDenial = error;
+    }
+    try {
+      await approvalStore.commitApproval(ctx, approvalChallenge, hostileApproval, now);
+    } catch (error) {
+      approvalDenial = error;
+    }
   } finally {
+    Object.defineProperty(globalThis, "Error", errorDescriptor);
     Object.defineProperty(mutableNodeTypes, "isProxy", isProxyDescriptor);
   }
-  equals([bootstrapTraps, approvalTraps], [0, 0]);
+  equals((bootstrapDenial as Error)?.message, "plain data denied");
+  equals((approvalDenial as Error)?.message, "plain data denied");
+  equals([hostileErrorCalls, bootstrapTraps, approvalTraps], [0, 0, 0]);
   equals(bootstrapBackend.principals.size, 0);
   equals(bootstrapBackend.agents.size, 0);
   equals(bootstrapBackend.devices.size, 0);
@@ -470,6 +487,7 @@ Deno.test("post-import intrinsic replacement cannot bypass authoritative snapsho
       OriginalObject,
       "getOwnPropertyDescriptors",
     )!,
+    objectSetPrototypeOf: Object.getOwnPropertyDescriptor(OriginalObject, "setPrototypeOf")!,
     reflectOwnKeys: Object.getOwnPropertyDescriptor(Reflect, "ownKeys")!,
     reflectApply: Object.getOwnPropertyDescriptor(Reflect, "apply")!,
     structuredClone: Object.getOwnPropertyDescriptor(globalThis, "structuredClone")!,
@@ -516,6 +534,10 @@ Deno.test("post-import intrinsic replacement cannot bypass authoritative snapsho
         if (value === bootstrapValue || value === approvalValue) poison();
         return descriptors.objectGetOwnPropertyDescriptors.value(value);
       },
+    });
+    defineProperty(OriginalObject, "setPrototypeOf", {
+      ...descriptors.objectSetPrototypeOf,
+      value: poison,
     });
     defineProperty(Reflect, "ownKeys", { ...descriptors.reflectOwnKeys, value: poison });
     defineProperty(Reflect, "apply", { ...descriptors.reflectApply, value: poison });
@@ -571,6 +593,7 @@ Deno.test("post-import intrinsic replacement cannot bypass authoritative snapsho
       "getOwnPropertyDescriptors",
       descriptors.objectGetOwnPropertyDescriptors,
     );
+    defineProperty(OriginalObject, "setPrototypeOf", descriptors.objectSetPrototypeOf);
     defineProperty(OriginalObject, "freeze", descriptors.objectFreeze);
     defineProperty(Reflect, "ownKeys", descriptors.reflectOwnKeys);
     defineProperty(Reflect, "apply", descriptors.reflectApply);
@@ -580,14 +603,277 @@ Deno.test("post-import intrinsic replacement cannot bypass authoritative snapsho
   }
   assert(bootstrapCommitted);
   assert(approvalCommitted);
+  const storedBootstrapPrincipal = [...bootstrapBackend.principals.values()][0];
+  const storedBootstrapAgent = [...bootstrapBackend.agents.values()][0];
+  const storedBootstrapDevice = [...bootstrapBackend.devices.values()][0];
+  const storedApprovalDevice = [...approvalBackend.devices.values()].find((value) =>
+    value.id === candidateId
+  );
+  assert(storedBootstrapPrincipal && Object.isFrozen(storedBootstrapPrincipal));
+  equals(Object.getPrototypeOf(storedBootstrapPrincipal), null);
+  assert(storedBootstrapAgent && Object.isFrozen(storedBootstrapAgent));
+  equals(Object.getPrototypeOf(storedBootstrapAgent), null);
+  equals(Object.getPrototypeOf(storedBootstrapAgent.publicJwk), null);
+  assert(storedBootstrapDevice && Object.isFrozen(storedBootstrapDevice));
+  assert(Object.isFrozen(storedBootstrapDevice.publicJwk));
+  equals(Object.getPrototypeOf(storedBootstrapDevice), null);
+  equals(Object.getPrototypeOf(storedBootstrapDevice.publicJwk), null);
+  assert(storedApprovalDevice && Object.isFrozen(storedApprovalDevice));
+  assert(Object.isFrozen(storedApprovalDevice.publicJwk));
+  equals(Object.getPrototypeOf(storedApprovalDevice), null);
+  equals(Object.getPrototypeOf(storedApprovalDevice.publicJwk), null);
+});
+
+Deno.test("inherited semantic fields cannot authorize bootstrap or approval", async () => {
+  const bootstrapBackend = new MemoryAuthorityBackend();
+  const bootstrapStore = new MemoryStore(bootstrapBackend);
+  const bootstrapService = new DeviceEnrollmentService(bootstrapStore);
+  const bootstrapDeviceSigner = await fixtureDeviceSigner(0);
+  const bootstrapAgentSigner = await fixtureAgentSigner();
+  const bootstrapDeviceJwk = await bootstrapDeviceSigner.publicJwk();
+  const bootstrapAgentJwk = await bootstrapAgentSigner.publicJwk();
+  const bootstrapAgentId = ids.agent("agent_inherited");
+  const bootstrapDeviceId = ids.device("device_inherited");
+  const bootstrapChallenge = await bootstrapService.bootstrapChallenge(
+    ctx,
+    principal,
+    bootstrapAgentId,
+    bootstrapAgentJwk,
+    bootstrapDeviceId,
+    bootstrapDeviceJwk,
+    now,
+  );
+  const bootstrapValue: BootstrapCommit = {
+    principal: { ...principal, epoch: 1 },
+    agent: {
+      id: bootstrapAgentId,
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      publicJwk: bootstrapAgentJwk,
+      thumbprint: await jwkThumbprint(bootstrapAgentJwk),
+      status: "active",
+      epoch: 1,
+    },
+    device: {
+      id: bootstrapDeviceId,
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentId: bootstrapAgentId,
+      publicJwk: bootstrapDeviceJwk,
+      thumbprint: await jwkThumbprint(bootstrapDeviceJwk),
+      role: "admin",
+      status: "active",
+      epoch: 1,
+    },
+  };
+
+  const approvalBackend = new MemoryAuthorityBackend();
+  const { store: approvalStore, service: approvalService } = await boot(approvalBackend);
+  const { result: pendingResult } = await pending(approvalService);
+  const approver = (await approvalStore.getDevice(ctx, "device_a"))!;
+  const approvalAgent = (await approvalStore.getAgent(ctx, "agent_a"))!;
+  const candidateId = ids.device("device_inherited_candidate");
+  const approvalChallenge = await approvalService.approvalChallenge(
+    ctx,
+    pendingResult.request.id,
+    approver.id,
+    candidateId,
+    pendingResult.fingerprint,
+    now,
+  );
+  const approvalValue: ApprovalCommit = {
+    requestId: pendingResult.request.id,
+    device: {
+      id: candidateId,
+      tenantId: ctx.tenantId,
+      userId: ctx.userId,
+      agentId: approvalAgent.id,
+      publicJwk: pendingResult.request.candidateJwk,
+      thumbprint: pendingResult.request.thumbprint,
+      role: "member",
+      status: "active",
+      epoch: 1,
+    },
+    principalEpoch: 1,
+    agentEpoch: approvalAgent.epoch,
+    agentThumbprint: approvalAgent.thumbprint,
+    approverId: approver.id,
+    approverEpoch: approver.epoch,
+    approverThumbprint: approver.thumbprint,
+  };
+
+  let inheritedGetterCalls = 0;
+  for (const field of ["role", "publicJwk", "status"] as const) {
+    const inherited = field === "role"
+      ? "admin"
+      : field === "status"
+      ? "active"
+      : bootstrapDeviceJwk;
+    const previous = Object.getOwnPropertyDescriptor(Object.prototype, field);
+    const hostile = structuredClone(bootstrapValue);
+    delete (hostile.device as unknown as Record<string, unknown>)[field];
+    let accepted = false;
+    try {
+      Object.defineProperty(Object.prototype, field, {
+        configurable: true,
+        get: () => {
+          inheritedGetterCalls++;
+          return inherited;
+        },
+      });
+      try {
+        accepted = await bootstrapStore.commitBootstrap(ctx, bootstrapChallenge, hostile, now);
+      } catch {
+        // A missing key may be rejected by the transaction/key validator rather than as false.
+      }
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, field, previous);
+      else delete (Object.prototype as unknown as Record<string, unknown>)[field];
+    }
+    equals(accepted, false);
+  }
+
+  for (const field of ["role", "publicJwk", "status"] as const) {
+    const inherited = field === "role"
+      ? "member"
+      : field === "status"
+      ? "active"
+      : pendingResult.request.candidateJwk;
+    const previous = Object.getOwnPropertyDescriptor(Object.prototype, field);
+    const hostile = structuredClone(approvalValue);
+    delete (hostile.device as unknown as Record<string, unknown>)[field];
+    let accepted = false;
+    try {
+      Object.defineProperty(Object.prototype, field, {
+        configurable: true,
+        get: () => {
+          inheritedGetterCalls++;
+          return inherited;
+        },
+      });
+      try {
+        accepted = await approvalStore.commitApproval(ctx, approvalChallenge, hostile, now);
+      } catch {
+        // A missing key may be rejected by the transaction/key validator rather than as false.
+      }
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, field, previous);
+      else delete (Object.prototype as unknown as Record<string, unknown>)[field];
+    }
+    equals(accepted, false);
+  }
+
+  equals(inheritedGetterCalls, 0);
+  equals(bootstrapBackend.principals.size, 0);
+  equals(bootstrapBackend.agents.size, 0);
+  equals(bootstrapBackend.devices.size, 0);
+  equals(
+    [...bootstrapBackend.challenges.values()].find((value) => value.id === bootstrapChallenge)
+      ?.used,
+    false,
+  );
+  equals(
+    [...approvalBackend.devices.values()].some((value) => value.id === candidateId),
+    false,
+  );
+  equals(
+    [...approvalBackend.enrollments.values()].find((value) => value.id === pendingResult.request.id)
+      ?.status,
+    "pending",
+  );
+  equals(
+    [...approvalBackend.challenges.values()].find((value) => value.id === approvalChallenge)?.used,
+    false,
+  );
+
+  assert(await bootstrapStore.commitBootstrap(ctx, bootstrapChallenge, bootstrapValue, now));
+  assert(await approvalStore.commitApproval(ctx, approvalChallenge, approvalValue, now));
   const storedBootstrapDevice = [...bootstrapBackend.devices.values()][0];
   const storedApprovalDevice = [...approvalBackend.devices.values()].find((value) =>
     value.id === candidateId
   );
   assert(storedBootstrapDevice && Object.isFrozen(storedBootstrapDevice));
-  assert(Object.isFrozen(storedBootstrapDevice.publicJwk));
+  equals(Object.getPrototypeOf(storedBootstrapDevice), null);
+  equals(Object.getPrototypeOf(storedBootstrapDevice.publicJwk), null);
   assert(storedApprovalDevice && Object.isFrozen(storedApprovalDevice));
-  assert(Object.isFrozen(storedApprovalDevice.publicJwk));
+  equals(Object.getPrototypeOf(storedApprovalDevice), null);
+  equals(Object.getPrototypeOf(storedApprovalDevice.publicJwk), null);
+});
+
+Deno.test("pre-import Object.prototype poisoning cannot supply a missing role", async () => {
+  const roleDescriptor = Object.getOwnPropertyDescriptor(Object.prototype, "role");
+  const deviceSigner = await fixtureDeviceSigner(0);
+  const agentSigner = await fixtureAgentSigner();
+  const deviceJwk = await deviceSigner.publicJwk();
+  const agentJwk = await agentSigner.publicJwk();
+  const agentId = ids.agent("agent_preimport");
+  const deviceId = ids.device("device_preimport");
+  let getterCalls = 0;
+  try {
+    Object.defineProperty(Object.prototype, "role", {
+      configurable: true,
+      get: () => {
+        getterCalls++;
+        return "admin";
+      },
+    });
+    const imported = await import(
+      "../../packages/core/src/store/memory_store.ts?pre_import_object_prototype"
+    );
+    const backend = new imported.MemoryAuthorityBackend();
+    const store = new imported.MemoryStore(backend);
+    const service = new DeviceEnrollmentService(store);
+    const challenge = await service.bootstrapChallenge(
+      ctx,
+      principal,
+      agentId,
+      agentJwk,
+      deviceId,
+      deviceJwk,
+      now,
+    );
+    const value: BootstrapCommit = {
+      principal: { ...principal, epoch: 1 },
+      agent: {
+        id: agentId,
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        publicJwk: agentJwk,
+        thumbprint: await jwkThumbprint(agentJwk),
+        status: "active",
+        epoch: 1,
+      },
+      device: {
+        id: deviceId,
+        tenantId: ctx.tenantId,
+        userId: ctx.userId,
+        agentId,
+        publicJwk: deviceJwk,
+        thumbprint: await jwkThumbprint(deviceJwk),
+        role: "admin",
+        status: "active",
+        epoch: 1,
+      },
+    };
+    const missingRole = structuredClone(value);
+    delete (missingRole.device as unknown as Record<string, unknown>).role;
+    equals(await store.commitBootstrap(ctx, challenge, missingRole, now), false);
+    equals(getterCalls, 0);
+    equals(backend.principals.size, 0);
+    equals(backend.agents.size, 0);
+    equals(backend.devices.size, 0);
+    equals([...backend.challenges.values()].find((item) => item.id === challenge)?.used, false);
+
+    assert(await store.commitBootstrap(ctx, challenge, value, now));
+    const storedDevice = [...backend.devices.values()][0];
+    assert(storedDevice && Object.isFrozen(storedDevice));
+    equals(Object.getPrototypeOf(storedDevice), null);
+    equals(Object.getPrototypeOf(storedDevice.publicJwk), null);
+  } finally {
+    if (roleDescriptor) Object.defineProperty(Object.prototype, "role", roleDescriptor);
+    else delete (Object.prototype as unknown as Record<string, unknown>).role;
+  }
+  equals(getterCalls, 0);
 });
 
 Deno.test("hostile approval role and JWK inputs neither consume challenge nor elevate", async () => {

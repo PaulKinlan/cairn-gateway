@@ -37,11 +37,13 @@ const intrinsicIsProxy = nodeTypes.isProxy;
 const intrinsicArrayIsArray = Array.isArray;
 const intrinsicObjectGetPrototypeOf = Object.getPrototypeOf;
 const intrinsicObjectGetOwnPropertyDescriptors = Object.getOwnPropertyDescriptors;
+const intrinsicObjectSetPrototypeOf = Object.setPrototypeOf;
 const intrinsicReflectOwnKeys = Reflect.ownKeys;
 const intrinsicStructuredClone = structuredClone;
 const intrinsicObjectFreeze = Object.freeze;
 const intrinsicObjectPrototype = Object.prototype;
 const intrinsicArrayPrototype = Array.prototype;
+const IntrinsicError = Error;
 const IntrinsicWeakSet = WeakSet;
 const intrinsicWeakSetHas = WeakSet.prototype.has;
 const intrinsicWeakSetAdd = WeakSet.prototype.add;
@@ -67,33 +69,85 @@ function weakSetDelete(set: WeakSet<object>, object: object): void {
   applyIntrinsic(intrinsicWeakSetDelete, set, [object]);
 }
 
-function assertPlainData(value: unknown, active = new IntrinsicWeakSet<object>()): void {
+function assertPlainData(
+  value: unknown,
+  recordPrototype: object | null = intrinsicObjectPrototype,
+  active = new IntrinsicWeakSet<object>(),
+): void {
   const type = typeof value;
   if (
     value === null || type === "string" || type === "number" || type === "boolean" ||
     type === "undefined"
   ) return;
-  if (type !== "object") throw new Error("plain data denied");
+  if (type !== "object") throw new IntrinsicError("plain data denied");
   const object = value as object;
   // The captured trap-free predicate must run before any reflective or property operation.
-  if (isProxy(object) || weakSetHas(active, object)) throw new Error("plain data denied");
+  if (isProxy(object) || weakSetHas(active, object)) {
+    throw new IntrinsicError("plain data denied");
+  }
   weakSetAdd(active, object);
   try {
     const array = intrinsicArrayIsArray(object);
     const prototype = intrinsicObjectGetPrototypeOf(object);
-    if (prototype !== (array ? intrinsicArrayPrototype : intrinsicObjectPrototype)) {
-      throw new Error("plain data denied");
+    if (prototype !== (array ? intrinsicArrayPrototype : recordPrototype)) {
+      throw new IntrinsicError("plain data denied");
     }
     const descriptors = intrinsicObjectGetOwnPropertyDescriptors(object);
     const keys = intrinsicReflectOwnKeys(descriptors);
     for (let index = 0; index < keys.length; index++) {
       const key = keys[index]!;
-      if (typeof key === "symbol") throw new Error("plain data denied");
+      if (typeof key === "symbol") throw new IntrinsicError("plain data denied");
       const descriptor = descriptors[key];
-      if (!descriptor || !("value" in descriptor)) throw new Error("plain data denied");
-      if (!array && !descriptor.enumerable) throw new Error("plain data denied");
-      if (array && key !== "length" && !descriptor.enumerable) throw new Error("plain data denied");
-      assertPlainData(descriptor.value, active);
+      if (!descriptor || !("value" in descriptor)) {
+        throw new IntrinsicError("plain data denied");
+      }
+      if (!array && !descriptor.enumerable) throw new IntrinsicError("plain data denied");
+      if (array && key !== "length" && !descriptor.enumerable) {
+        throw new IntrinsicError("plain data denied");
+      }
+      assertPlainData(descriptor.value, recordPrototype, active);
+    }
+  } finally {
+    weakSetDelete(active, object);
+  }
+}
+
+function detachPlainRecordPrototypes(
+  value: unknown,
+  active = new IntrinsicWeakSet<object>(),
+): void {
+  const type = typeof value;
+  if (
+    value === null || type === "string" || type === "number" || type === "boolean" ||
+    type === "undefined"
+  ) return;
+  if (type !== "object") throw new IntrinsicError("plain data denied");
+  const object = value as object;
+  if (isProxy(object) || weakSetHas(active, object)) {
+    throw new IntrinsicError("plain data denied");
+  }
+  weakSetAdd(active, object);
+  try {
+    const array = intrinsicArrayIsArray(object);
+    const prototype = intrinsicObjectGetPrototypeOf(object);
+    if (prototype !== (array ? intrinsicArrayPrototype : intrinsicObjectPrototype)) {
+      throw new IntrinsicError("plain data denied");
+    }
+    const descriptors = intrinsicObjectGetOwnPropertyDescriptors(object);
+    const keys = intrinsicReflectOwnKeys(descriptors);
+    if (!array) intrinsicObjectSetPrototypeOf(object, null);
+    for (let index = 0; index < keys.length; index++) {
+      const key = keys[index]!;
+      if (typeof key === "symbol") throw new IntrinsicError("plain data denied");
+      const descriptor = descriptors[key];
+      if (!descriptor || !("value" in descriptor)) {
+        throw new IntrinsicError("plain data denied");
+      }
+      if (!array && !descriptor.enumerable) throw new IntrinsicError("plain data denied");
+      if (array && key !== "length" && !descriptor.enumerable) {
+        throw new IntrinsicError("plain data denied");
+      }
+      detachPlainRecordPrototypes(descriptor.value, active);
     }
   } finally {
     weakSetDelete(active, object);
@@ -104,7 +158,7 @@ function freezePlainData(value: unknown, seen = new IntrinsicWeakSet<object>()):
   if (!value || typeof value !== "object") return;
   const object = value as object;
   // Keep deep-freeze trap-free even if its precondition is changed by a future caller.
-  if (isProxy(object)) throw new Error("plain data denied");
+  if (isProxy(object)) throw new IntrinsicError("plain data denied");
   if (weakSetHas(seen, object)) return;
   weakSetAdd(seen, object);
   const descriptors = intrinsicObjectGetOwnPropertyDescriptors(object);
@@ -112,7 +166,9 @@ function freezePlainData(value: unknown, seen = new IntrinsicWeakSet<object>()):
   for (let index = 0; index < keys.length; index++) {
     const key = keys[index]!;
     const descriptor = (descriptors as Record<PropertyKey, PropertyDescriptor>)[key];
-    if (!descriptor || !("value" in descriptor)) throw new Error("plain data denied");
+    if (!descriptor || !("value" in descriptor)) {
+      throw new IntrinsicError("plain data denied");
+    }
     freezePlainData(descriptor.value, seen);
   }
   intrinsicObjectFreeze(object);
@@ -123,11 +179,12 @@ function plainDataSnapshot<T>(value: T): Readonly<T> {
   try {
     assertPlainData(value);
     const snapshot = intrinsicStructuredClone(value);
-    assertPlainData(snapshot);
+    detachPlainRecordPrototypes(snapshot);
+    assertPlainData(snapshot, null);
     freezePlainData(snapshot);
     return snapshot;
   } catch {
-    throw new Error("plain data denied");
+    throw new IntrinsicError("plain data denied");
   }
 }
 
