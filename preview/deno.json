@@ -1,0 +1,5 @@
+{
+  "name": "@cairn/credential-free-preview",
+  "version": "0.0.0",
+  "exports": "./main.ts"
+}

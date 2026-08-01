@@ -12,17 +12,34 @@ scenarios. The Stage 1 denominator consumes actual JUnit execution names and rej
 duplicate, skipped, ignored, filtered, or failed events. `deno task check` is the exact 114-case
 offline gate with zero skips.
 
-No listener, live adapter, credential or environment access, remote import, vendor request,
-deployment, UI, Git remote, or provider resource exists. Storage, production key custody, MCP SDK
-and named clients, callback topology, revocation promise, and retention remain unresolved activation
-blockers. Stage 1A qualifies an opaque durable `reserved` → `dispatching` permit claim followed by
-adapter-neutral atomic `startDispatch` consumption; only that one-use result authorizes dispatch.
-The same neutral envelope and maintenance interface cover export, inspection, restore, migration,
-and recovery behind explicit privileged maintenance context. The candidate-factory conformance path
-also exercises abrupt worker death while holding the logical file lock and bounded stale-lock
-recovery. This remains test-only logical commit evidence, not filesystem fsync/power-loss durability
-or external exactly-once execution; `unknown_commit` and `dispatch_unknown` are durable ambiguity
-states and are never automatically retried. Concrete seed/view helpers are isolated behind the
-fixture driver.
+No live invocation listener, live adapter, credential or environment access, remote import, vendor
+request, mutable management UI, or provider resource exists. Storage, production key custody, MCP
+SDK and named clients, callback topology, revocation promise, and retention remain unresolved
+activation blockers. Stage 1A qualifies an opaque durable `reserved` → `dispatching` permit claim
+followed by adapter-neutral atomic `startDispatch` consumption; only that one-use result authorizes
+dispatch. The same neutral envelope and maintenance interface cover export, inspection, restore,
+migration, and recovery behind explicit privileged maintenance context. The candidate-factory
+conformance path also exercises abrupt worker death while holding the logical file lock and bounded
+stale-lock recovery. This remains test-only logical commit evidence, not filesystem fsync/power-loss
+durability or external exactly-once execution; `unknown_commit` and `dispatch_unknown` are durable
+ambiguity states and are never automatically retried. Concrete seed/view helpers are isolated behind
+the fixture driver.
 
 Requires exact Deno 2.9.0. No network or package changes are needed.
+
+## Credential-free public preview
+
+`preview/main.ts` is an isolated Deno Deploy status surface with a default exported fetch handler.
+It does not start a listener or access environment variables, credentials, storage, vendors, remote
+assets, or package dependencies. Integration invocation is disabled. The page identifies accepted
+public revision `08dc01a03ef229e40ff356da2eb03c3f01cf7a96` and its 114-case offline gate without
+representing the fixture as production-ready or MCP-conformant.
+
+Routes are exact: `GET /` serves the status page, `GET /healthz` serves canonical JSON, and every
+method on `/mcp` or `/mcp/legacy` returns a non-retriable `503` disabled response. Other known-route
+methods return `405`; unknown paths and paths with query strings return `404`.
+
+Run the permission-free local handler smoke check with `deno task preview:run`, its tests with
+`deno task test:preview`, or the dedicated format/lint/type/test gate with
+`deno task check:preview`. Deno Deploy is configured at the repository root with the exact runtime
+entrypoint `preview/main.ts`; it consumes the default export and requires no environment setup.
