@@ -554,7 +554,7 @@ Deno.test("local admin invocation shows a projected result, receipt, and usage",
     await onboard(origin, browser);
     const response = await adminPost(origin, browser, "/admin/invoke");
     equals(response.status, 200);
-    assert(browser.html.includes("Projected result"));
+    assert(browser.html.includes("Invocation result"));
     assert(browser.html.includes("&quot;login&quot;: &quot;fixture&quot;"));
     assert(browser.html.includes("Local admin"));
     assert(browser.html.includes("policy_allow"));

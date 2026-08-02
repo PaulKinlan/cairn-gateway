@@ -255,7 +255,7 @@ export function renderAdminPage(state: AdminPageState): string {
     }</p></section>`;
   const result = state.result === undefined
     ? ""
-    : `<section class="wide result" aria-labelledby="invoke-result"><h2 id="invoke-result">Projected result</h2><pre>${
+    : `<section class="wide result" aria-labelledby="invoke-result"><h2 id="invoke-result">Invocation result</h2><pre>${
       escapeHtml(state.result)
     }</pre></section>`;
   const reset = state.fixture.owner === "active"

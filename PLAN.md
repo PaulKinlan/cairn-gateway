@@ -289,9 +289,10 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 - **Status:** Active and incomplete. The local UI creates/resets fixture context, maps owner-entered
   agent/device/workload display labels to the fixed non-exported cryptographic test authority,
   creates/replaces a versioned expiring/limited grant, and drives the wire journey. The labels are
-  not real cryptographic enrollment or workload identity. M1 remains blocked on independent review,
-  parent-run browser journey validation, and a later decision on whether real fixture-only identity
-  composition is required before acceptance.
+  not real cryptographic enrollment or workload identity. The partial submilestone passed
+  independent implementation/security review and the parent-run browser journey at source commit
+  `90808f8`. M1 remains blocked on whether real fixture-only identity composition is required before
+  acceptance.
 - **User-visible deliverable:** one-command local product where an owner labels the fixed fixture
   agent/device/workload mapping, creates grant authority, exercises search/describe/status/invoke
   over the wire, sees receipts/audit/usage, revokes, tests denial, replaces the grant, and
@@ -302,8 +303,8 @@ Open decisions block the milestone in “Due” unless the required evidence sel
   create grant → initialize → initialized notification → search → describe → status → invoke →
   inspect visible receipt → revoke → test visible denial/audit → replace with new expiry/version →
   invoke → reconnect.
-- **Demo/runbook:** `docs/local-setup.md`, actual-listener smoke, browser recording, and fixture
-  reset.
+- **Demo/runbook:** `docs/local-setup.md`, actual-listener smoke, fixture reset, and
+  [browser validation](docs/evidence/m1/browser-validation.md).
 - **URL/N/A:** `http://127.0.0.1:8787/` while running; no hosted URL.
 - **Excluded claims:** named-client compatibility, durable restart, real identity, real GitHub,
   production custody, hosted authority, or multi-user support.
@@ -326,9 +327,10 @@ Open decisions block the milestone in “Due” unless the required evidence sel
         expired display, unrelated sessions, and full HTTP journey are tested.
   - [x] Loopback, POST/same-origin/CSRF, exact Chrome null-origin navigation, streaming body,
         session, and closed facade gates remain.
-  - [ ] Independent implementation/security review has no blocker.
-  - [ ] Clean-browser recording plus keyboard, accessibility, responsive, light/dark, and visual
-        validation is accepted.
+  - [x] Independent implementation/security review accepted the partial submilestone with no
+        blocker.
+  - [x] Clean-browser journey, keyboard forms, accessibility, responsive, light/dark, and visual
+        validation passed at source commit `90808f8`.
 
 ### M2 — durable single-user deployment
 
