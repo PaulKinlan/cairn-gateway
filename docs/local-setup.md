@@ -129,7 +129,8 @@ deno task check
 
 ## Boundary
 
-M1 remains active pending independent review, parent-run browser journey validation, and a decision
-on real local identity composition beyond display labels mapped to fixed test authority. It does not
-prove a named client, durable restart, real owner identity, real GitHub OAuth, credential custody,
-hosted authority, or multi-user support. The public Deno preview remains a non-authority setup page.
+The partial submilestone passed independent review and the parent-run browser journey. M1 remains
+active pending a decision on real local identity composition beyond display labels mapped to fixed
+test authority. It does not prove a named client, durable restart, real owner identity, real GitHub
+OAuth, credential custody, hosted authority, or multi-user support. The public Deno preview remains
+a non-authority setup page.
