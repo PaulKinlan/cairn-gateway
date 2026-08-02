@@ -270,8 +270,8 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 
 ### M0 — product reset
 
-- **Status:** Active. It exits only when stale instructions are replaced, this plan is canonical,
-  and the correction receives independent acceptance.
+- **Status:** Accepted at `ec1bc215d67dfa248e59f66fffe87a89b3e017b7`; stale instructions were
+  replaced and the canonical plan correction received two independent no-blocker reviews.
 - **User-visible deliverable:** one direct product plan and repository instructions that lead work
   toward user journeys rather than status/evidence pages.
 - **Security gate:** permanent boundaries and milestone gates are explicit; security findings become
@@ -286,13 +286,12 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 
 ### M1 — usable local product
 
-- **Status:** Active and incomplete. The local UI creates/resets fixture context, maps owner-entered
-  agent/device/workload display labels to the fixed non-exported cryptographic test authority,
-  creates/replaces a versioned expiring/limited grant, and drives the wire journey. The labels are
-  not real cryptographic enrollment or workload identity. The partial submilestone passed
-  independent implementation/security review and the parent-run browser journey at source commit
-  `90808f8`. M1 remains blocked on whether real fixture-only identity composition is required before
-  acceptance.
+- **Status:** Accepted at `4b0954aab3afcf1c7d44b291846a812618c30228`. The local UI creates/resets
+  fixture context, maps owner-entered agent/device/workload display labels to the fixed non-exported
+  cryptographic test authority, creates/replaces a versioned expiring/limited grant, and drives the
+  wire journey. The labels are not real cryptographic enrollment or workload identity. That work
+  belongs to M3; duplicating it in M1 would turn the fixture milestone into a second identity
+  implementation.
 - **User-visible deliverable:** one-command local product where an owner labels the fixed fixture
   agent/device/workload mapping, creates grant authority, exercises search/describe/status/invoke
   over the wire, sees receipts/audit/usage, revokes, tests denial, replaces the grant, and
@@ -311,8 +310,9 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 - **Implementation checklist:**
   - [x] Owner can create/reset the in-memory fixture context.
   - [x] Owner can add distinct agent/device/workload display labels mapped to fixed test authority.
-  - [ ] Owner-created labels are not real cryptographic agent/device enrollment or workload binding;
-        resolve whether M1 requires a narrow genuine fixture composition.
+  - [x] M1 intentionally maps display labels to the fixed cryptographic test authority. Genuine
+        agent/device enrollment and workload binding are M3 acceptance requirements, not duplicated
+        fixture work.
   - [x] Owner can create and inspect the fixed operation grant with version, expiry, five-call
         limit, and current use.
   - [x] Authority graph, sanitized invocation receipts, and the eight-entry usage window are
@@ -490,19 +490,17 @@ All 12 items are required.
 ## Current status and prioritized work
 
 The repository has a 90-case fixture regression core, a 24-scenario durable-authority contract, a
-separate public preview gate, and an incomplete M1 local fixture implementation using display labels
-mapped to fixed test authority. These are inputs to acceptance and later product work, not proof
-that M1, a named client, or production use is accepted.
+separate public preview gate, and accepted M0 and M1 milestones. M1 proves the loopback admin and
+MCP fixture journey; it does not prove a named client, durable authority, real identity, provider
+custody, or production use.
 
 Priority order:
 
-1. Accept M0 by reviewing this plan and aligned repository instructions.
-2. Independently review and parent-browser-validate the corrected M1 local owner, Agent/MCP, and
-   revocation journeys; resolve whether genuine local identity composition is required.
-3. Resolve M2 decisions and implement durable restart, receipts/usage, retention, backup, and
-   restore.
-4. Deliver M3 identity/admin, then M4 GitHub OAuth/custody, then M5 named-client evidence.
-5. Resolve hosting/cost and run M6 private alpha. Do not begin M7 or M8 by adding generic
+1. Resolve M2 storage/region, receipts, retention, and backup/recovery decisions.
+2. Implement durable restart, receipts/usage persistence, deletion, backup, and restore for the
+   single-owner authority graph.
+3. Deliver M3 real identity/admin, then M4 GitHub OAuth/custody, then M5 named-client evidence.
+4. Resolve hosting/cost and run M6 private alpha. Do not begin M7 or M8 by adding generic
    infrastructure.
 
 ## Governance and acceptance records
