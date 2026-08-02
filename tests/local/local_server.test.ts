@@ -105,6 +105,7 @@ async function adminPost(
   const response = await fetch(`${origin}${path}`, {
     method: "POST",
     headers: {
+      Accept: "text/html",
       "Content-Type": "application/x-www-form-urlencoded",
       Cookie: browser.cookie,
       Origin: origin,
@@ -117,7 +118,7 @@ async function adminPost(
   return response;
 }
 
-async function onboard(origin: string, browser: AdminBrowser): Promise<void> {
+async function labelFixture(origin: string, browser: AdminBrowser): Promise<void> {
   equals((await adminPost(origin, browser, "/admin/owner/create")).status, 200);
   equals(
     (await adminPost(origin, browser, "/admin/agent/create", { agent_name: "Research agent" }))
@@ -131,6 +132,10 @@ async function onboard(origin: string, browser: AdminBrowser): Promise<void> {
     })).status,
     200,
   );
+}
+
+async function onboard(origin: string, browser: AdminBrowser): Promise<void> {
+  await labelFixture(origin, browser);
   equals((await adminPost(origin, browser, "/admin/grant/create")).status, 200);
 }
 
@@ -152,6 +157,14 @@ const fixtureInvokeRequest = (id: string | number = "test-invoke"): Uint8Array =
     },
   }));
 
+async function readyController() {
+  const controller = createLocalFixtureController();
+  await controller.createOwner();
+  await controller.createAgent("Race agent");
+  await controller.enrollIdentity("Race device", "Race workload");
+  return controller;
+}
+
 Deno.test("local page presents ordered onboarding, authority, grant, receipts, and candidate copy", async () => {
   const app = await createLocalApp();
   const response = await app.fetch(new Request("http://127.0.0.1:8787/"));
@@ -167,8 +180,10 @@ Deno.test("local page presents ordered onboarding, authority, grant, receipts, a
   assert(html.includes("Authority graph"));
   assert(html.includes("Invocation receipts"));
   assert(html.includes("Recent usage"));
-  assert(html.includes("candidate configuration pending named-client validation"));
-  assert(html.includes("Wire evidence is not VS Code acceptance"));
+  assert(html.includes("VS Code candidate, not yet tested"));
+  assert(html.includes("Wire sequence"));
+  assert(html.includes("Reconnect by initializing a new session"));
+  assert(!html.includes("Wire evidence is not VS Code acceptance"));
   assert(!html.includes("114 cases"));
   assert(!html.includes("PROVIDER_TOKEN"));
 });
@@ -219,6 +234,128 @@ Deno.test("admin mutations reject unauthorized, cross-origin, stale CSRF, and ex
     equals((await fetch(`${origin}/admin/owner/reset`)).status, 405);
   } finally {
     await server.shutdown();
+  }
+});
+
+Deno.test("Chrome null-origin form navigation is accepted only with exact same-origin metadata", async () => {
+  const app = createLocalApp();
+  const origin = "http://127.0.0.1:8787";
+  const home = await app.fetch(new Request(`${origin}/`));
+  const cookie = cookieFrom(home);
+  const token = csrfFrom(await home.text());
+  const form = (site: string, mode = "navigate", destination = "document") =>
+    new Request(`${origin}/admin/owner/create`, {
+      method: "POST",
+      headers: {
+        Accept: "text/html",
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: cookie,
+        Origin: "null",
+        "Sec-Fetch-Site": site,
+        "Sec-Fetch-Mode": mode,
+        "Sec-Fetch-Dest": destination,
+      },
+      body: new URLSearchParams({ csrf_token: token }),
+    });
+  const accepted = await app.fetch(form("same-origin"));
+  equals(accepted.status, 200);
+  assert((await accepted.text()).includes("Owner ready"));
+
+  const other = createLocalApp();
+  const otherHome = await other.fetch(new Request(`${origin}/`));
+  const otherCookie = cookieFrom(otherHome);
+  const otherToken = csrfFrom(await otherHome.text());
+  const denied = async (site: string, mode = "navigate", destination = "document") =>
+    await other.fetch(
+      new Request(`${origin}/admin/owner/create`, {
+        method: "POST",
+        headers: {
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: otherCookie,
+          Origin: "null",
+          "Sec-Fetch-Site": site,
+          "Sec-Fetch-Mode": mode,
+          "Sec-Fetch-Dest": destination,
+        },
+        body: new URLSearchParams({ csrf_token: otherToken }),
+      }),
+    );
+  equals((await denied("cross-site")).status, 403);
+  equals((await denied("same-origin", "cors")).status, 403);
+  equals((await denied("same-origin", "navigate", "empty")).status, 403);
+});
+
+Deno.test("browser form failures render recovery pages while API-like failures stay JSON", async () => {
+  const app = createLocalApp();
+  const origin = "http://127.0.0.1:8787";
+  const home = await app.fetch(new Request(`${origin}/`));
+  const cookie = cookieFrom(home);
+  const html = await home.text();
+  const stale = await app.fetch(
+    new Request(`${origin}/admin/owner/create`, {
+      method: "POST",
+      headers: {
+        Accept: "text/html",
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: cookie,
+        Origin: origin,
+      },
+      body: new URLSearchParams({ csrf_token: `${csrfFrom(html)}stale` }),
+    }),
+  );
+  equals(stale.status, 403);
+  equals(stale.headers.get("content-type"), "text/html; charset=utf-8");
+  const stalePage = await stale.text();
+  assert(stalePage.includes("This form is stale"));
+  assert(stalePage.includes("Create fixture owner"));
+
+  const api = await app.fetch(
+    new Request(`${origin}/admin/owner/create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: cookie,
+        Origin: origin,
+      },
+      body: new URLSearchParams({ csrf_token: "wrong" }),
+    }),
+  );
+  equals(api.status, 403);
+  equals(api.headers.get("content-type"), "application/json; charset=utf-8");
+  equals(await api.json(), { error: "csrf_denied" });
+});
+
+Deno.test("admin idle expiry returns a browser recovery page with a fresh session", async () => {
+  const original = Date.now;
+  let current = original();
+  Date.now = () => current;
+  try {
+    const app = createLocalApp();
+    const origin = "http://127.0.0.1:8787";
+    const home = await app.fetch(new Request(`${origin}/`));
+    const cookie = cookieFrom(home);
+    const token = csrfFrom(await home.text());
+    current += 30 * 60 * 1_000;
+    const expired = await app.fetch(
+      new Request(`${origin}/admin/owner/create`, {
+        method: "POST",
+        headers: {
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: cookie,
+          Origin: origin,
+        },
+        body: new URLSearchParams({ csrf_token: token }),
+      }),
+    );
+    equals(expired.status, 401);
+    assert(cookieFrom(expired) !== cookie);
+    const page = await expired.text();
+    assert(page.includes("session expired"));
+    assert(page.includes("repeat the action"));
+  } finally {
+    Date.now = original;
   }
 });
 
@@ -280,6 +417,83 @@ Deno.test("fixture controller rejects invalid lifecycle order and duplicate enro
   await rejects(() => controller.enrollIdentity("Other laptop", "Other worker"), "lifecycle");
   await controller.createGrant();
   await rejects(() => controller.createGrant(), "lifecycle");
+});
+
+Deno.test("controller serializes createGrant/reset and concurrent duplicate grant creation", async () => {
+  const resetRace = await readyController();
+  const createThenReset = await Promise.allSettled([
+    resetRace.createGrant(),
+    resetRace.resetOwner(),
+  ]);
+  equals(createThenReset.filter((result) => result.status === "fulfilled").length, 2);
+  const resetView = resetRace.view();
+  equals(resetView.owner, "missing");
+  equals(resetView.grant, undefined);
+  equals(resetView.receipts, []);
+  equals(resetView.usage, []);
+  equals(resetView.audit, []);
+  await rejects(() => resetRace.dispatch(fixtureInvokeRequest()), "authority denied");
+  equals(resetRace.view().receipts, []);
+
+  const duplicate = await readyController();
+  const duplicateResults = await Promise.allSettled([
+    duplicate.createGrant(),
+    duplicate.createGrant(),
+  ]);
+  equals(duplicateResults.filter((result) => result.status === "fulfilled").length, 1);
+  equals(duplicateResults.filter((result) => result.status === "rejected").length, 1);
+  equals(duplicate.view().grant?.version, 1);
+});
+
+Deno.test("controller serializes invoke/reset and revoke/invoke without post-reset state", async () => {
+  const invokeReset = await readyController();
+  await invokeReset.createGrant();
+  await Promise.allSettled([
+    invokeReset.dispatch(fixtureInvokeRequest("invoke-reset")),
+    invokeReset.resetOwner(),
+  ]);
+  const resetView = invokeReset.view();
+  equals(resetView.owner, "missing");
+  equals(resetView.grant, undefined);
+  equals(resetView.receipts, []);
+  equals(resetView.usage, []);
+  await rejects(
+    () => invokeReset.dispatch(fixtureInvokeRequest("after-reset")),
+    "authority denied",
+  );
+  equals(invokeReset.view().receipts, []);
+
+  const revokeFirst = await readyController();
+  await revokeFirst.createGrant();
+  const results = await Promise.allSettled([
+    revokeFirst.revokeGrant(),
+    revokeFirst.dispatch(fixtureInvokeRequest("revoke-invoke")),
+  ]);
+  equals(results[0]?.status, "fulfilled");
+  equals(results[1]?.status, "rejected");
+  const revoked = revokeFirst.view();
+  equals(revoked.grant?.status, "revoked");
+  equals(revoked.receipts[0]?.reason, "grant_inactive");
+  equals(revoked.receipts[0]?.grantVersion, 2);
+  assert(revoked.receipts.every((receipt) => receipt.grantVersion > 0));
+  equals(revoked.audit[0]?.event, "grant_revoked");
+});
+
+Deno.test("removing fixture identity labels invalidates the mapped MCP authority", async () => {
+  const controller = await readyController();
+  await controller.createGrant();
+  const allowed = await controller.dispatch(fixtureInvokeRequest("before-remove"));
+  assert(allowed && "result" in allowed);
+  await controller.resetOwner();
+  const view = controller.view();
+  equals(view.agent, undefined);
+  equals(view.identity, undefined);
+  equals(view.grant, undefined);
+  await rejects(
+    () => controller.dispatch(fixtureInvokeRequest("after-remove")),
+    "authority denied",
+  );
+  equals(controller.view().receipts, []);
 });
 
 Deno.test("receipts are sanitized and receipt and usage histories stay bounded", async () => {
@@ -353,6 +567,33 @@ Deno.test("local admin invocation shows a projected result, receipt, and usage",
   }
 });
 
+Deno.test("expired grant is displayed and a denied call records the expired version", async () => {
+  const original = Date.now;
+  let current = original();
+  Date.now = () => current;
+  const app = createLocalApp();
+  const server = startLocalServer(app, 0);
+  const origin = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const browser = await openAdmin(origin);
+    await onboard(origin, browser);
+    current += 24 * 60 * 60 * 1_000;
+    const refreshed = await fetch(`${origin}/`, { headers: { Cookie: browser.cookie } });
+    browser.cookie = cookieFrom(refreshed);
+    browser.html = await refreshed.text();
+    assert(browser.html.includes('<span class="status">expired</span>'));
+    assert(browser.html.includes("Test denied call"));
+    const denied = await adminPost(origin, browser, "/admin/invoke");
+    equals(denied.status, 200);
+    assert(browser.html.includes("grant_expired"));
+    assert(browser.html.includes("Invocation denied locally in"));
+    assert(browser.html.includes("Grant version</th>"));
+  } finally {
+    Date.now = original;
+    await server.shutdown();
+  }
+});
+
 Deno.test("revocation and replacement create a new version, expiry, and usable limit", async () => {
   const controller = createLocalFixtureController();
   await controller.createOwner();
@@ -366,13 +607,17 @@ Deno.test("revocation and replacement create a new version, expiry, and usable l
   const revoked = controller.view().grant!;
   equals(revoked.status, "revoked");
   equals(revoked.version, 2);
+  equals(controller.view().audit[0]?.event, "grant_revoked");
   await rejects(() => controller.dispatch(fixtureInvokeRequest()), "authority denied");
+  equals(controller.view().receipts[0]?.reason, "grant_inactive");
+  equals(controller.view().receipts[0]?.grantVersion, 2);
   await controller.reactivateGrant();
   const replacement = controller.view().grant!;
   equals(replacement.status, "active");
   equals(replacement.version, 4);
   assert(replacement.expiresAt > initial.expiresAt);
   equals(replacement.used, 0);
+  equals(controller.view().audit[0]?.event, "grant_replaced");
   const response = await controller.dispatch(fixtureInvokeRequest());
   const structured = ((response!.result as Record<string, unknown>).structuredContent) as Record<
     string,
@@ -390,6 +635,10 @@ Deno.test("actual listener completes all four tools, visible receipt, revoke, re
     await onboard(origin, browser);
     assert(browser.html.includes("Version</dt><dd>1</dd>"));
     assert(browser.html.includes("0 of 5"));
+    assert(
+      browser.html.indexOf("Invoke fixture operation") <
+        browser.html.indexOf("Reset fixture owner"),
+    );
 
     const first = await initialize(origin);
     const search = await toolCall(origin, first, 2, "search_capabilities", {
@@ -430,6 +679,18 @@ Deno.test("actual listener completes all four tools, visible receipt, revoke, re
     assert(browser.html.includes("1 of 5"));
 
     equals((await adminPost(origin, browser, "/admin/grant/revoke")).status, 200);
+    assert(browser.html.includes("Grant revoked"));
+    assert(browser.html.includes("Test denied call"));
+    assert(
+      browser.html.indexOf("Test denied call") < browser.html.indexOf("Create replacement grant"),
+    );
+    const denialStarted = performance.now();
+    equals((await adminPost(origin, browser, "/admin/invoke")).status, 200);
+    const denialLatencyMs = performance.now() - denialStarted;
+    assert(denialLatencyMs < 1_000, `local denial took ${denialLatencyMs}ms`);
+    assert(browser.html.includes("grant_inactive"));
+    assert(browser.html.includes("Invocation denied locally in"));
+    assert(browser.html.includes("Grant audit"));
     for (
       const [id, name, args] of [
         [6, "search_capabilities", { query: "github" }],
@@ -476,6 +737,98 @@ Deno.test("actual listener completes all four tools, visible receipt, revoke, re
       (await mcpPost(origin, second, { jsonrpc: "2.0", id: 13, method: "ping" })).status,
       200,
     );
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("actual listener serializes grant/reset, duplicate grant, invoke/reset, and revoke/invoke races", async () => {
+  const app = createLocalApp();
+  const server = startLocalServer(app, 0);
+  const origin = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const browser = await openAdmin(origin);
+    const refresh = async () => {
+      browser.html = await (await fetch(`${origin}/`, { headers: { Cookie: browser.cookie } }))
+        .text();
+    };
+    const rawAdmin = async (path: string, token: string) => {
+      const response = await fetch(`${origin}${path}`, {
+        method: "POST",
+        headers: {
+          Accept: "text/html",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: browser.cookie,
+          Origin: origin,
+        },
+        body: new URLSearchParams({ csrf_token: token }),
+      });
+      await response.text();
+      return response.status;
+    };
+
+    await labelFixture(origin, browser);
+    const duplicateToken = csrfFrom(browser.html);
+    const duplicateStatuses = await Promise.all([
+      rawAdmin("/admin/grant/create", duplicateToken),
+      rawAdmin("/admin/grant/create", duplicateToken),
+    ]);
+    equals([...duplicateStatuses].sort(), [200, 409]);
+    await refresh();
+    assert(browser.html.includes("Version</dt><dd>1</dd>"));
+    equals((await adminPost(origin, browser, "/admin/owner/reset")).status, 200);
+
+    await labelFixture(origin, browser);
+    const createResetToken = csrfFrom(browser.html);
+    await Promise.all([
+      rawAdmin("/admin/grant/create", createResetToken),
+      rawAdmin("/admin/owner/reset", createResetToken),
+    ]);
+    await refresh();
+    assert(browser.html.includes("Create fixture owner"));
+    assert(!browser.html.includes("Version</dt><dd>1</dd>"));
+
+    await onboard(origin, browser);
+    const invokeResetSession = await initialize(origin);
+    const invokeResetToken = csrfFrom(browser.html);
+    await Promise.allSettled([
+      toolCall(origin, invokeResetSession, 30, "invoke_operation", invocationArgs),
+      rawAdmin("/admin/owner/reset", invokeResetToken),
+    ]);
+    await refresh();
+    assert(browser.html.includes("Create fixture owner"));
+    assert(browser.html.includes("No invocation receipts yet"));
+    assert(browser.html.includes("No usage yet"));
+    const postReset = await toolCall(
+      origin,
+      invokeResetSession,
+      31,
+      "invoke_operation",
+      invocationArgs,
+    );
+    equals((postReset.error as Record<string, unknown>).message, "fixture authority denied");
+    await refresh();
+    assert(browser.html.includes("No invocation receipts yet"));
+
+    await onboard(origin, browser);
+    const revokeSession = await initialize(origin);
+    const revokeToken = csrfFrom(browser.html);
+    await Promise.allSettled([
+      rawAdmin("/admin/grant/revoke", revokeToken),
+      toolCall(origin, revokeSession, 32, "invoke_operation", invocationArgs),
+    ]);
+    await refresh();
+    assert(browser.html.includes('<span class="status">revoked</span>'));
+    assert(browser.html.includes("Grant revoked"));
+    assert(!browser.html.includes('grantVersion": 0'));
+    const afterRevoke = await toolCall(
+      origin,
+      revokeSession,
+      33,
+      "invoke_operation",
+      invocationArgs,
+    );
+    equals((afterRevoke.error as Record<string, unknown>).message, "fixture authority denied");
   } finally {
     await server.shutdown();
   }

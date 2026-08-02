@@ -57,11 +57,24 @@ function jsonError(status: number, error: string, allow?: string): Response {
   );
 }
 
-function allowedOrigin(request: Request): boolean {
-  const url = new URL(request.url);
-  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") return false;
-  const origin = request.headers.get("Origin");
-  return origin === null || origin === url.origin;
+function isLoopback(url: URL): boolean {
+  return url.hostname === "127.0.0.1" || url.hostname === "localhost";
+}
+
+function narrowNullFormNavigation(request: Request, url: URL): boolean {
+  const contentType = request.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase();
+  return isLoopback(url) && request.method === "POST" &&
+    request.headers.get("Origin") === "null" &&
+    request.headers.get("Sec-Fetch-Site") === "same-origin" &&
+    request.headers.get("Sec-Fetch-Mode") === "navigate" &&
+    request.headers.get("Sec-Fetch-Dest") === "document" &&
+    contentType === "application/x-www-form-urlencoded";
+}
+
+function browserFormNavigation(request: Request): boolean {
+  return request.headers.get("Accept")?.toLowerCase().includes("text/html") === true ||
+    (request.headers.get("Sec-Fetch-Mode") === "navigate" &&
+      request.headers.get("Sec-Fetch-Dest") === "document");
 }
 
 async function formValues(request: Request): Promise<URLSearchParams | undefined> {
@@ -131,12 +144,14 @@ function fixtureInvokeRequest(): Uint8Array {
 }
 
 async function fixtureInvocation(controller: LocalFixtureController): Promise<string> {
+  const started = performance.now();
   try {
     return projectedResult(
       await controller.dispatch(fixtureInvokeRequest(), "/mcp", "local_admin"),
     );
   } catch {
-    return "Invocation denied. Create or replace an active grant, then try again.";
+    const elapsed = Math.max(0, performance.now() - started).toFixed(1);
+    return `Invocation denied locally in ${elapsed} ms. The active authority check failed closed.`;
   }
 }
 
@@ -200,6 +215,17 @@ export function createLocalApp(): LocalApp {
     });
   };
 
+  const formFailure = (
+    request: Request,
+    status: number,
+    error: string,
+    notice: string,
+    session?: AdminSession,
+  ): Response => {
+    if (!browserFormNavigation(request)) return jsonError(status, error);
+    return page(request, session ?? newSession(), notice, undefined, status);
+  };
+
   const mutations = new Map<string, readonly string[]>([
     ["/admin/owner/create", []],
     ["/admin/owner/reset", []],
@@ -214,10 +240,14 @@ export function createLocalApp(): LocalApp {
   return Object.freeze({
     async fetch(request: Request): Promise<Response> {
       const url = new URL(request.url);
-      if (!allowedOrigin(request)) return jsonError(403, "origin_denied");
+      if (!isLoopback(url)) return jsonError(403, "origin_denied");
       if (url.search !== "") return jsonError(404, "not_found");
 
       if (url.pathname === MCP_ENDPOINT) return await transport.fetch(request);
+      const origin = request.headers.get("Origin");
+      if (origin !== null && origin !== url.origin && !narrowNullFormNavigation(request, url)) {
+        return jsonError(403, "origin_denied");
+      }
 
       if (url.pathname === "/") {
         if (request.method !== "GET") return jsonError(405, "method_not_allowed", "GET");
@@ -239,22 +269,42 @@ export function createLocalApp(): LocalApp {
       const fields = mutations.get(url.pathname);
       if (!fields) return jsonError(404, "not_found");
       if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST");
-      if (request.headers.get("Origin") !== url.origin) {
-        return jsonError(403, "same_origin_required");
-      }
+      const mutationOriginAllowed = origin === url.origin || narrowNullFormNavigation(request, url);
+      if (!mutationOriginAllowed) return jsonError(403, "same_origin_required");
       const session = requestSession(request);
-      if (!session) return jsonError(401, "admin_session_required");
+      if (!session) {
+        return formFailure(
+          request,
+          401,
+          "admin_session_required",
+          "Your local admin session expired. A new session is ready; repeat the action.",
+        );
+      }
 
       let values: URLSearchParams | undefined;
       try {
         values = await formValues(request);
       } catch (error) {
         if (error instanceof BodyTooLargeError) return jsonError(413, "request_too_large");
-        return jsonError(400, "invalid_request_body");
+        return formFailure(
+          request,
+          400,
+          "invalid_request_body",
+          "The form could not be read. Reload the page and try again.",
+          session,
+        );
       }
       if (
         !values || !exactForm(values, fields) || values.get("csrf_token") !== session.csrfToken
-      ) return jsonError(403, "csrf_denied");
+      ) {
+        return formFailure(
+          request,
+          403,
+          "csrf_denied",
+          "This form is stale. Use the updated controls below to repeat the action.",
+          session,
+        );
+      }
 
       try {
         let notice: string;
@@ -262,7 +312,7 @@ export function createLocalApp(): LocalApp {
         switch (url.pathname) {
           case "/admin/owner/create":
             await controller.createOwner();
-            notice = "Fixture owner created. Create an agent next.";
+            notice = "Fixture owner created. Add an agent label next.";
             break;
           case "/admin/owner/reset":
             await controller.resetOwner();
@@ -270,14 +320,14 @@ export function createLocalApp(): LocalApp {
             break;
           case "/admin/agent/create":
             await controller.createAgent(values.get("agent_name") ?? "");
-            notice = "Agent created. Enroll its device and workload next.";
+            notice = "Agent label saved. Add device and workload labels next.";
             break;
           case "/admin/identity/enroll":
             await controller.enrollIdentity(
               values.get("device_name") ?? "",
               values.get("workload_name") ?? "",
             );
-            notice = "Device and workload enrolled. Create the grant next.";
+            notice = "Fixture identity labels saved. Create the grant next.";
             break;
           case "/admin/grant/create":
             await controller.createGrant();
@@ -285,7 +335,7 @@ export function createLocalApp(): LocalApp {
             break;
           case "/admin/grant/revoke":
             await controller.revokeGrant();
-            notice = "Grant revoked. Search, describe, status, and invoke now deny.";
+            notice = "Grant revoked. Test a denied call before creating a replacement.";
             break;
           case "/admin/grant/reactivate":
             await controller.reactivateGrant();

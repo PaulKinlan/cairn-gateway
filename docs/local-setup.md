@@ -26,9 +26,9 @@ Use the browser page in order:
 
 1. **Create fixture owner.** This creates an empty local owner context and makes the fixed GitHub
    connection available.
-2. **Create agent.** Give the fixture agent a short display name.
-3. **Enroll identities.** Give the device and workload distinct names. They are separate fixture
-   identities bound to the agent.
+2. **Label the agent.** Give the fixed fixture agent a short display label.
+3. **Label the device and workload.** Use distinct labels. These labels map to Cairn's fixed,
+   non-exported cryptographic test authority; this is not real key or workload enrollment.
 4. **Create grant.** The closed policy allows `github.user.read@v1` for 24 hours and five successful
    calls. The page shows status, version, exact expiry, limit, and use.
 5. **Invoke.** Use the local admin button or MCP. The page shows the projected fixture user, a
@@ -97,8 +97,7 @@ caller-selected network destination is returned.
 
 ## Candidate VS Code configuration
 
-The configuration below matches the endpoint. Named-client validation belongs to Milestone 5; a
-hand-written configuration or successful raw wire call is not VS Code acceptance.
+The configuration below matches the endpoint. **VS Code candidate, not yet tested.**
 
 ```json
 {
@@ -130,7 +129,7 @@ deno task check
 
 ## Boundary
 
-This is the complete M1 fixture implementation pending independent review and clean-browser,
-keyboard, accessibility, and visual validation. It does not prove a named client, durable restart,
-real owner identity, real GitHub OAuth, credential custody, hosted authority, or multi-user support.
-The public Deno preview remains a non-authority setup page.
+M1 remains active pending independent review, parent-run browser journey validation, and a decision
+on real local identity composition beyond display labels mapped to fixed test authority. It does not
+prove a named client, durable restart, real owner identity, real GitHub OAuth, credential custody,
+hosted authority, or multi-user support. The public Deno preview remains a non-authority setup page.

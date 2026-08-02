@@ -286,20 +286,22 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 
 ### M1 — usable local product
 
-- **Status:** Active; implementation complete pending independent review and browser validation. The
-  local UI now creates or resets the fixture owner, names an agent, enrolls distinct device and
-  workload identities, creates and replaces a versioned expiring/limited grant, shows the authority
-  graph, receipts, and bounded usage, and drives the complete wire journey. M1 is not accepted until
-  the review gate, clean-browser recording, keyboard/accessibility pass, and visual validation are
-  complete.
-- **User-visible deliverable:** one-command local product where an owner performs fixture
-  onboarding, creates agent/device/workload/grant authority, exercises search/describe/status/invoke
-  over the wire, sees a receipt, revokes, reactivates as a new usable version, and reconnects.
+- **Status:** Active and incomplete. The local UI creates/resets fixture context, maps owner-entered
+  agent/device/workload display labels to the fixed non-exported cryptographic test authority,
+  creates/replaces a versioned expiring/limited grant, and drives the wire journey. The labels are
+  not real cryptographic enrollment or workload identity. M1 remains blocked on independent review,
+  parent-run browser journey validation, and a later decision on whether real fixture-only identity
+  composition is required before acceptance.
+- **User-visible deliverable:** one-command local product where an owner labels the fixed fixture
+  agent/device/workload mapping, creates grant authority, exercises search/describe/status/invoke
+  over the wire, sees receipts/audit/usage, revokes, tests denial, replaces the grant, and
+  reconnects.
 - **Security gate:** loopback-only; fixture-only; bounded streaming bodies/sessions; POST-only,
   same-origin, CSRF-protected mutations; no stores/signers/tokens/proxy surface.
-- **Exact acceptance journey:** clean checkout → run → create fixture agent/device/workload/grant in
-  UI → initialize → initialized notification → search → describe → status → invoke → inspect visible
-  receipt → revoke and observe denial → reactivate with new expiry/version → invoke → reconnect.
+- **Exact acceptance journey:** clean checkout → run → create fixture context and identity labels →
+  create grant → initialize → initialized notification → search → describe → status → invoke →
+  inspect visible receipt → revoke → test visible denial/audit → replace with new expiry/version →
+  invoke → reconnect.
 - **Demo/runbook:** `docs/local-setup.md`, actual-listener smoke, browser recording, and fixture
   reset.
 - **URL/N/A:** `http://127.0.0.1:8787/` while running; no hosted URL.
@@ -307,17 +309,23 @@ Open decisions block the milestone in “Due” unless the required evidence sel
   production custody, hosted authority, or multi-user support.
 - **Implementation checklist:**
   - [x] Owner can create/reset the in-memory fixture context.
-  - [x] Owner can name an agent and enroll distinct device/workload identities in lifecycle order.
+  - [x] Owner can add distinct agent/device/workload display labels mapped to fixed test authority.
+  - [ ] Owner-created labels are not real cryptographic agent/device enrollment or workload binding;
+        resolve whether M1 requires a narrow genuine fixture composition.
   - [x] Owner can create and inspect the fixed operation grant with version, expiry, five-call
         limit, and current use.
   - [x] Authority graph, sanitized invocation receipts, and the eight-entry usage window are
         visible.
   - [x] Admin and actual-listener MCP invocation both create visible receipts.
   - [x] Search → describe → connection status → invoke works over Streamable HTTP.
-  - [x] Revoke denies all four paths; replacement creates a new version/expiry and reconnect works.
-  - [x] Unauthorized/stale CSRF, lifecycle order, duplicate enrollment, receipt/usage bounds,
-        revocation/replacement, unrelated sessions, and full HTTP journey are tested.
-  - [x] Loopback, POST/same-origin/CSRF, streaming body, session, and closed facade gates remain.
+  - [x] Revoke provides a denial test, sanitized audit, measured local denial, replacement
+        version/expiry, and reconnect.
+  - [x] Controller and listener races cover create/reset, invoke/reset, duplicate grant, and
+        revoke/invoke; reset leaves no invocable authority or residual receipt/usage.
+  - [x] Unauthorized/stale CSRF, idle session, lifecycle, duplicate labels, receipt/usage bounds,
+        expired display, unrelated sessions, and full HTTP journey are tested.
+  - [x] Loopback, POST/same-origin/CSRF, exact Chrome null-origin navigation, streaming body,
+        session, and closed facade gates remain.
   - [ ] Independent implementation/security review has no blocker.
   - [ ] Clean-browser recording plus keyboard, accessibility, responsive, light/dark, and visual
         validation is accepted.
@@ -480,14 +488,15 @@ All 12 items are required.
 ## Current status and prioritized work
 
 The repository has a 90-case fixture regression core, a 24-scenario durable-authority contract, a
-separate public preview gate, and the complete M1 local fixture implementation. These are inputs to
-acceptance and later product work, not proof that M1, a named client, or production use is accepted.
+separate public preview gate, and an incomplete M1 local fixture implementation using display labels
+mapped to fixed test authority. These are inputs to acceptance and later product work, not proof
+that M1, a named client, or production use is accepted.
 
 Priority order:
 
 1. Accept M0 by reviewing this plan and aligned repository instructions.
-2. Independently review and browser-validate the complete M1 local owner, Agent/MCP, and revocation
-   journeys; do not infer named-client support from wire evidence.
+2. Independently review and parent-browser-validate the corrected M1 local owner, Agent/MCP, and
+   revocation journeys; resolve whether genuine local identity composition is required.
 3. Resolve M2 decisions and implement durable restart, receipts/usage, retention, backup, and
    restore.
 4. Deliver M3 identity/admin, then M4 GitHub OAuth/custody, then M5 named-client evidence.

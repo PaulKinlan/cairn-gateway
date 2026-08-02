@@ -15,8 +15,8 @@ deno task local:run
 Open <http://127.0.0.1:8787/>. In the local admin page you can:
 
 1. create or reset the fixture owner;
-2. name an agent;
-3. enroll a distinct device and workload;
+2. label the fixed fixture agent;
+3. add distinct display labels for its fixture device and workload;
 4. create the fixed `github.user.read@v1` grant;
 5. inspect its authority graph, 24-hour expiry, five-call limit, version, receipts, and recent use;
 6. invoke through local admin or MCP; and
@@ -31,8 +31,7 @@ memory and are lost when the process stops.
 The endpoint is `http://127.0.0.1:8787/mcp`. Cairn keeps a stable four-tool front door:
 `search_capabilities`, `describe_operation`, `connection_status`, and `invoke_operation`.
 
-The following `.vscode/mcp.json` matches the endpoint, but remains a Milestone 5 candidate. The wire
-demo is not a supported-client or VS Code acceptance claim.
+The following `.vscode/mcp.json` matches the endpoint. **VS Code candidate, not yet tested.**
 
 ```json
 {
@@ -70,10 +69,11 @@ network changes.
 
 ## Product direction
 
-[PLAN.md](PLAN.md) is canonical. M1 implementation is ready for independent review and browser
-validation, but is not accepted from implementation or wire evidence alone. Production still needs
-real admin identity and recovery, durable storage, provider credential custody, GitHub OAuth, hosted
-MCP authentication, retention and deletion, named-client validation, and operating runbooks.
+[PLAN.md](PLAN.md) is canonical. M1 remains active: the browser labels map to fixed, non-exported
+fixture cryptographic authority rather than creating real keys or workload identity. Production
+still needs real admin identity and recovery, durable storage, provider credential custody, GitHub
+OAuth, hosted MCP authentication, retention and deletion, named-client validation, and operating
+runbooks.
 
 ## Public preview
 

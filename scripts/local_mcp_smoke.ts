@@ -68,6 +68,7 @@ try {
     const response = await fetch(`${origin}${path}`, {
       method: "POST",
       headers: {
+        Accept: "text/html",
         "Content-Type": "application/x-www-form-urlencoded",
         Cookie: cookie,
         Origin: origin,
@@ -120,6 +121,16 @@ try {
   }
 
   await adminPost("/admin/grant/revoke");
+  if (!html.includes("Grant revoked") || !html.includes("Test denied call")) {
+    throw new Error("revocation audit or denial control missing");
+  }
+  const denialStarted = performance.now();
+  await adminPost("/admin/invoke");
+  const denialLatencyMs = performance.now() - denialStarted;
+  if (
+    denialLatencyMs >= 1_000 || !html.includes("grant_inactive") ||
+    !html.includes("Invocation denied locally in")
+  ) throw new Error("visible measured denial missing");
   for (
     const [id, name, args] of [
       [6, "search_capabilities", { query: "github" }],
@@ -165,7 +176,9 @@ try {
     "local-mcp-demo: search -> describe -> status -> invoke -> receipt passed",
   );
   console.log(
-    "local-mcp-demo: revoke denial -> replacement v4 -> invoke -> reconnect passed",
+    `local-mcp-demo: revoke denial (${
+      denialLatencyMs.toFixed(1)
+    }ms) -> audit -> replacement v4 -> invoke -> reconnect passed`,
   );
 } finally {
   await server.shutdown();

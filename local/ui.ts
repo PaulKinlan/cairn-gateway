@@ -42,6 +42,7 @@ p { max-width: 70ch; }
 .eyebrow { color: var(--action); font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; }
 .lede { color: var(--muted); font-size: 1.15rem; }
 code, pre, input { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+li code { overflow-wrap: anywhere; }
 .command { display: block; width: fit-content; margin-block: 1.25rem; border-radius: 0.45rem; background: var(--ink); color: var(--paper); padding: 0.8rem 1rem; }
 .endpoint, .text-input { width: 100%; min-height: 3rem; border: 1px solid var(--line); border-radius: 0.4rem; background: var(--bg); color: var(--ink); padding: 0.65rem; font-size: 1rem; }
 pre { overflow-x: auto; border: 1px solid var(--line); border-radius: 0.45rem; background: var(--bg); padding: 1rem; }
@@ -64,6 +65,7 @@ button {
 }
 button.secondary { background: transparent; color: var(--action); }
 button.danger { border-color: var(--danger); background: var(--danger); }
+button.quiet-danger { border-color: var(--danger); background: transparent; color: var(--danger); }
 a { color: var(--action); text-underline-offset: 0.18em; }
 :where(a, button, input):focus-visible { outline: 3px solid #e29622; outline-offset: 3px; }
 .notice { border-inline-start: 0.35rem solid var(--action); }
@@ -80,7 +82,7 @@ a { color: var(--action); text-underline-offset: 0.18em; }
 .policy div { border-inline-start: 2px solid var(--line); padding-inline-start: 0.75rem; }
 .policy dt { color: var(--muted); }
 .policy dd { margin: 0; font-weight: 750; overflow-wrap: anywhere; }
-.table-wrap { overflow-x: auto; }
+.table-wrap { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; font-size: 0.94rem; }
 th, td { border-block-end: 1px solid var(--line); padding: 0.7rem 0.6rem; text-align: left; vertical-align: top; }
 th { color: var(--muted); font-weight: 700; }
@@ -113,7 +115,7 @@ button?.addEventListener("click", async () => {
   const config = document.querySelector("#client-config")?.textContent ?? "";
   try {
     await navigator.clipboard.writeText(config);
-    status.textContent = "Candidate VS Code configuration copied.";
+    status.textContent = "VS Code candidate configuration copied.";
   } catch {
     status.textContent = "Copy was blocked. Select the configuration and copy it manually.";
   }
@@ -156,18 +158,18 @@ function onboarding(state: AdminPageState): string {
     return `<div class="step" aria-current="step"><h3>1. Create the fixture owner</h3><p>This starts an empty in-memory owner context and its fixed GitHub connection.</p><form action="/admin/owner/create" method="post">${csrf}<button type="submit">Create fixture owner</button></form></div>`;
   }
   if (!fixture.agent) {
-    return `<div class="step complete"><h3>1. Owner ready</h3></div><div class="step" aria-current="step"><h3>2. Name the agent</h3><form action="/admin/agent/create" method="post">${csrf}<div class="field"><label for="agent-name">Agent name</label><input class="text-input" id="agent-name" name="agent_name" autocomplete="off" maxlength="40" required value="Research agent"></div><button type="submit">Create agent</button></form></div>`;
+    return `<div class="step complete"><h3>1. Owner ready</h3></div><div class="step" aria-current="step"><h3>2. Label the fixture agent</h3><p>This display label maps to Cairn’s fixed, non-exported cryptographic test authority.</p><form action="/admin/agent/create" method="post">${csrf}<div class="field"><label for="agent-name">Agent label</label><input class="text-input" id="agent-name" name="agent_name" autocomplete="off" maxlength="40" required value="Research agent"></div><button type="submit">Save agent label</button></form></div>`;
   }
   if (!fixture.identity) {
-    return `<div class="step complete"><h3>1–2. Owner and agent ready</h3><p>${
-      escapeHtml(fixture.agent.name)
-    }</p></div><div class="step" aria-current="step"><h3>3. Enroll the device and workload</h3><p>Use distinct names. Cairn binds both identities to this agent.</p><form action="/admin/identity/enroll" method="post">${csrf}<div class="field"><label for="device-name">Device name</label><input class="text-input" id="device-name" name="device_name" autocomplete="off" maxlength="40" required value="Local laptop"></div><div class="field"><label for="workload-name">Workload name</label><input class="text-input" id="workload-name" name="workload_name" autocomplete="off" maxlength="40" required value="Local MCP worker"></div><button type="submit">Enroll identities</button></form></div>`;
+    return `<div class="step complete"><h3>1–2. Owner and agent label ready</h3><p>${
+      escapeHtml(fixture.agent.label)
+    }</p></div><div class="step" aria-current="step"><h3>3. Label the fixture device and workload</h3><p>Use distinct display labels. They map to the closed test authority and are not cryptographic enrollment.</p><form action="/admin/identity/enroll" method="post">${csrf}<div class="field"><label for="device-name">Device label</label><input class="text-input" id="device-name" name="device_name" autocomplete="off" maxlength="40" required value="Local laptop"></div><div class="field"><label for="workload-name">Workload label</label><input class="text-input" id="workload-name" name="workload_name" autocomplete="off" maxlength="40" required value="Local MCP worker"></div><button type="submit">Save identity labels</button></form></div>`;
   }
   if (!fixture.grant) {
-    return `<div class="step complete"><h3>1–3. Identities ready</h3><p>${
-      escapeHtml(fixture.agent.name)
-    } · ${escapeHtml(fixture.identity.deviceName)} · ${
-      escapeHtml(fixture.identity.workloadName)
+    return `<div class="step complete"><h3>1–3. Fixture labels ready</h3><p>${
+      escapeHtml(fixture.agent.label)
+    } · ${escapeHtml(fixture.identity.deviceLabel)} · ${
+      escapeHtml(fixture.identity.workloadLabel)
     }</p></div><div class="step" aria-current="step"><h3>4. Create the grant</h3><p>The fixture policy is fixed: <code>github.user.read@v1</code>, 24-hour expiry, and 5 calls.</p><form action="/admin/grant/create" method="post">${csrf}<button type="submit">Create grant</button></form></div>`;
   }
   return `<div class="step complete"><h3>Onboarding complete</h3><p>The authority graph is ready. Invoke locally or connect over MCP.</p></div>`;
@@ -176,13 +178,13 @@ function onboarding(state: AdminPageState): string {
 function authorityGraph(state: LocalFixtureView): string {
   const owner =
     `<li class="node"><h3>Owner</h3><p><span class="status">${state.owner}</span></p><p class="muted">Local fixture context</p></li>`;
-  const agent = `<li class="node"><h3>Agent</h3><p>${
-    state.agent ? escapeHtml(state.agent.name) : "Not created"
+  const agent = `<li class="node"><h3>Agent label</h3><p>${
+    state.agent ? escapeHtml(state.agent.label) : "Not set"
   }</p><p class="muted">${state.agent?.status ?? "missing"}</p></li>`;
-  const identity = `<li class="node"><h3>Device + workload</h3><p>${
+  const identity = `<li class="node"><h3>Device + workload labels</h3><p>${
     state.identity
-      ? `${escapeHtml(state.identity.deviceName)}<br>${escapeHtml(state.identity.workloadName)}`
-      : "Not enrolled"
+      ? `${escapeHtml(state.identity.deviceLabel)}<br>${escapeHtml(state.identity.workloadLabel)}`
+      : "Not set"
   }</p><p class="muted">${state.identity?.status ?? "missing"}</p></li>`;
   const grant =
     `<li class="node"><h3>Grant</h3><p><code>github.user.read@v1</code></p><p class="muted">${
@@ -193,20 +195,19 @@ function authorityGraph(state: LocalFixtureView): string {
 
 function grantPanel(state: AdminPageState): string {
   const grant = state.fixture.grant;
-  if (!grant) return `<p>Create the grant after enrolling the device and workload.</p>`;
+  if (!grant) return `<p>Create the grant after saving the fixture identity labels.</p>`;
   const csrf = hidden(state.csrfToken);
   const active = grant.status === "active";
+  const controls = active
+    ? `<form action="/admin/invoke" method="post">${csrf}<button type="submit">Invoke fixture operation</button></form><form action="/admin/grant/revoke" method="post">${csrf}<button class="danger" type="submit">Revoke grant</button></form>`
+    : `<form action="/admin/invoke" method="post">${csrf}<button type="submit">Test denied call</button></form><form action="/admin/grant/reactivate" method="post">${csrf}<button class="secondary" type="submit">Create replacement grant</button></form>`;
   return `<p><span class="status">${
     escapeHtml(grant.status)
   }</span></p><dl class="policy"><div><dt>Operation</dt><dd><code>${grant.operation}</code></dd></div><div><dt>Version</dt><dd>${grant.version}</dd></div><div><dt>Expires</dt><dd><time datetime="${
     isoTime(grant.expiresAt)
   }">${
     isoTime(grant.expiresAt)
-  }</time></dd></div><div><dt>Usage</dt><dd>${grant.used} of ${grant.usageLimit}</dd></div></dl><div class="actions">${
-    active
-      ? `<form action="/admin/invoke" method="post">${csrf}<button type="submit">Invoke fixture operation</button></form><form action="/admin/grant/revoke" method="post">${csrf}<button class="danger" type="submit">Revoke grant</button></form>`
-      : `<form action="/admin/grant/reactivate" method="post">${csrf}<button type="submit">Create replacement grant</button></form>`
-  }</div><p class="muted">Replacement creates a new version, expiry, and usage window. It does not relabel the revoked grant.</p>`;
+  }</time></dd></div><div><dt>Usage</dt><dd>${grant.used} of ${grant.usageLimit}</dd></div></dl><div class="actions">${controls}</div><p class="muted">Test a denied call before replacement. Replacement creates a new version, expiry, and usage window.</p>`;
 }
 
 function receiptRows(state: LocalFixtureView): string {
@@ -221,6 +222,17 @@ function receiptRows(state: LocalFixtureView): string {
     }</td><td>${receipt.requestUnits}</td><td>${receipt.grantVersion}</td><td><code>${
       escapeHtml(receipt.id)
     }</code></td></tr>`
+  ).join("");
+}
+
+function auditRows(state: LocalFixtureView): string {
+  if (state.audit.length === 0) {
+    return `<tr><td colspan="3">No grant lifecycle events yet.</td></tr>`;
+  }
+  return state.audit.map((event) =>
+    `<tr><td><time datetime="${isoTime(event.at)}">${isoTime(event.at)}</time></td><td>${
+      event.event === "grant_revoked" ? "Grant revoked" : "Replacement grant created"
+    }</td><td>${event.grantVersion}</td></tr>`
   ).join("");
 }
 
@@ -247,9 +259,9 @@ export function renderAdminPage(state: AdminPageState): string {
       escapeHtml(state.result)
     }</pre></section>`;
   const reset = state.fixture.owner === "active"
-    ? `<form action="/admin/owner/reset" method="post">${
+    ? `<section class="wide" aria-labelledby="reset-title"><h2 id="reset-title">Reset fixture</h2><p>Remove all local labels, authority, receipts, usage, and audit events.</p><form action="/admin/owner/reset" method="post">${
       hidden(state.csrfToken)
-    }<button class="danger" type="submit">Reset fixture owner</button></form>`
+    }<button class="quiet-danger" type="submit">Reset fixture owner</button></form></section>`
     : "";
   return `<!DOCTYPE html>
 <html lang="en">
@@ -273,7 +285,7 @@ export function renderAdminPage(state: AdminPageState): string {
     ${notice}
     <section class="wide" aria-labelledby="onboarding-title"><h2 id="onboarding-title">Fixture onboarding</h2><div class="steps">${
     onboarding(state)
-  }</div><div class="actions">${reset}</div></section>
+  }</div></section>
     <section class="wide" aria-labelledby="graph-title"><h2 id="graph-title">Authority graph</h2>${
     authorityGraph(state.fixture)
   }</section>
@@ -287,16 +299,29 @@ export function renderAdminPage(state: AdminPageState): string {
     <section class="wide" aria-labelledby="usage-title"><h2 id="usage-title">Recent usage</h2><p>Up to 8 recent invocation attempts are kept in memory.</p><div class="table-wrap"><table><thead><tr><th>Time</th><th>Source</th><th>Decision</th><th>Units</th><th>Grant version</th></tr></thead><tbody>${
     usageRows(state.fixture)
   }</tbody></table></div></section>
+    <section class="wide" aria-labelledby="audit-title"><h2 id="audit-title">Grant audit</h2><p>Sanitized revoke and replacement events are kept in memory.</p><div class="table-wrap"><table><thead><tr><th>Time</th><th>Event</th><th>Grant version</th></tr></thead><tbody>${
+    auditRows(state.fixture)
+  }</tbody></table></div></section>
     <section class="wide" aria-labelledby="connect-title">
       <h2 id="connect-title">Connect over MCP</h2>
       <p>The endpoint is <code>${escapeHtml(endpoint)}</code>. Complete onboarding first.</p>
       <label for="endpoint">MCP endpoint</label>
       <input class="endpoint" id="endpoint" value="${escapeHtml(endpoint)}" readonly>
       <pre id="client-config">${escapeHtml(config)}</pre>
-      <button type="button" class="secondary" data-copy>Copy candidate VS Code configuration</button>
+      <button type="button" class="secondary" data-copy>Copy VS Code candidate configuration</button>
       <p id="copy-status" class="copy-status" aria-live="polite"></p>
-      <p>This is a candidate configuration pending named-client validation in Milestone 5. Wire evidence is not VS Code acceptance.</p>
+      <p><strong>VS Code candidate, not yet tested.</strong></p>
+      <h3>Wire sequence</h3>
+      <ol>
+        <li>Send <code>initialize</code>, retain <code>Mcp-Session-Id</code>, then send <code>notifications/initialized</code>.</li>
+        <li>Call <code>search_capabilities</code> with <code>{&quot;query&quot;:&quot;github user&quot;}</code>.</li>
+        <li>Call <code>describe_operation</code> with <code>{&quot;operation&quot;:&quot;github.user.read@v1&quot;}</code>.</li>
+        <li>Call <code>connection_status</code> with <code>{&quot;connection&quot;:&quot;connection_a&quot;}</code>.</li>
+        <li>Call <code>invoke_operation</code> with the operation, connection, and empty arguments.</li>
+        <li>Reconnect by initializing a new session and repeat the invoke call without rebuilding authority.</li>
+      </ol>
     </section>
+    ${reset}
   </main>
   <footer><p>Setup and the exact wire journey are in <code>docs/local-setup.md</code>.</p></footer>
 </body>

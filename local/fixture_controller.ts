@@ -5,6 +5,7 @@ import {
 
 const MAX_RECEIPTS = 8;
 const MAX_USAGE_EVENTS = 8;
+const MAX_AUDIT_EVENTS = 8;
 const GRANT_LIFETIME_SECONDS = 24 * 60 * 60;
 const GRANT_USAGE_LIMIT = 5;
 
@@ -26,11 +27,16 @@ export interface LocalUsageEvent {
   requestUnits: 0 | 1;
   grantVersion: number;
 }
+export interface LocalAuditEvent {
+  at: number;
+  event: "grant_revoked" | "grant_replaced";
+  grantVersion: number;
+}
 export interface LocalFixtureView {
   owner: "missing" | "active";
   connection: "missing" | "active";
-  agent?: { name: string; status: "active" };
-  identity?: { deviceName: string; workloadName: string; status: "active" };
+  agent?: { label: string; status: "mapped" };
+  identity?: { deviceLabel: string; workloadLabel: string; status: "mapped" };
   grant?: {
     operation: "github.user.read@v1";
     status: "active" | "revoked" | "expired" | "exhausted";
@@ -41,6 +47,7 @@ export interface LocalFixtureView {
   };
   receipts: readonly LocalReceipt[];
   usage: readonly LocalUsageEvent[];
+  audit: readonly LocalAuditEvent[];
 }
 
 export interface LocalFixtureController {
@@ -61,9 +68,9 @@ export interface LocalFixtureController {
 
 interface MutableState {
   owner: boolean;
-  agentName?: string;
-  deviceName?: string;
-  workloadName?: string;
+  agentLabel?: string;
+  deviceLabel?: string;
+  workloadLabel?: string;
   harness?: FixtureGatewayHarness;
   grant?: {
     status: "active" | "revoked";
@@ -74,6 +81,8 @@ interface MutableState {
   };
   receipts: LocalReceipt[];
   usage: LocalUsageEvent[];
+  audit: LocalAuditEvent[];
+  generation: number;
 }
 
 function nowSeconds(): number {
@@ -82,10 +91,10 @@ function nowSeconds(): number {
   return value;
 }
 
-function displayName(value: string): string {
+function displayLabel(value: string): string {
   const normalized = value.trim().replaceAll(/\s+/g, " ");
   if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]{0,39}$/.test(normalized)) {
-    throw new Error("name denied");
+    throw new Error("label denied");
   }
   return normalized;
 }
@@ -120,7 +129,20 @@ function resultReceipt(value: unknown): { decision: "allow" | "error"; requestUn
 }
 
 function closedFacade(state: MutableState): LocalFixtureController {
-  let invocationTail: Promise<void> = Promise.resolve();
+  let lifecycleTail: Promise<void> = Promise.resolve();
+
+  const serialized = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => release = resolve);
+    const prior = lifecycleTail;
+    lifecycleTail = prior.then(() => gate);
+    await prior;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
 
   const grantStatus = (): "active" | "revoked" | "expired" | "exhausted" | undefined => {
     if (!state.grant) return undefined;
@@ -136,8 +158,9 @@ function closedFacade(state: MutableState): LocalFixtureController {
     reason: LocalReceipt["reason"],
     requestUnits: 0 | 1,
   ): void => {
+    const grant = state.grant;
+    if (!state.owner || !grant) return;
     const at = nowSeconds();
-    const grantVersion = state.grant?.version ?? 0;
     state.receipts.unshift(Object.freeze({
       id: crypto.randomUUID().replaceAll("-", "").slice(0, 16),
       at,
@@ -146,11 +169,24 @@ function closedFacade(state: MutableState): LocalFixtureController {
       decision,
       reason,
       requestUnits,
-      grantVersion,
+      grantVersion: grant.version,
     }));
     state.receipts.length = Math.min(state.receipts.length, MAX_RECEIPTS);
-    state.usage.unshift(Object.freeze({ at, source, decision, requestUnits, grantVersion }));
+    state.usage.unshift(Object.freeze({
+      at,
+      source,
+      decision,
+      requestUnits,
+      grantVersion: grant.version,
+    }));
     state.usage.length = Math.min(state.usage.length, MAX_USAGE_EVENTS);
+  };
+
+  const audit = (event: LocalAuditEvent["event"]): void => {
+    const grant = state.grant;
+    if (!grant) return;
+    state.audit.unshift(Object.freeze({ at: nowSeconds(), event, grantVersion: grant.version }));
+    state.audit.length = Math.min(state.audit.length, MAX_AUDIT_EVENTS);
   };
 
   const view = (): LocalFixtureView => {
@@ -158,13 +194,15 @@ function closedFacade(state: MutableState): LocalFixtureController {
     const snapshot: LocalFixtureView = {
       owner: state.owner ? "active" : "missing",
       connection: state.owner ? "active" : "missing",
-      ...(state.agentName ? { agent: { name: state.agentName, status: "active" as const } } : {}),
-      ...(state.deviceName && state.workloadName
+      ...(state.agentLabel
+        ? { agent: { label: state.agentLabel, status: "mapped" as const } }
+        : {}),
+      ...(state.deviceLabel && state.workloadLabel
         ? {
           identity: {
-            deviceName: state.deviceName,
-            workloadName: state.workloadName,
-            status: "active" as const,
+            deviceLabel: state.deviceLabel,
+            workloadLabel: state.workloadLabel,
+            status: "mapped" as const,
           },
         }
         : {}),
@@ -182,80 +220,106 @@ function closedFacade(state: MutableState): LocalFixtureController {
         : {}),
       receipts: state.receipts.map((receipt) => ({ ...receipt })),
       usage: state.usage.map((event) => ({ ...event })),
+      audit: state.audit.map((event) => ({ ...event })),
     };
     return structuredClone(snapshot);
   };
 
-  const createOwner = (): Promise<void> => {
-    if (state.owner) throw new Error("owner already exists");
-    state.owner = true;
-    return Promise.resolve();
-  };
-  const resetOwner = (): Promise<void> => {
-    state.owner = false;
-    delete state.agentName;
-    delete state.deviceName;
-    delete state.workloadName;
-    delete state.harness;
-    delete state.grant;
-    state.receipts.length = 0;
-    state.usage.length = 0;
-    return Promise.resolve();
-  };
-  const createAgent = (name: string): Promise<void> => {
-    if (!state.owner || state.agentName) throw new Error("agent lifecycle denied");
-    state.agentName = displayName(name);
-    return Promise.resolve();
-  };
-  const enrollIdentity = (deviceName: string, workloadName: string): Promise<void> => {
-    if (!state.owner || !state.agentName || state.deviceName || state.workloadName) {
-      throw new Error("identity lifecycle denied");
-    }
-    const device = displayName(deviceName);
-    const workload = displayName(workloadName);
-    const distinct = new Set(
-      [state.agentName, device, workload].map((value) => value.toLowerCase()),
-    );
-    if (distinct.size !== 3) throw new Error("identities must be distinct");
-    state.deviceName = device;
-    state.workloadName = workload;
-    return Promise.resolve();
-  };
-  const createGrant = async (): Promise<void> => {
-    if (
-      !state.owner || !state.agentName || !state.deviceName || !state.workloadName || state.grant
-    ) throw new Error("grant lifecycle denied");
-    state.harness = await createFixtureGatewayHarness();
-    const now = nowSeconds();
-    state.grant = {
-      status: "active",
-      version: 1,
-      expiresAt: now + GRANT_LIFETIME_SECONDS,
-      usageLimit: GRANT_USAGE_LIMIT,
-      used: 0,
-    };
-  };
-  const revokeGrant = async (): Promise<void> => {
-    if (!state.grant || !state.harness || state.grant.status !== "active") {
-      throw new Error("grant lifecycle denied");
-    }
-    await state.harness.revoke("grant");
-    state.grant.status = "revoked";
-    state.grant.version += 1;
-  };
-  const reactivateGrant = async (): Promise<void> => {
-    if (!state.grant || !state.harness || grantStatus() === "active") {
-      throw new Error("grant lifecycle denied");
-    }
-    await state.harness.revokeAndReactivate("grant");
-    state.grant.status = "active";
-    state.grant.version += 2;
-    const nextExpiry = nowSeconds() + GRANT_LIFETIME_SECONDS;
-    state.grant.expiresAt = nextExpiry > state.grant.expiresAt
-      ? nextExpiry
-      : state.grant.expiresAt + 1;
-    state.grant.used = 0;
-  };
+  const createOwner = (): Promise<void> =>
+    serialized(() => {
+      if (state.owner) throw new Error("owner already exists");
+      state.owner = true;
+      state.generation += 1;
+    });
+
+  const resetOwner = (): Promise<void> =>
+    serialized(() => {
+      state.generation += 1;
+      state.owner = false;
+      delete state.agentLabel;
+      delete state.deviceLabel;
+      delete state.workloadLabel;
+      delete state.harness;
+      delete state.grant;
+      state.receipts.length = 0;
+      state.usage.length = 0;
+      state.audit.length = 0;
+    });
+
+  const createAgent = (name: string): Promise<void> =>
+    serialized(() => {
+      if (!state.owner || state.agentLabel) throw new Error("agent lifecycle denied");
+      state.agentLabel = displayLabel(name);
+      state.generation += 1;
+    });
+
+  const enrollIdentity = (deviceName: string, workloadName: string): Promise<void> =>
+    serialized(() => {
+      if (!state.owner || !state.agentLabel || state.deviceLabel || state.workloadLabel) {
+        throw new Error("identity lifecycle denied");
+      }
+      const device = displayLabel(deviceName);
+      const workload = displayLabel(workloadName);
+      const distinct = new Set(
+        [state.agentLabel, device, workload].map((value) => value.toLowerCase()),
+      );
+      if (distinct.size !== 3) throw new Error("identity labels must be distinct");
+      state.deviceLabel = device;
+      state.workloadLabel = workload;
+      state.generation += 1;
+    });
+
+  const createGrant = (): Promise<void> =>
+    serialized(async () => {
+      if (
+        !state.owner || !state.agentLabel || !state.deviceLabel || !state.workloadLabel ||
+        state.grant
+      ) throw new Error("grant lifecycle denied");
+      const generation = state.generation;
+      const harness = await createFixtureGatewayHarness();
+      if (
+        generation !== state.generation || !state.owner || !state.agentLabel ||
+        !state.deviceLabel || !state.workloadLabel || state.grant
+      ) throw new Error("grant lifecycle denied");
+      state.harness = harness;
+      state.grant = {
+        status: "active",
+        version: 1,
+        expiresAt: nowSeconds() + GRANT_LIFETIME_SECONDS,
+        usageLimit: GRANT_USAGE_LIMIT,
+        used: 0,
+      };
+      state.generation += 1;
+    });
+
+  const revokeGrant = (): Promise<void> =>
+    serialized(async () => {
+      if (!state.grant || !state.harness || state.grant.status !== "active") {
+        throw new Error("grant lifecycle denied");
+      }
+      await state.harness.revoke("grant");
+      state.grant.status = "revoked";
+      state.grant.version += 1;
+      state.generation += 1;
+      audit("grant_revoked");
+    });
+
+  const reactivateGrant = (): Promise<void> =>
+    serialized(async () => {
+      if (!state.grant || !state.harness || grantStatus() === "active") {
+        throw new Error("grant lifecycle denied");
+      }
+      await state.harness.revokeAndReactivate("grant");
+      state.grant.status = "active";
+      state.grant.version += 2;
+      const nextExpiry = nowSeconds() + GRANT_LIFETIME_SECONDS;
+      state.grant.expiresAt = nextExpiry > state.grant.expiresAt
+        ? nextExpiry
+        : state.grant.expiresAt + 1;
+      state.grant.used = 0;
+      state.generation += 1;
+      audit("grant_replaced");
+    });
 
   const dispatchInvocation = async (
     receivedBody: Uint8Array,
@@ -263,7 +327,10 @@ function closedFacade(state: MutableState): LocalFixtureController {
     source: InvocationSource,
   ): Promise<Record<string, unknown> | undefined> => {
     const status = grantStatus();
-    if (!state.harness || status !== "active") {
+    if (!state.harness || !state.grant || !state.owner) {
+      throw new Error("fixture authority denied");
+    }
+    if (status !== "active") {
       const reason = status === "expired"
         ? "grant_expired"
         : status === "exhausted"
@@ -272,10 +339,14 @@ function closedFacade(state: MutableState): LocalFixtureController {
       record(source, "deny", reason, 0);
       throw new Error("fixture authority denied");
     }
+    const generation = state.generation;
     try {
       const response = await state.harness.dispatch(receivedBody, path);
+      if (generation !== state.generation || !state.owner || !state.grant) {
+        throw new Error("fixture generation denied");
+      }
       const safe = resultReceipt(response);
-      if (safe.decision === "allow" && safe.requestUnits === 1) state.grant!.used += 1;
+      if (safe.decision === "allow" && safe.requestUnits === 1) state.grant.used += 1;
       record(
         source,
         safe.decision,
@@ -284,35 +355,29 @@ function closedFacade(state: MutableState): LocalFixtureController {
       );
       return response;
     } catch {
-      record(source, "deny", "policy_denied", 0);
+      if (generation === state.generation && state.owner && state.grant) {
+        record(source, "deny", "policy_denied", 0);
+      }
       throw new Error("fixture authority denied");
     }
   };
 
-  const dispatch = async (
+  const dispatch = (
     receivedBody: Uint8Array,
     path: "/mcp" | "/mcp/legacy" = "/mcp",
     source: InvocationSource = "mcp",
-  ): Promise<Record<string, unknown> | undefined> => {
-    if (path !== "/mcp" && path !== "/mcp/legacy") throw new Error("route denied");
-    if (source !== "local_admin" && source !== "mcp") throw new Error("source denied");
-    if (!state.harness || grantStatus() !== "active") {
-      if (isInvocation(receivedBody)) return await dispatchInvocation(receivedBody, path, source);
-      throw new Error("fixture authority denied");
-    }
-    if (!isInvocation(receivedBody)) return await state.harness.dispatch(receivedBody, path);
-
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => release = resolve);
-    const prior = invocationTail;
-    invocationTail = prior.then(() => gate);
-    await prior;
-    try {
-      return await dispatchInvocation(receivedBody, path, source);
-    } finally {
-      release();
-    }
-  };
+  ): Promise<Record<string, unknown> | undefined> =>
+    serialized(async () => {
+      if (path !== "/mcp" && path !== "/mcp/legacy") throw new Error("route denied");
+      if (source !== "local_admin" && source !== "mcp") throw new Error("source denied");
+      if (isInvocation(receivedBody)) {
+        return await dispatchInvocation(receivedBody, path, source);
+      }
+      if (!state.owner || !state.harness || !state.grant || grantStatus() !== "active") {
+        throw new Error("fixture authority denied");
+      }
+      return await state.harness.dispatch(receivedBody, path);
+    });
 
   const capabilities = {
     view,
@@ -332,7 +397,16 @@ function closedFacade(state: MutableState): LocalFixtureController {
   return Object.freeze(Object.assign(Object.create(null), capabilities));
 }
 
-/** Fixture-only local controller. It exposes lifecycle actions and sanitized views, never authority internals. */
+/**
+ * Fixture-only local controller. Display labels map to the fixed, non-exported cryptographic test
+ * authority; they are not caller-selected authorization identifiers.
+ */
 export function createLocalFixtureController(): LocalFixtureController {
-  return closedFacade({ owner: false, receipts: [], usage: [] });
+  return closedFacade({
+    owner: false,
+    receipts: [],
+    usage: [],
+    audit: [],
+    generation: 0,
+  });
 }
