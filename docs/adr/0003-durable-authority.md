@@ -1,6 +1,7 @@
-# ADR 0003: Durable authority contract (adapter not selected)
+# ADR 0003: Durable authority contract and Deno KV candidate
 
-- **Status:** Contract accepted for offline qualification; production adapter unresolved
+- **Status:** Contract accepted for offline qualification; Deno KV selected for M2 on 2026-08-02,
+  implementation and hosted qualification pending
 
 ## Decision
 
@@ -57,9 +58,17 @@ capability, change ownership/schema decisions, or make returned snapshots mutabl
 supported schema 1 to 2 transition may enter preparing/committing; unsupported targets are denied
 before a transition is persisted, and recovery returns every admitted transition to a valid state.
 
-## Storage decision deferred
+## Storage decision
 
-The offline file reference is test machinery only. No Deno KV or external database is chosen. A
-production adapter requires separately authorized current documentation evidence for atomicity,
-ambiguous commit behavior, transaction/value limits, isolation, TTL, region, retention, export,
-backup, and restore. Unsupported semantics block selection rather than weakening this contract.
+Paul selected **Deno KV** for M2 on 2026-08-02. The offline file reference remains test machinery
+only, and this selection is not production acceptance. The adapter must use strong reads for every
+authority decision, map versionstamps and atomic checks/mutations to the unchanged transaction
+contract, and fail closed before exceeding Deno KV's published transaction, key, or value limits.
+The exact adapter and hosted topology must pass all 24 unchanged scenarios plus remote races,
+ambiguous commit/dispatch, migration, stale/corrupt restore, receipt deletion, and restart tests.
+
+Current Deno documentation says hosted KV data is stored in and transits through the United States.
+It documents customer-controlled backup streaming but does not yet provide sufficient evidence of a
+complete managed restore procedure, retention, or measured RPO/RTO for Cairn. Those facts remain
+explicit pre-private-data gates. No hosted database, credential, private data, production authority,
+or deployment is authorized by this ADR; hosted provisioning requires separate approval.

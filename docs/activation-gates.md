@@ -47,8 +47,10 @@ migration targets are rejected before any preparing/committing transition is per
 
 ## Still blocked
 
-No live activation until separately selected and reviewed: durable database semantics/limits/region,
-backup and restore, capability/device key custody, named MCP clients and official transport,
-callback authority, vendor custody/key scope, revocation promise, receipt retention/deletion, and
-incident hold. Stage 1A adds no listener, vendor, credential, environment, fetch, remote import, UI,
-deploy configuration, or Git remote. It makes no external exactly-once claim.
+Deno KV was selected for M2 on 2026-08-02, but selection is not qualification. No live activation
+until the exact adapter/topology passes the unchanged 24 scenarios and proves atomic/value limits,
+strong-read/CAS behavior, ambiguity handling, hosted US storage/transit acceptance, backup and
+restore, and receipt retention/deletion. Capability/device key custody, named MCP clients and
+official transport, callback authority, vendor custody/key scope, revocation promise, and incident
+hold also remain blocked. Stage 1A adds no listener, vendor, credential, environment, fetch, remote
+import, UI, deploy configuration, or Git remote. It makes no external exactly-once claim.

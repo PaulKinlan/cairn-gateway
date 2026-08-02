@@ -71,9 +71,11 @@ network changes.
 
 [PLAN.md](PLAN.md) is canonical. M1 is accepted as the usable local fixture: browser labels map to
 fixed, non-exported fixture cryptographic authority rather than creating real keys or workload
-identity. Real enrollment is M3. Production still needs durable storage, provider credential
-custody, GitHub OAuth, hosted MCP authentication, retention and deletion, named-client validation,
-and operating runbooks.
+identity. Real enrollment is M3. Deno KV is the selected M2 durable-store candidate, but it is not
+yet implemented or qualified; hosted provisioning remains separately gated. Production still needs
+the unchanged durability contract proven on that adapter, export/restore and retention/deletion,
+provider credential custody, GitHub OAuth, hosted MCP authentication, named-client validation, and
+operating runbooks.
 
 ## Public preview
 
