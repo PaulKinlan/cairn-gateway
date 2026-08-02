@@ -43,4 +43,5 @@ methods return `405`; unknown paths and paths with query strings return `404`.
 Run the permission-free local handler smoke check with `deno task preview:run`, its tests with
 `deno task test:preview`, or the dedicated format/lint/type/test gate with
 `deno task check:preview`. Deno Deploy is configured at the repository root with the exact runtime
-entrypoint `preview/main.ts`; it consumes the default export and requires no environment setup.
+entrypoint `preview/server.ts`, a two-line hosting adapter that passes requests to the
+permission-free default handler in `preview/main.ts`. It requires no environment setup.

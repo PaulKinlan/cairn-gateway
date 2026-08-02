@@ -290,4 +290,9 @@ Deno.test("preview source has no activation, dependency, or mutable browser surf
   ) assert(!forbidden.test(source), String(forbidden));
   const externalUrls = source.match(/https?:\/\/[^"'\s<]+/g) ?? [];
   equals(externalUrls, [REPOSITORY_URL]);
+  const server = await Deno.readTextFile("preview/server.ts");
+  equals(
+    server,
+    'import preview from "./main.ts";\n\nDeno.serve((request) => preview.fetch(request));\n',
+  );
 });

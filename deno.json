@@ -28,7 +28,7 @@
     "dependency-graph": "deno info --json packages/core/mod.ts >/dev/null",
     "dependency-audit": "deno audit",
     "preview:run": "deno run scripts/preview_smoke.ts",
-    "typecheck:preview": "deno check preview/main.ts scripts/preview_smoke.ts tests/preview/preview.test.ts",
+    "typecheck:preview": "deno check preview/main.ts preview/server.ts scripts/preview_smoke.ts tests/preview/preview.test.ts",
     "test:preview": "deno test --allow-read=preview tests/preview",
     "check:preview": "deno fmt --check preview scripts/preview_smoke.ts tests/preview && deno lint preview scripts/preview_smoke.ts tests/preview && deno task typecheck:preview && deno task test:preview && deno task preview:run",
     "check:stage0": "deno task stage0:preflight && deno task fmt && deno task lint && deno task typecheck && deno task mcp-contract && deno task test:stage0 && deno task security && deno task dependency-graph && deno task dependency-audit && deno task coverage:stage0",
@@ -39,8 +39,8 @@
     "org": "paulkinlan-ea",
     "app": "cairn-gateway",
     "runtime": {
-      "mode": "dynamic",
-      "entrypoint": "preview/main.ts"
+      "type": "dynamic",
+      "entrypoint": "preview/server.ts"
     }
   },
   "lock": { "frozen": true }
