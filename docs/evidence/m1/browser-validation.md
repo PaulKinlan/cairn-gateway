@@ -1,11 +1,11 @@
 # M1 browser validation
 
-- **Source commit:** `90808f8030beed074e0fbe04f130c6bb0f5152f5`
+- **Source commit:** `7b1607a5add89b4ff5e3fbdd73a674f6231b59ef`
 - **Date:** 2026-08-02
 - **Browser:** Headless Chrome `150.0.7871.24`, reported user agent `HeadlessChrome/150.0.0.0`
-- **Harness:** Chrome DevTools MCP, isolated context `cairn-m1-90808-validation`
-- **Local route:** `http://127.0.0.1:8793/`
-- **Owned server:** PID `2490481`, start ticks `136078312`; bound to loopback only
+- **Harness:** Chrome DevTools MCP, isolated context `cairn-m1-7b1607-validation`
+- **Local route:** `http://127.0.0.1:8794/`
+- **Owned server:** PID `2545042`, start ticks `136189796`; bound to loopback only
 - **Browser ownership:** this validation opened and later closed one isolated MCP page. It did not
   launch or own the shared MCP Chrome process or profile, so it did not terminate either.
 
@@ -41,14 +41,14 @@ successfully.
 ## Evidence
 
 - [Desktop light](desktop-light.png) — SHA-256
-  `6e1833979880aae750791bf4c20982666ade485e7e79ee81e9a73df6d77f79f4`
+  `be452e7cbc9c0b88bece08d33a685580a558bbab10c3998cfe48e8914e30b76d`
 - [Mobile dark](mobile-dark.png) — SHA-256
-  `248d274ddddb2a046c444044e89c46f3e138d3503f0f01c31a072845595f6055`
-- Lighthouse report SHA-256: `9cffc364d0a890324865c361af022a0ef2e360d968c643002b5a9d7a14730112`
+  `bb754b69945c911edd49fc87522e0176798e2b63e8e659bb2a561057221262a3`
+- Lighthouse report SHA-256: `42f30831899d742485f9e519d0e121b5a1d3711196b01a12f426443c177a5751`
   (private local report; the bounded scores are recorded above)
 
 ## Verdict
 
-The independently reviewed M1 partial submilestone is browser-usable and responsive. M1 remains
-incomplete because the owner-entered identity values are display labels mapped to the fixed closed
-fixture authority rather than genuine cryptographic agent/device enrollment and workload binding.
+M1 is browser-usable and responsive. It intentionally uses display labels mapped to the fixed closed
+fixture authority; genuine cryptographic agent/device enrollment and workload binding are M3 work
+and are not claimed here.

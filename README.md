@@ -69,11 +69,11 @@ network changes.
 
 ## Product direction
 
-[PLAN.md](PLAN.md) is canonical. M1 remains active: the browser labels map to fixed, non-exported
-fixture cryptographic authority rather than creating real keys or workload identity. Production
-still needs real admin identity and recovery, durable storage, provider credential custody, GitHub
-OAuth, hosted MCP authentication, retention and deletion, named-client validation, and operating
-runbooks.
+[PLAN.md](PLAN.md) is canonical. M1 is accepted as the usable local fixture: browser labels map to
+fixed, non-exported fixture cryptographic authority rather than creating real keys or workload
+identity. Real enrollment is M3. Production still needs durable storage, provider credential
+custody, GitHub OAuth, hosted MCP authentication, retention and deletion, named-client validation,
+and operating runbooks.
 
 ## Public preview
 
