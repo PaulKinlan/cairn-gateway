@@ -1,9 +1,9 @@
 # Run Cairn locally
 
-This path runs entirely on your machine. It uses the accepted fixture authority and a fixed GitHub
-user response, so no provider account or credential is needed.
+This path runs entirely on your machine. It uses a fixed GitHub user fixture, so no provider account
+or credential is needed.
 
-## Start the server
+## Start
 
 Use Deno 2.9.0 from the repository root:
 
@@ -11,8 +11,8 @@ Use Deno 2.9.0 from the repository root:
 deno task local:run
 ```
 
-Open <http://127.0.0.1:8787/>. Cairn listens only on `127.0.0.1`; the MCP Streamable HTTP endpoint
-is `http://127.0.0.1:8787/mcp`.
+Open <http://127.0.0.1:8787/>. Cairn listens only on `127.0.0.1`; the MCP endpoint is
+`http://127.0.0.1:8787/mcp`.
 
 To choose another loopback port:
 
@@ -20,11 +20,85 @@ To choose another loopback port:
 deno task local:run --port 8790
 ```
 
+## Build fixture authority
+
+Use the browser page in order:
+
+1. **Create fixture owner.** This creates an empty local owner context and makes the fixed GitHub
+   connection available.
+2. **Create agent.** Give the fixture agent a short display name.
+3. **Enroll identities.** Give the device and workload distinct names. They are separate fixture
+   identities bound to the agent.
+4. **Create grant.** The closed policy allows `github.user.read@v1` for 24 hours and five successful
+   calls. The page shows status, version, exact expiry, limit, and use.
+5. **Invoke.** Use the local admin button or MCP. The page shows the projected fixture user, a
+   sanitized receipt, and bounded recent usage. Refresh after an MCP call.
+6. **Revoke.** Search, describe, connection status, and invoke all deny immediately.
+7. **Create replacement grant.** Cairn creates a new version, expiry, and five-call usage window; it
+   does not relabel the revoked grant as active.
+8. **Reset fixture owner** when you want to erase all in-memory authority, receipts, and usage.
+
+Admin mutations require a bounded local admin session and use POST, exact same-origin checks,
+streaming body limits, and a rotating CSRF token. Stale forms fail closed; reload the page before
+retrying. State resets when the process exits.
+
+## Exact wire journey
+
+The listener implements the wire-level Streamable HTTP lifecycle for MCP protocol version
+`2025-06-18`. Requests use `POST /mcp` with `Content-Type: application/json` and an `Accept` header
+containing both `application/json` and `text/event-stream`. Initialization returns an
+`Mcp-Session-Id`; later requests send it with `MCP-Protocol-Version: 2025-06-18`.
+
+After `initialize` and `notifications/initialized`, call the four stable tools in this order.
+
+### 1. Search
+
+```json
+{
+  "name": "search_capabilities",
+  "arguments": { "query": "github user" }
+}
+```
+
+### 2. Describe
+
+```json
+{
+  "name": "describe_operation",
+  "arguments": { "operation": "github.user.read@v1" }
+}
+```
+
+### 3. Check the connection
+
+```json
+{
+  "name": "connection_status",
+  "arguments": { "connection": "connection_a" }
+}
+```
+
+### 4. Invoke
+
+```json
+{
+  "name": "invoke_operation",
+  "arguments": {
+    "operation": "github.user.read@v1",
+    "connection": "connection_a",
+    "arguments": {}
+  }
+}
+```
+
+The result contains only the fixed projected `fixture` GitHub user and a bounded receipt. No proof,
+capability, signer, store, raw authority state, provider body, token, generic request input, or
+caller-selected network destination is returned.
+
 ## Candidate VS Code configuration
 
-Named-client validation belongs to Milestone 5. The configuration below matches the implemented HTTP
-endpoint but has not completed a disposable VS Code initialize/list/call/reconnect acceptance run,
-so it is a candidate rather than a support claim:
+The configuration below matches the endpoint. Named-client validation belongs to Milestone 5; a
+hand-written configuration or successful raw wire call is not VS Code acceptance.
 
 ```json
 {
@@ -37,41 +111,26 @@ so it is a candidate rather than a support claim:
 }
 ```
 
-The endpoint implements the wire-level Streamable HTTP lifecycle for MCP protocol version
-`2025-06-18`: JSON-RPC requests use `POST /mcp` with `Content-Type: application/json` and an
-`Accept` header containing both `application/json` and `text/event-stream`. Initialization returns
-an `Mcp-Session-Id`; later requests send that session ID and `MCP-Protocol-Version: 2025-06-18`. The
-server returns JSON responses and does not offer a standalone SSE stream.
+## Run the focused demo
 
-The included wire smoke lists tools and calls `invoke_operation` with:
-
-```json
-{
-  "operation": "github.user.read@v1",
-  "connection": "connection_a",
-  "arguments": {}
-}
+```sh
+deno task local:demo
 ```
 
-The result contains the fixed `fixture` GitHub user. Use the browser page to test the same
-operation, revoke the fixture grant, and reactivate it with a fresh usable expiry/version. The
-default fixture grant lasts 24 hours; state is in memory and resets when the process exits.
+It starts an actual loopback listener and proves onboarding, all four tools, visible receipt
+creation, revoke-to-denial across all four tools, replacement version and expiry, reuse from the
+first transport session, and a new-session reconnect.
 
-## Verify the listener
-
-Run the focused local checks and actual-listener smoke test:
+Run all local checks or the complete regression gate with:
 
 ```sh
 deno task check:local
-deno task local:smoke
+deno task check
 ```
 
-The smoke test performs `initialize` → `notifications/initialized` → `tools/list` →
-`invoke_operation` through a real loopback listener.
+## Boundary
 
-## Current boundary
-
-This M1 submilestone proves a usable wire-level MCP and admin path over the fixture core. It does
-not prove named-client compatibility or complete M1. Responses are fixtures; GitHub authorization,
-production credential custody, authenticated remote administration, durable storage, and hosted MCP
-authentication are not connected yet. The public Deno preview remains a non-authority setup page.
+This is the complete M1 fixture implementation pending independent review and clean-browser,
+keyboard, accessibility, and visual validation. It does not prove a named client, durable restart,
+real owner identity, real GitHub OAuth, credential custody, hosted authority, or multi-user support.
+The public Deno preview remains a non-authority setup page.

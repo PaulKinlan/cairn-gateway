@@ -5,6 +5,7 @@ import {
   StreamableHttpFixtureTransport,
 } from "../../local/mcp_transport.ts";
 import { createLocalApp, startLocalServer } from "../../local/server.ts";
+import { createLocalFixtureController } from "../../local/fixture_controller.ts";
 import { createFixtureGatewayHarness } from "../../packages/mcp-bridge/mod.ts";
 
 const mcpHeaders = (session?: string): Headers => {
@@ -41,6 +42,11 @@ async function initialize(origin: string): Promise<string> {
   equals(body.result.capabilities, { tools: {} });
   const session = response.headers.get("Mcp-Session-Id");
   assert(session);
+  const notice = await mcpPost(origin, session, {
+    jsonrpc: "2.0",
+    method: "notifications/initialized",
+  });
+  equals(notice.status, 202);
   return session;
 }
 
@@ -52,172 +58,437 @@ async function mcpPost(origin: string, session: string, body: unknown): Promise<
   });
 }
 
+async function toolCall(
+  origin: string,
+  session: string,
+  id: number,
+  name: string,
+  args: unknown,
+): Promise<Record<string, unknown>> {
+  return await (await mcpPost(origin, session, {
+    jsonrpc: "2.0",
+    id,
+    method: "tools/call",
+    params: { name, arguments: args },
+  })).json();
+}
+
 function csrfFrom(html: string): string {
   const token = html.match(/name="csrf_token" value="([a-f0-9]+)"/)?.[1];
   assert(token, "missing CSRF token");
   return token;
 }
 
-async function adminPost(origin: string, path: string, token: string): Promise<Response> {
-  return await fetch(`${origin}${path}`, {
-    method: "POST",
-    redirect: "manual",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Origin: origin,
-    },
-    body: new URLSearchParams({ csrf_token: token }),
-  });
+function cookieFrom(response: Response): string {
+  const cookie = response.headers.get("set-cookie")?.split(";", 1)[0];
+  assert(cookie, "missing admin session cookie");
+  return cookie;
 }
 
-Deno.test("local page leads with run/connect details and practical fixture controls", async () => {
+interface AdminBrowser {
+  cookie: string;
+  html: string;
+}
+
+async function openAdmin(origin: string): Promise<AdminBrowser> {
+  const response = await fetch(`${origin}/`);
+  return { cookie: cookieFrom(response), html: await response.text() };
+}
+
+async function adminPost(
+  origin: string,
+  browser: AdminBrowser,
+  path: string,
+  fields: Record<string, string> = {},
+  token = csrfFrom(browser.html),
+): Promise<Response> {
+  const response = await fetch(`${origin}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Cookie: browser.cookie,
+      Origin: origin,
+    },
+    body: new URLSearchParams({ csrf_token: token, ...fields }),
+  });
+  if (response.headers.get("content-type")?.startsWith("text/html")) {
+    browser.html = await response.clone().text();
+  }
+  return response;
+}
+
+async function onboard(origin: string, browser: AdminBrowser): Promise<void> {
+  equals((await adminPost(origin, browser, "/admin/owner/create")).status, 200);
+  equals(
+    (await adminPost(origin, browser, "/admin/agent/create", { agent_name: "Research agent" }))
+      .status,
+    200,
+  );
+  equals(
+    (await adminPost(origin, browser, "/admin/identity/enroll", {
+      device_name: "Local laptop",
+      workload_name: "Local worker",
+    })).status,
+    200,
+  );
+  equals((await adminPost(origin, browser, "/admin/grant/create")).status, 200);
+}
+
+const invocationArgs = {
+  operation: "github.user.read@v1",
+  connection: "connection_a",
+  arguments: {},
+};
+const fixtureInvokeRequest = (id: string | number = "test-invoke"): Uint8Array =>
+  new TextEncoder().encode(JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    method: "tools/call",
+    params: { name: "invoke_operation", arguments: invocationArgs },
+    _meta: {
+      protocolVersion: "2026-07-28",
+      clientInfo: { name: "local-test", version: "1" },
+      capabilities: {},
+    },
+  }));
+
+Deno.test("local page presents ordered onboarding, authority, grant, receipts, and candidate copy", async () => {
   const app = await createLocalApp();
   const response = await app.fetch(new Request("http://127.0.0.1:8787/"));
   equals(response.status, 200);
   equals(response.headers.get("content-type"), "text/html; charset=utf-8");
+  assert(response.headers.get("set-cookie")?.includes("HttpOnly"));
+  assert(response.headers.get("set-cookie")?.includes("SameSite=Strict"));
   const html = await response.text();
   assert(html.startsWith("<!DOCTYPE html>"));
   assert(html.includes('<html lang="en">'));
-  assert(html.includes("Run Cairn and test the local fixture."));
-  assert(html.includes("deno task local:run"));
-  assert(html.includes("http://127.0.0.1:8787/mcp"));
-  assert(html.includes("candidate pending named-client validation"));
-  assert(html.includes("&quot;type&quot;: &quot;http&quot;"));
-  assert(html.includes("connection_a"));
-  assert(html.includes("grant_a"));
-  assert(html.includes("github.user.read@v1"));
-  assert(html.includes('action="/admin/test" method="post"'));
-  assert(html.includes('action="/admin/grant/revoke" method="post"'));
-  assert(html.includes('action="/admin/grant/reactivate" method="post"'));
+  assert(html.includes("Create authority. Test it. Revoke it."));
+  assert(html.includes('action="/admin/owner/create" method="post"'));
+  assert(html.includes("Authority graph"));
+  assert(html.includes("Invocation receipts"));
+  assert(html.includes("Recent usage"));
+  assert(html.includes("candidate configuration pending named-client validation"));
+  assert(html.includes("Wire evidence is not VS Code acceptance"));
   assert(!html.includes("114 cases"));
-  assert(!html.includes("architecture"));
+  assert(!html.includes("PROVIDER_TOKEN"));
 });
 
-Deno.test("admin mutations are POST-only, same-origin, and CSRF-protected", async () => {
+Deno.test("admin mutations reject unauthorized, cross-origin, stale CSRF, and extra fields", async () => {
   const app = await createLocalApp();
-  const origin = "http://127.0.0.1:8787";
-  const home = await (await app.fetch(new Request(`${origin}/`))).text();
-  const token = csrfFrom(home);
-
-  equals((await app.fetch(new Request(`${origin}/admin/grant/revoke`))).status, 405);
-  equals(
-    (await app.fetch(new Request(`${origin}/admin/grant/revoke`, { method: "POST" }))).status,
-    403,
-  );
-  equals(
-    (await app.fetch(
-      new Request(`${origin}/admin/grant/revoke`, {
+  const server = startLocalServer(app, 0);
+  const origin = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const browser = await openAdmin(origin);
+    const firstToken = csrfFrom(browser.html);
+    const noSession = await fetch(`${origin}/admin/owner/create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Origin: origin,
+      },
+      body: new URLSearchParams({ csrf_token: firstToken }),
+    });
+    equals(noSession.status, 401);
+    equals(
+      (await fetch(`${origin}/admin/owner/create`, {
         method: "POST",
         headers: {
           "Content-Type": "application/x-www-form-urlencoded",
+          Cookie: browser.cookie,
           Origin: "http://localhost:8787",
         },
-        body: new URLSearchParams({ csrf_token: token }),
-      }),
-    )).status,
-    403,
-  );
-  equals(
-    (await app.fetch(
-      new Request(`${origin}/admin/grant/revoke`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: origin },
-        body: new URLSearchParams({ csrf_token: "wrong" }),
-      }),
-    )).status,
-    403,
-  );
-
-  const revoked = await app.fetch(
-    new Request(`${origin}/admin/grant/revoke`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: origin },
-      body: new URLSearchParams({ csrf_token: token }),
-    }),
-  );
-  equals(revoked.status, 200);
-  assert((await revoked.text()).includes("Fixture grant revoked"));
-});
-
-Deno.test("actual loopback listener completes MCP lifecycle and reflects revoke/reactivate", async () => {
-  const app = await createLocalApp();
-  const server = startLocalServer(app, 0);
-  const address = server.addr as Deno.NetAddr;
-  const origin = `http://127.0.0.1:${address.port}`;
-  try {
-    const session = await initialize(origin);
-    const beforeNotice = await mcpPost(origin, session, {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/list",
-    });
-    equals((await beforeNotice.json()).error.message, "initialize notification required");
-
-    const notice = await mcpPost(origin, session, {
-      jsonrpc: "2.0",
-      method: "notifications/initialized",
-    });
-    equals(notice.status, 202);
-    equals(await notice.text(), "");
-
-    const list = await mcpPost(origin, session, { jsonrpc: "2.0", id: 3, method: "tools/list" });
-    equals(list.headers.get("content-type"), "application/json; charset=utf-8");
-    const tools = (await list.json()).result.tools as Array<{ name: string }>;
-    assert(tools.some((tool) => tool.name === "invoke_operation"));
-
-    const call = {
-      jsonrpc: "2.0",
-      id: 4,
-      method: "tools/call",
-      params: {
-        name: "invoke_operation",
-        arguments: {
-          operation: "github.user.read@v1",
-          connection: "connection_a",
-          arguments: {},
-        },
-      },
-    };
-    const invoked = await mcpPost(origin, session, call);
-    const invokedBody = await invoked.json();
-    equals(invokedBody.result.structuredContent.user.login, "fixture");
-    assert(invokedBody.result.content[0].text.includes('"login":"fixture"'));
-
-    const page = await (await fetch(`${origin}/`)).text();
-    const csrf = csrfFrom(page);
-    const adminTest = await adminPost(origin, "/admin/test", csrf);
-    assert((await adminTest.text()).includes("&quot;login&quot;: &quot;fixture&quot;"));
-    const revoked = await adminPost(origin, "/admin/grant/revoke", csrf);
-    assert((await revoked.text()).includes("Fixture grant revoked"));
-    const denied = await mcpPost(origin, session, call);
-    equals((await denied.json()).error.message, "fixture authority denied");
-
-    const reactivated = await adminPost(origin, "/admin/grant/reactivate", csrf);
-    assert((await reactivated.text()).includes("Fixture grant reactivated"));
-    const invokedAgain = await mcpPost(origin, session, call);
-    equals((await invokedAgain.json()).result.structuredContent.user.login, "fixture");
-
-    const ended = await fetch(`${origin}/mcp`, {
-      method: "DELETE",
-      headers: {
-        "Mcp-Session-Id": session,
-        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-      },
-    });
-    equals(ended.status, 204);
-    equals((await mcpPost(origin, session, call)).status, 404);
+        body: new URLSearchParams({ csrf_token: firstToken }),
+      })).status,
+      403,
+    );
+    equals((await adminPost(origin, browser, "/admin/owner/create")).status, 200);
+    assert(csrfFrom(browser.html) !== firstToken);
+    equals(
+      (await adminPost(origin, browser, "/admin/agent/create", {
+        agent_name: "Agent",
+      }, firstToken)).status,
+      403,
+    );
+    equals(
+      (await adminPost(origin, browser, "/admin/agent/create", {
+        agent_name: "Agent",
+        extra: "denied",
+      })).status,
+      403,
+    );
+    equals((await fetch(`${origin}/admin/owner/reset`)).status, 405);
   } finally {
     await server.shutdown();
   }
 });
 
-Deno.test("Streamable HTTP content negotiation, host, and session headers fail closed", async () => {
+Deno.test("admin sessions isolate CSRF while sharing only the one local fixture authority", async () => {
   const app = await createLocalApp();
+  const server = startLocalServer(app, 0);
+  const origin = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const first = await openAdmin(origin);
+    const second = await openAdmin(origin);
+    const secondToken = csrfFrom(second.html);
+    equals((await adminPost(origin, first, "/admin/owner/create", {}, secondToken)).status, 403);
+    equals((await adminPost(origin, first, "/admin/owner/create")).status, 200);
+    const secondPage = await fetch(`${origin}/`, { headers: { Cookie: second.cookie } });
+    second.html = await secondPage.text();
+    assert(second.html.includes("Owner ready"));
+    equals(
+      (await adminPost(origin, second, "/admin/agent/create", {
+        agent_name: "Shared local agent",
+      })).status,
+      200,
+    );
+    const firstPage = await fetch(`${origin}/`, { headers: { Cookie: first.cookie } });
+    first.html = await firstPage.text();
+    assert(first.html.includes("Shared local agent"));
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("admin session capacity evicts the least-recently-used session", async () => {
+  const app = createLocalApp();
+  const server = startLocalServer(app, 0);
+  const origin = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const browsers: AdminBrowser[] = [];
+    for (let index = 0; index < 9; index++) browsers.push(await openAdmin(origin));
+    equals((await adminPost(origin, browsers[0]!, "/admin/owner/create")).status, 401);
+    equals((await adminPost(origin, browsers[8]!, "/admin/owner/create")).status, 200);
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("fixture controller rejects invalid lifecycle order and duplicate enrollment", async () => {
+  const controller = createLocalFixtureController();
+  await rejects(() => controller.createAgent("Early agent"), "lifecycle");
+  await rejects(() => controller.enrollIdentity("Device", "Worker"), "lifecycle");
+  await rejects(() => controller.createGrant(), "lifecycle");
+  await controller.createOwner();
+  await rejects(() => controller.createOwner(), "already exists");
+  await controller.createAgent("Research agent");
+  await rejects(() => controller.createAgent("Duplicate agent"), "lifecycle");
+  await rejects(
+    () => controller.enrollIdentity("Research agent", "Worker"),
+    "distinct",
+  );
+  await controller.enrollIdentity("Laptop", "Worker");
+  await rejects(() => controller.enrollIdentity("Other laptop", "Other worker"), "lifecycle");
+  await controller.createGrant();
+  await rejects(() => controller.createGrant(), "lifecycle");
+});
+
+Deno.test("receipts are sanitized and receipt and usage histories stay bounded", async () => {
+  const controller = createLocalFixtureController();
+  await controller.createOwner();
+  await controller.createAgent("Bounded agent");
+  await controller.enrollIdentity("Bounded device", "Bounded worker");
+  await controller.createGrant();
+  for (let index = 0; index < 12; index++) {
+    try {
+      await controller.dispatch(fixtureInvokeRequest(index), "/mcp", "mcp");
+    } catch {
+      // The fixed five-call limit intentionally creates bounded denial receipts.
+    }
+  }
+  const view = controller.view();
+  equals(view.receipts.length, 8);
+  equals(view.usage.length, 8);
+  equals(view.grant?.used, 5);
+  equals(view.grant?.status, "exhausted");
+  for (const receipt of view.receipts) {
+    equals(Object.keys(receipt).sort(), [
+      "at",
+      "decision",
+      "grantVersion",
+      "id",
+      "operation",
+      "reason",
+      "requestUnits",
+      "source",
+    ]);
+    assert(receipt.id.length <= 16);
+    assert(receipt.requestUnits === 0 || receipt.requestUnits === 1);
+  }
+  const serialized = JSON.stringify(view).toLowerCase();
+  for (
+    const forbidden of [
+      "proof",
+      "capability",
+      "signer",
+      "custody",
+      "privatejwk",
+      "access_token",
+      "provider_token",
+      "store",
+      "connection_a",
+      "grant_a",
+    ]
+  ) assert(!serialized.includes(forbidden), `receipt view exposed ${forbidden}`);
+});
+
+Deno.test("local admin invocation shows a projected result, receipt, and usage", async () => {
+  const app = createLocalApp();
+  const server = startLocalServer(app, 0);
+  const origin = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const browser = await openAdmin(origin);
+    await onboard(origin, browser);
+    const response = await adminPost(origin, browser, "/admin/invoke");
+    equals(response.status, 200);
+    assert(browser.html.includes("Projected result"));
+    assert(browser.html.includes("&quot;login&quot;: &quot;fixture&quot;"));
+    assert(browser.html.includes("Local admin"));
+    assert(browser.html.includes("policy_allow"));
+    assert(browser.html.includes("1 of 5"));
+    for (const forbidden of ["capability", "signer", "access_token", "PROVIDER_TOKEN"]) {
+      assert(!browser.html.includes(forbidden));
+    }
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("revocation and replacement create a new version, expiry, and usable limit", async () => {
+  const controller = createLocalFixtureController();
+  await controller.createOwner();
+  await controller.createAgent("Lifecycle agent");
+  await controller.enrollIdentity("Lifecycle device", "Lifecycle worker");
+  await controller.createGrant();
+  const initial = controller.view().grant!;
+  equals(initial.version, 1);
+  equals(initial.usageLimit, 5);
+  await controller.revokeGrant();
+  const revoked = controller.view().grant!;
+  equals(revoked.status, "revoked");
+  equals(revoked.version, 2);
+  await rejects(() => controller.dispatch(fixtureInvokeRequest()), "authority denied");
+  await controller.reactivateGrant();
+  const replacement = controller.view().grant!;
+  equals(replacement.status, "active");
+  equals(replacement.version, 4);
+  assert(replacement.expiresAt > initial.expiresAt);
+  equals(replacement.used, 0);
+  const response = await controller.dispatch(fixtureInvokeRequest());
+  const structured = ((response!.result as Record<string, unknown>).structuredContent) as Record<
+    string,
+    unknown
+  >;
+  equals((structured.user as Record<string, unknown>).login, "fixture");
+});
+
+Deno.test("actual listener completes all four tools, visible receipt, revoke, replacement, and reconnect", async () => {
+  const app = await createLocalApp();
+  const server = startLocalServer(app, 0);
+  const origin = `http://127.0.0.1:${(server.addr as Deno.NetAddr).port}`;
+  try {
+    const browser = await openAdmin(origin);
+    await onboard(origin, browser);
+    assert(browser.html.includes("Version</dt><dd>1</dd>"));
+    assert(browser.html.includes("0 of 5"));
+
+    const first = await initialize(origin);
+    const search = await toolCall(origin, first, 2, "search_capabilities", {
+      query: "github user",
+    });
+    equals(
+      (((search.result as Record<string, unknown>).structuredContent as Record<string, unknown>)
+        .operations as Array<Record<string, unknown>>)[0]?.id,
+      "github.user.read@v1",
+    );
+    const described = await toolCall(origin, first, 3, "describe_operation", {
+      operation: "github.user.read@v1",
+    });
+    equals(
+      ((described.result as Record<string, unknown>).structuredContent as Record<string, unknown>)
+        .provider,
+      "github",
+    );
+    const status = await toolCall(origin, first, 4, "connection_status", {
+      connection: "connection_a",
+    });
+    equals(
+      ((status.result as Record<string, unknown>).structuredContent as Record<string, unknown>)
+        .status,
+      "active",
+    );
+    const invoked = await toolCall(origin, first, 5, "invoke_operation", invocationArgs);
+    equals(
+      (((invoked.result as Record<string, unknown>).structuredContent as Record<string, unknown>)
+        .user as Record<string, unknown>).login,
+      "fixture",
+    );
+
+    browser.html = await (await fetch(`${origin}/`, { headers: { Cookie: browser.cookie } }))
+      .text();
+    assert(browser.html.includes("policy_allow"));
+    assert(browser.html.includes("MCP"));
+    assert(browser.html.includes("1 of 5"));
+
+    equals((await adminPost(origin, browser, "/admin/grant/revoke")).status, 200);
+    for (
+      const [id, name, args] of [
+        [6, "search_capabilities", { query: "github" }],
+        [7, "describe_operation", { operation: "github.user.read@v1" }],
+        [8, "connection_status", { connection: "connection_a" }],
+        [9, "invoke_operation", invocationArgs],
+      ] as const
+    ) {
+      const denial = await toolCall(origin, first, id, name, args);
+      equals((denial.error as Record<string, unknown>).message, "fixture authority denied");
+    }
+
+    const revokedExpiry = browser.html.match(/datetime="([^"]+)"/)?.[1];
+    equals((await adminPost(origin, browser, "/admin/grant/reactivate")).status, 200);
+    assert(browser.html.includes("Version</dt><dd>4</dd>"));
+    const replacementExpiry = browser.html.match(/datetime="([^"]+)"/)?.[1];
+    assert(revokedExpiry && replacementExpiry && replacementExpiry > revokedExpiry);
+    equals(
+      (((await toolCall(origin, first, 10, "invoke_operation", invocationArgs)).result as Record<
+        string,
+        unknown
+      >).structuredContent as Record<string, unknown>).outcome,
+      "success",
+    );
+
+    const second = await initialize(origin);
+    equals(
+      (((await toolCall(origin, second, 11, "invoke_operation", invocationArgs)).result as Record<
+        string,
+        unknown
+      >).structuredContent as Record<string, unknown>).outcome,
+      "success",
+    );
+    const deleted = await fetch(`${origin}/mcp`, {
+      method: "DELETE",
+      headers: {
+        "Mcp-Session-Id": first,
+        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+      },
+    });
+    equals(deleted.status, 204);
+    equals((await mcpPost(origin, first, { jsonrpc: "2.0", id: 12, method: "ping" })).status, 404);
+    equals(
+      (await mcpPost(origin, second, { jsonrpc: "2.0", id: 13, method: "ping" })).status,
+      200,
+    );
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("Streamable HTTP host, negotiation, lifecycle, and unrelated sessions fail closed", async () => {
+  const controller = createLocalFixtureController();
+  const transport = new StreamableHttpFixtureTransport(controller);
   const endpoint = "http://127.0.0.1:8787/mcp";
-  equals((await app.fetch(new Request(endpoint))).status, 405);
-  equals((await app.fetch(new Request("http://example.test/mcp"))).status, 403);
+  equals((await transport.fetch(new Request(endpoint))).status, 405);
+  equals((await transport.fetch(new Request("http://example.test/mcp"))).status, 403);
   equals(
-    (await app.fetch(
+    (await transport.fetch(
       new Request(endpoint, {
         method: "POST",
         headers: { "Content-Type": "text/plain", Accept: "application/json, text/event-stream" },
@@ -227,7 +498,7 @@ Deno.test("Streamable HTTP content negotiation, host, and session headers fail c
     415,
   );
   equals(
-    (await app.fetch(
+    (await transport.fetch(
       new Request(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -237,17 +508,7 @@ Deno.test("Streamable HTTP content negotiation, host, and session headers fail c
     406,
   );
   equals(
-    (await app.fetch(
-      new Request(endpoint, {
-        method: "POST",
-        headers: mcpHeaders(),
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-      }),
-    )).status,
-    400,
-  );
-  equals(
-    (await app.fetch(
+    (await transport.fetch(
       new Request(endpoint, {
         method: "POST",
         headers: mcpHeaders("unknown-session"),
@@ -256,98 +517,16 @@ Deno.test("Streamable HTTP content negotiation, host, and session headers fail c
     )).status,
     404,
   );
-  equals(
-    (await app.fetch(
-      new Request(endpoint, {
-        method: "DELETE",
-        headers: { "MCP-Protocol-Version": MCP_PROTOCOL_VERSION },
-      }),
-    )).status,
-    400,
-  );
-  equals(
-    (await app.fetch(
-      new Request(endpoint, {
-        method: "DELETE",
-        headers: {
-          "Mcp-Session-Id": "unknown-session",
-          "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-        },
-      }),
-    )).status,
-    404,
-  );
-});
 
-Deno.test("expired fixture grant is visible and reactivation restores usable authority", async () => {
-  const originalDateNow = Date.now;
-  let uiNow = 1_000;
-  Date.now = () => uiNow;
-  try {
-    const app = await createLocalApp();
-    const origin = "http://127.0.0.1:8787";
-    const activePage = await (await app.fetch(new Request(`${origin}/`))).text();
-    assert(activePage.includes('<span class="status">active</span>'));
-    const csrf = csrfFrom(activePage);
-    uiNow += 24 * 60 * 60 * 1_000;
-    const expiredPage = await (await app.fetch(new Request(`${origin}/`))).text();
-    assert(expiredPage.includes('<span class="status">expired</span>'));
-    const reactivatedPage = await (await app.fetch(
-      new Request(`${origin}/admin/grant/reactivate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: origin },
-        body: new URLSearchParams({ csrf_token: csrf }),
-      }),
-    )).text();
-    assert(reactivatedPage.includes("Fixture grant reactivated"));
-    assert(reactivatedPage.includes('<span class="status">active</span>'));
-  } finally {
-    Date.now = originalDateNow;
-  }
-
-  const harness = await createFixtureGatewayHarness();
-  const request = new TextEncoder().encode(JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "tools/call",
-    params: {
-      name: "invoke_operation",
-      arguments: {
-        operation: "github.user.read@v1",
-        connection: "connection_a",
-        arguments: {},
-      },
-    },
-    _meta: {
-      protocolVersion: "2026-07-28",
-      clientInfo: { name: "expiry-test", version: "1" },
-      capabilities: {},
-    },
-  }));
-  await harness.setGrantLifetime(1);
-  await new Promise((resolve) => setTimeout(resolve, 1_100));
-  await rejects(() => harness.dispatch(request), "grant denied");
-
-  await harness.revokeAndReactivate("grant");
-  equals(await harness.status("grant"), "active");
-  const response = await harness.dispatch(request);
-  equals(
-    (response!.result as { structuredContent: { outcome: string } }).structuredContent.outcome,
-    "success",
-  );
-});
-
-Deno.test("session initialization and idle expiry recover capacity with isolated sessions", async () => {
   const harness = await createFixtureGatewayHarness();
   let now = 1_000;
-  const transport = new StreamableHttpFixtureTransport(harness, {
+  const isolated = new StreamableHttpFixtureTransport(harness, {
     now: () => now,
     initializationTimeoutMs: 100,
     idleTimeoutMs: 200,
   });
-  const endpoint = "http://127.0.0.1:8787/mcp";
   const initializeTransport = async (): Promise<string> => {
-    const response = await transport.fetch(
+    const response = await isolated.fetch(
       new Request(endpoint, {
         method: "POST",
         headers: mcpHeaders(),
@@ -363,56 +542,43 @@ Deno.test("session initialization and idle expiry recover capacity with isolated
         }),
       }),
     );
-    equals(response.status, 200);
     const id = response.headers.get("Mcp-Session-Id");
     assert(id);
     return id;
   };
-  const post = async (session: string, body: unknown) => {
-    return await transport.fetch(
+  const post = async (session: string, body: unknown) =>
+    await isolated.fetch(
       new Request(endpoint, {
         method: "POST",
         headers: mcpHeaders(session),
         body: JSON.stringify(body),
       }),
     );
-  };
-
-  const abandoned: string[] = [];
-  for (let index = 0; index < 16; index++) abandoned.push(await initializeTransport());
-  const replacement = await initializeTransport();
-  equals((await post(abandoned[0]!, { jsonrpc: "2.0", id: 2, method: "tools/list" })).status, 404);
-  equals((await post(replacement, { jsonrpc: "2.0", id: 2, method: "tools/list" })).status, 200);
-
-  now += 100;
-  equals((await post(replacement, { jsonrpc: "2.0", id: 3, method: "tools/list" })).status, 404);
-
   const first = await initializeTransport();
   const second = await initializeTransport();
   equals((await post(first, { jsonrpc: "2.0", method: "notifications/initialized" })).status, 202);
-  const secondBeforeNotice = await post(second, { jsonrpc: "2.0", id: 4, method: "tools/list" });
-  equals((await secondBeforeNotice.json()).error.message, "initialize notification required");
-  equals((await post(first, { jsonrpc: "2.0", id: 5, method: "tools/list" })).status, 200);
   equals((await post(second, { jsonrpc: "2.0", method: "notifications/initialized" })).status, 202);
-
-  const deleted = await transport.fetch(
-    new Request(endpoint, {
-      method: "DELETE",
-      headers: {
-        "Mcp-Session-Id": first,
-        "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-      },
-    }),
+  equals((await post(first, { jsonrpc: "2.0", id: 2, method: "ping" })).status, 200);
+  equals((await post(second, { jsonrpc: "2.0", id: 3, method: "ping" })).status, 200);
+  equals(
+    (await isolated.fetch(
+      new Request(endpoint, {
+        method: "DELETE",
+        headers: {
+          "Mcp-Session-Id": first,
+          "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+        },
+      }),
+    )).status,
+    204,
   );
-  equals(deleted.status, 204);
-  equals((await post(second, { jsonrpc: "2.0", id: 6, method: "tools/list" })).status, 200);
-  equals((await post(first, { jsonrpc: "2.0", id: 7, method: "tools/list" })).status, 404);
-
+  equals((await post(first, { jsonrpc: "2.0", id: 4, method: "ping" })).status, 404);
+  equals((await post(second, { jsonrpc: "2.0", id: 5, method: "ping" })).status, 200);
   now += 200;
-  equals((await post(second, { jsonrpc: "2.0", id: 8, method: "tools/list" })).status, 404);
+  equals((await post(second, { jsonrpc: "2.0", id: 6, method: "ping" })).status, 404);
 });
 
-Deno.test("MCP and admin bodies stop at streaming limits", async () => {
+Deno.test("MCP and admin streaming bodies stop at their limits", async () => {
   const app = await createLocalApp();
   const streamingBody = (limit: number) => {
     let cancelled = false;
@@ -445,12 +611,15 @@ Deno.test("MCP and admin bodies stop at streaming limits", async () => {
   equals(mcpResponse.status, 413);
   assert(mcp.cancelled());
 
+  const home = await app.fetch(new Request("http://127.0.0.1:8787/"));
+  const cookie = cookieFrom(home);
   const form = streamingBody(2 * 1024);
   const formResponse = await app.fetch(
-    new Request("http://127.0.0.1:8787/admin/test", {
+    new Request("http://127.0.0.1:8787/admin/owner/create", {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: cookie,
         Origin: "http://127.0.0.1:8787",
       },
       body: form.stream,

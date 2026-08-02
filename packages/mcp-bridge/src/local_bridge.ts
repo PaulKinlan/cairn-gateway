@@ -355,7 +355,11 @@ function closedFixtureFacade(
             ...value,
             status: active ? "active" : "revoked",
             version: value.version + 1,
-            expiresAt: active ? at + FIXTURE_GRANT_LIFETIME_SECONDS : value.expiresAt,
+            expiresAt: active
+              ? at + FIXTURE_GRANT_LIFETIME_SECONDS > value.expiresAt
+                ? at + FIXTURE_GRANT_LIFETIME_SECONDS
+                : value.expiresAt + 1
+              : value.expiresAt,
           },
           "operator",
           at,

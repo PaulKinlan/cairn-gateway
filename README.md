@@ -1,10 +1,10 @@
 # Cairn Gateway
 
 Cairn lets agents call revocable, typed provider operations without receiving provider credentials
-or an arbitrary request surface. The current usable path is local and credential-free: a real MCP
-wire client talks to the accepted fixture authority over Streamable HTTP.
+or an arbitrary request surface. The current usable path is local and credential-free: an owner
+builds fixture authority in the browser, then a real MCP wire client uses it over Streamable HTTP.
 
-## Run and connect
+## Run the local product
 
 Requires Deno 2.9.0.
 
@@ -12,12 +12,27 @@ Requires Deno 2.9.0.
 deno task local:run
 ```
 
-Open <http://127.0.0.1:8787/>. The page shows the MCP endpoint, live fixture connection and grant
-state, a candidate VS Code configuration, and controls to invoke, revoke, and reactivate the fixture
-grant.
+Open <http://127.0.0.1:8787/>. In the local admin page you can:
 
-The following `.vscode/mcp.json` is a candidate for Milestone 5 validation, not a supported-client
-claim:
+1. create or reset the fixture owner;
+2. name an agent;
+3. enroll a distinct device and workload;
+4. create the fixed `github.user.read@v1` grant;
+5. inspect its authority graph, 24-hour expiry, five-call limit, version, receipts, and recent use;
+6. invoke through local admin or MCP; and
+7. revoke the grant, observe denial, then create a usable replacement version.
+
+The GitHub result is a fixed fixture. No provider account, OAuth flow, network request, or
+production credential is used. All authority, receipts, usage, and admin sessions are bounded in
+memory and are lost when the process stops.
+
+## Connect over MCP
+
+The endpoint is `http://127.0.0.1:8787/mcp`. Cairn keeps a stable four-tool front door:
+`search_capabilities`, `describe_operation`, `connection_status`, and `invoke_operation`.
+
+The following `.vscode/mcp.json` matches the endpoint, but remains a Milestone 5 candidate. The wire
+demo is not a supported-client or VS Code acceptance claim.
 
 ```json
 {
@@ -30,29 +45,24 @@ claim:
 }
 ```
 
-The wire-level smoke calls `invoke_operation` with:
+See [the local setup guide](docs/local-setup.md) for the exact lifecycle and call bodies.
 
-```json
-{
-  "operation": "github.user.read@v1",
-  "connection": "connection_a",
-  "arguments": {}
-}
-```
-
-The response is the fixed `fixture` GitHub user. No GitHub authorization or production credential is
-connected yet. See [the local setup guide](docs/local-setup.md) for the transport details, alternate
-port command, and verification steps.
-
-## Verify
+## Demo and verification
 
 ```sh
+deno task local:demo
 deno task check:local
 deno task check
 ```
 
-`deno task local:smoke` starts an actual loopback listener and proves `initialize` →
-`notifications/initialized` → `tools/list` → `invoke_operation`.
+`deno task local:demo` starts an actual loopback listener and proves fixture onboarding, then:
+
+```text
+initialize → notifications/initialized
+  → search_capabilities → describe_operation → connection_status → invoke_operation
+  → visible receipt → revoke → all four deny
+  → replacement grant version → invoke → reconnect → invoke
+```
 
 The full gate preserves the accepted 90 Stage 0 cases and coverage floors, the exact 24-scenario
 Stage 1 durable-authority contract, and the separate public preview gate. It needs no package or
@@ -60,12 +70,10 @@ network changes.
 
 ## Product direction
 
-[PLAN.md](PLAN.md) is the source of truth for the product, journeys, architecture, milestones,
-acceptance criteria, current gaps, and prioritized work. The current listener is a Milestone 1
-submilestone; M1 still needs local agent/device/workload/grant creation and a visible receipt.
-Production still needs admin identity and enrollment, durable storage, provider credential custody,
-GitHub connection onboarding, hosted MCP authentication, receipts and usage, recovery, and operating
-documentation.
+[PLAN.md](PLAN.md) is canonical. M1 implementation is ready for independent review and browser
+validation, but is not accepted from implementation or wire evidence alone. Production still needs
+real admin identity and recovery, durable storage, provider credential custody, GitHub OAuth, hosted
+MCP authentication, retention and deletion, named-client validation, and operating runbooks.
 
 ## Public preview
 

@@ -1,6 +1,13 @@
 import { MCP_CURRENT, MCP_LEGACY } from "../apps/gateway/mcp.ts";
-import type { FixtureGatewayHarness } from "../packages/mcp-bridge/mod.ts";
 import { BodyTooLargeError, readBoundedBody } from "./bounded_body.ts";
+
+interface FixtureDispatcher {
+  dispatch(
+    receivedBody: Uint8Array,
+    path?: "/mcp" | "/mcp/legacy",
+    source?: "mcp",
+  ): Promise<Record<string, unknown> | undefined>;
+}
 
 export const MCP_ENDPOINT = "/mcp";
 export const MCP_TRANSPORT = "Streamable HTTP";
@@ -87,11 +94,11 @@ async function readBoundedJson(request: Request): Promise<unknown> {
 }
 
 export class StreamableHttpFixtureTransport {
-  readonly #harness: FixtureGatewayHarness;
+  readonly #harness: FixtureDispatcher;
   readonly #sessions = new Map<string, Session>();
   readonly #policy: SessionPolicy;
 
-  constructor(harness: FixtureGatewayHarness, policy: Partial<SessionPolicy> = {}) {
+  constructor(harness: FixtureDispatcher, policy: Partial<SessionPolicy> = {}) {
     this.#harness = harness;
     this.#policy = {
       now: policy.now ?? Date.now.bind(Date),
@@ -197,6 +204,7 @@ export class StreamableHttpFixtureTransport {
       const response = await this.#harness.dispatch(
         encoder.encode(JSON.stringify(adapted)),
         "/mcp",
+        "mcp",
       );
       if (value.method === "tools/call" && isObject(response) && isObject(response.result)) {
         const structured = response.result.structuredContent;

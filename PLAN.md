@@ -13,7 +13,10 @@ can inspect use and revoke access.
 
 The first operation is `github.user.read@v1`: read allowlisted fields from the connected GitHub
 user. Every later operation needs its own fixed provider route, closed input and output schemas,
-projection, policy cost, failure mapping, and review.
+projection, policy cost, failure mapping, and review. The stable MCP front door remains
+`search_capabilities`, `describe_operation`, `connection_status`, and `invoke_operation` as the
+catalog grows to hundreds of typed operations; Cairn does not inject one permanent MCP tool per
+operation into client context.
 
 ## v1 boundary
 
@@ -26,7 +29,8 @@ projection, policy cost, failure mapping, and review.
 - Opaque credential custody; only the custodian/provider adapter can read credentials.
 - Grants for `github.user.read@v1` with expiry, usage limits, inspection, and revocation.
 - Streamable HTTP MCP for named, validated clients.
-- `search_capabilities`, `describe_operation`, `invoke_operation`, and `connection_status`.
+- A stable catalog front door: `search_capabilities`, `describe_operation`, `invoke_operation`, and
+  `connection_status`, with the generic typed invoke path remaining available as operations grow.
 - Sanitized receipts, usage inspection, retention, and deletion.
 - Durable authority, replay, permit, receipt, backup, restore, and recovery state.
 - A private deployed admin surface and MCP endpoint with operating runbooks.
@@ -38,6 +42,10 @@ projection, policy cost, failure mapping, and review.
 - Providers or operations beyond GitHub `github.user.read@v1`.
 - Public anonymous access, a general SaaS launch, billing, or enterprise federation.
 - Mobile applications, browser extensions, or autonomous grant approval.
+- Projecting selected catalog results as temporary first-class MCP tools or sending tool-list change
+  notifications; those require post-v1 named-client evidence and never replace use-time authority.
+- Agent-orchestrated provider developer-console setup, provider app/key creation, callback
+  registration, or secret intake; post-v1 assistance remains human-confirmed and custody-bound.
 - Availability, scale, or compliance claims beyond measured private-alpha evidence.
 
 ### Never allowed
@@ -278,9 +286,12 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 
 ### M1 — usable local product
 
-- **Status:** Active. The loopback Streamable HTTP transport/admin page is a delivered submilestone,
-  not M1 completion. M1 remains incomplete until local UI creates an agent, enrolls a
-  device/workload, creates/revokes a grant, and shows a visible invocation receipt.
+- **Status:** Active; implementation complete pending independent review and browser validation. The
+  local UI now creates or resets the fixture owner, names an agent, enrolls distinct device and
+  workload identities, creates and replaces a versioned expiring/limited grant, shows the authority
+  graph, receipts, and bounded usage, and drives the complete wire journey. M1 is not accepted until
+  the review gate, clean-browser recording, keyboard/accessibility pass, and visual validation are
+  complete.
 - **User-visible deliverable:** one-command local product where an owner performs fixture
   onboarding, creates agent/device/workload/grant authority, exercises search/describe/status/invoke
   over the wire, sees a receipt, revokes, reactivates as a new usable version, and reconnects.
@@ -294,6 +305,22 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 - **URL/N/A:** `http://127.0.0.1:8787/` while running; no hosted URL.
 - **Excluded claims:** named-client compatibility, durable restart, real identity, real GitHub,
   production custody, hosted authority, or multi-user support.
+- **Implementation checklist:**
+  - [x] Owner can create/reset the in-memory fixture context.
+  - [x] Owner can name an agent and enroll distinct device/workload identities in lifecycle order.
+  - [x] Owner can create and inspect the fixed operation grant with version, expiry, five-call
+        limit, and current use.
+  - [x] Authority graph, sanitized invocation receipts, and the eight-entry usage window are
+        visible.
+  - [x] Admin and actual-listener MCP invocation both create visible receipts.
+  - [x] Search → describe → connection status → invoke works over Streamable HTTP.
+  - [x] Revoke denies all four paths; replacement creates a new version/expiry and reconnect works.
+  - [x] Unauthorized/stale CSRF, lifecycle order, duplicate enrollment, receipt/usage bounds,
+        revocation/replacement, unrelated sessions, and full HTTP journey are tested.
+  - [x] Loopback, POST/same-origin/CSRF, streaming body, session, and closed facade gates remain.
+  - [ ] Independent implementation/security review has no blocker.
+  - [ ] Clean-browser recording plus keyboard, accessibility, responsive, light/dark, and visual
+        validation is accepted.
 
 ### M2 — durable single-user deployment
 
@@ -389,6 +416,37 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 - **Excluded claims:** plug-in marketplace, arbitrary schemas/routes, generic proxying, or automatic
   expansion to other providers.
 
+### M8 — post-v1 adaptive catalog and provider setup assistance
+
+- **Status:** Future; explicitly not v1. Begins only after private-alpha evidence and a same-commit
+  plan update select concrete clients and provider setup targets.
+- **User-visible deliverable:** optionally project owner/agent-selected search or describe results
+  as temporary first-class MCP tools when a validated named client benefits, and let an agent assist
+  a human through reviewed provider developer-console setup in a fresh isolated browser.
+- **Catalog direction:** the four stable catalog tools remain the scalable front door and generic
+  typed invoke remains the fallback. Temporary projections are bounded, disappear from client caches
+  when no longer selected/authorized, and use tool-list change notifications only where an exact
+  named client/version demonstrably supports them. A notification or cached-tool disappearance is
+  never revocation: every invocation still rechecks current authority, version, expiry, limits,
+  operation, connection, agent, device, and workload.
+- **Setup-automation direction:** an agent may navigate a fresh isolated browser, explain steps,
+  fill reviewed non-secret fields, and prepare callback registration. Login, CAPTCHA or 2FA, legal
+  agreements, scope expansion, provider app creation/final writes, and every irreversible step
+  require explicit human confirmation. Generated secrets enter approved custody through a
+  secret-safe intake path and never cross model/browser logs, screenshots, clipboard, journal,
+  receipts, analytics, or support output.
+- **Security gate:** selected client cache/notification behavior, projection lifetime and authority
+  binding, isolated-browser teardown, human confirmation boundaries, custody intake, and
+  no-secret-log/screenshot/clipboard sentinels receive independent review.
+- **Exact acceptance journey:** search and select a typed operation → optionally project it in a
+  validated client → invoke with use-time authority → remove/revoke and observe bounded client
+  update plus invoke denial → fall back to generic typed invoke; separately, start an isolated
+  provider setup → agent prepares non-secret fields → human completes protected/irreversible steps →
+  secret enters custody without appearing in retained evidence.
+- **Excluded claims:** notification-as-revocation, permanent hundreds-tool injection, autonomous
+  provider account/app creation, autonomous scope expansion, secret handling by the model/browser,
+  or generic provider-console automation.
+
 ## Cairn v1 definition of done
 
 All 12 items are required.
@@ -422,20 +480,19 @@ All 12 items are required.
 ## Current status and prioritized work
 
 The repository has a 90-case fixture regression core, a 24-scenario durable-authority contract, a
-separate public preview gate, and a loopback wire-level Streamable HTTP/admin submilestone. These
-are inputs to product work, not proof that M1 or a named client is done.
+separate public preview gate, and the complete M1 local fixture implementation. These are inputs to
+acceptance and later product work, not proof that M1, a named client, or production use is accepted.
 
 Priority order:
 
 1. Accept M0 by reviewing this plan and aligned repository instructions.
-2. Correct and accept the M1 transport submilestone: usable grant lifetime/reactivation, bounded
-   streaming bodies, expiring/evicting isolated sessions, direct expiry tests, and candidate-only
-   client copy.
-3. Complete M1 owner-visible fixture creation for agent/device/workload/grant plus visible receipts.
-4. Resolve M2 decisions and implement durable restart, receipts/usage, retention, backup, and
+2. Independently review and browser-validate the complete M1 local owner, Agent/MCP, and revocation
+   journeys; do not infer named-client support from wire evidence.
+3. Resolve M2 decisions and implement durable restart, receipts/usage, retention, backup, and
    restore.
-5. Deliver M3 identity/admin, then M4 GitHub OAuth/custody, then M5 named-client evidence.
-6. Resolve hosting/cost and run M6 private alpha. Do not begin M7 by adding generic infrastructure.
+4. Deliver M3 identity/admin, then M4 GitHub OAuth/custody, then M5 named-client evidence.
+5. Resolve hosting/cost and run M6 private alpha. Do not begin M7 or M8 by adding generic
+   infrastructure.
 
 ## Governance and acceptance records
 
