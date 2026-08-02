@@ -33,7 +33,8 @@ operation into client context.
   `connection_status`, with the generic typed invoke path remaining available as operations grow.
 - Sanitized receipts, usage inspection, retention, and deletion.
 - Durable authority, replay, permit, receipt, backup, restore, and recovery state.
-- A private deployed admin surface and MCP endpoint with operating runbooks.
+- A public authenticated MCP endpoint (fixture custody first, per ADR 0006) and an authenticated
+  deployed admin surface with operating runbooks.
 
 ### Not in v1
 
@@ -253,18 +254,18 @@ Deploy/operator ---> deployment, health, migration, backup, rotation
 
 Open decisions block the milestone in “Due” unless the required evidence selects an option.
 
-| Decision                           | Owner                      | Due milestone/date       | Options                                                                 | Required evidence                                                                                                                                        | Selected/status                                                           | Fallback                                                    |
-| ---------------------------------- | -------------------------- | ------------------------ | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Durable storage and region         | Product + deploy/operator  | M2 / before private data | Deno KV                                                                 | Unchanged 24 scenarios on exact candidate, atomic limits, strong-read/CAS behavior, latency, US storage/transit acknowledgement, restore drill, and cost | **Selected 2026-08-02: Deno KV**; implementation and hosted proof pending | Keep M2 local and do not accept production data             |
-| Credential custody                 | Security + deploy/operator | M4                       | Cloud secret manager, dedicated vault, encrypted service with HSM/KMS   | OAuth lifecycle, least privilege, audit, rotation, deletion, recovery, pricing                                                                           | Open; memory fixture only                                                 | Do not connect GitHub                                       |
-| Admin identity/passkeys            | Product + security         | M3                       | WebAuthn/passkeys, external OIDC plus device proof, other reviewed flow | Browser support, recovery, phishing resistance, session/CSRF design, accessibility                                                                       | Open                                                                      | Keep admin local fixture-only                               |
-| Device/agent key custody           | Security + client owner    | M3                       | OS keychain, hardware-backed key, client-managed encrypted key          | Signing API compatibility, export behavior, rotation/loss recovery, threat model                                                                         | Open; fixture keys only                                                   | No real enrollment/grants                                   |
-| MCP SDK and protocol revisions     | MCP owner                  | M5                       | Official SDK, bounded in-repo adapter, pinned revision set              | Upstream transport tests, revision behavior, dependency audit, failure matrix                                                                            | Open; wire adapter uses 2025-06-18                                        | Keep wire-level local fixture claim only                    |
-| Named MCP clients                  | MCP owner + product        | M5                       | VS Code, Claude Desktop, other named clients                            | Disposable project-local initialization/list/call/reconnect runs with versions and configs                                                               | Open; VS Code config is candidate only                                    | Publish curl/wire fixture instructions without client claim |
-| GitHub OAuth and callback topology | Provider owner + security  | M4                       | GitHub OAuth App callback through hosted admin, reviewed proxy topology | Current GitHub docs, exact redirect, state/PKCE/replay tests, disconnect/revoke evidence                                                                 | Open                                                                      | Keep provider fixture                                       |
-| Receipt retention and deletion     | Product + privacy          | M2 policy; M6 validation | Fixed short retention, owner-configured bounded retention               | Data inventory, deletion test, recovery impact, privacy review, cost                                                                                     | Open                                                                      | Minimum operational retention with no provider bodies       |
-| Backup and recovery                | Deploy/operator + security | M2                       | Store-native backup, encrypted export, both                             | Restore drill, integrity, RPO/RTO, stale/corrupt rejection, key/custody separation                                                                       | Open; contract fixture only                                               | No production data                                          |
-| Hosting and cost ceiling           | Product + deploy/operator  | M6                       | Deno, managed container, other private hosting                          | Private networking/auth, storage/custody fit, observability, rollback, monthly measured cost                                                             | Open; public preview is non-authority                                     | Local-only milestone; do not deploy authority               |
+| Decision                           | Owner                      | Due milestone/date       | Options                                                                 | Required evidence                                                                                                                                        | Selected/status                                                                                                                       | Fallback                                                    |
+| ---------------------------------- | -------------------------- | ------------------------ | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Durable storage and region         | Product + deploy/operator  | M2 / before private data | Deno KV                                                                 | Unchanged 24 scenarios on exact candidate, atomic limits, strong-read/CAS behavior, latency, US storage/transit acknowledgement, restore drill, and cost | **Selected 2026-08-02: Deno KV**; implementation and hosted proof pending                                                             | Keep M2 local and do not accept production data             |
+| Credential custody                 | Security + deploy/operator | M4                       | Cloud secret manager, dedicated vault, encrypted service with HSM/KMS   | OAuth lifecycle, least privilege, audit, rotation, deletion, recovery, pricing                                                                           | Open; memory fixture only                                                                                                             | Do not connect GitHub                                       |
+| Admin identity/passkeys            | Product + security         | M3                       | WebAuthn/passkeys, external OIDC plus device proof, other reviewed flow | Browser support, recovery, phishing resistance, session/CSRF design, accessibility                                                                       | Open                                                                                                                                  | Keep admin local fixture-only                               |
+| Device/agent key custody           | Security + client owner    | M2 (ADR 0006)            | OS keychain, hardware-backed key, client-managed encrypted key          | Signing API compatibility, export behavior, rotation/loss recovery, threat model                                                                         | Open; fixture keys only                                                                                                               | No real enrollment/grants                                   |
+| MCP SDK and protocol revisions     | MCP owner                  | M5                       | Official SDK, bounded in-repo adapter, pinned revision set              | Upstream transport tests, revision behavior, dependency audit, failure matrix                                                                            | Open; wire adapter uses 2025-06-18                                                                                                    | Keep wire-level local fixture claim only                    |
+| Named MCP clients                  | MCP owner + product        | M5                       | VS Code, Claude Desktop, other named clients                            | Disposable project-local initialization/list/call/reconnect runs with versions and configs                                                               | Open; VS Code config is candidate only                                                                                                | Publish curl/wire fixture instructions without client claim |
+| GitHub OAuth and callback topology | Provider owner + security  | M4                       | GitHub OAuth App callback through hosted admin, reviewed proxy topology | Current GitHub docs, exact redirect, state/PKCE/replay tests, disconnect/revoke evidence                                                                 | Open                                                                                                                                  | Keep provider fixture                                       |
+| Receipt retention and deletion     | Product + privacy          | M2 policy; M6 validation | Fixed short retention, owner-configured bounded retention               | Data inventory, deletion test, recovery impact, privacy review, cost                                                                                     | Open                                                                                                                                  | Minimum operational retention with no provider bodies       |
+| Backup and recovery                | Deploy/operator + security | M2                       | Store-native backup, encrypted export, both                             | Restore drill, integrity, RPO/RTO, stale/corrupt rejection, key/custody separation                                                                       | Open; contract fixture only                                                                                                           | No production data                                          |
+| Hosting and cost ceiling           | Product + deploy/operator  | M2 (ADR 0006)            | Deno, managed container, other private hosting                          | Private networking/auth, storage/custody fit, observability, rollback, monthly measured cost                                                             | **Selected 2026-08-02: Deno Deploy for the public fixture-custody MCP endpoint**; hosted qualification and independent review pending | Local-only milestone; do not deploy authority               |
 
 ## Milestones M0–M7
 
@@ -332,29 +333,42 @@ Open decisions block the milestone in “Due” unless the required evidence sel
   - [x] Clean-browser journey, keyboard forms, accessibility, responsive, light/dark, and visual
         validation passed at source commit `0e5a584`.
 
-### M2 — durable single-user deployment
+### M2 — durable public fixture-custody deployment
 
-- **Status:** In progress. Paul selected Deno KV on 2026-08-02. Acceptance remains blocked by the
-  unchanged 24-scenario run against the exact KV adapter/topology, atomic-size and strong-read/CAS
-  evidence, explicit handling of hosted US storage/transit, usable export/restore proof, and
-  receipt, backup, and retention policy decisions.
+- **Status:** In progress. Paul selected Deno KV on 2026-08-02 (ADR 0003) and the public
+  fixture-custody direction on 2026-08-02 (ADR 0006). Acceptance remains blocked by the unchanged
+  24-scenario run against the exact KV adapter/topology, atomic-size and strong-read/CAS evidence,
+  explicit handling of hosted US storage/transit, usable export/restore proof, receipt, backup, and
+  retention policy decisions, real-enrollment wiring, hosted-listener evidence, and independent
+  review.
 - **User-visible deliverable:** the single owner's authority graph, receipts, usage, replay, and
-  permits survive restart with backup/restore controls.
+  permits survive restart with backup/restore controls, and an enrolled agent reaches the same
+  fixture-custody authority over a public authenticated HTTP MCP endpoint from any machine. No real
+  provider credential exists anywhere in the system.
 - **Security gate:** selected store passes all 24 scenarios plus migration, stale/corrupt restore,
-  tenant boundary, receipt deletion, and ambiguous-dispatch tests.
-- **Exact acceptance journey:** create local owner graph → invoke and see receipt → kill process →
-  restart/reconnect → inspect unchanged state → reject replay → backup → restore isolated instance →
-  verify graph/receipts → delete retained receipt according to policy.
-- **Demo/runbook:** migration, restart, backup, restore, retention/deletion, and recovery runbooks.
-- **URL/N/A:** N/A until hosting decision; local/private candidate only.
-- **Excluded claims:** real identity, real provider credential, named-client support, or production
-  hosting.
+  tenant boundary, receipt deletion, and ambiguous-dispatch tests; owner bootstrap and agent/device
+  enrollment use the accepted Stage 0 P-256 proof/revocation core with no self-asserted identity on
+  any hosted surface; the hosted listener validates host/origin, authenticates every request, bounds
+  sessions and streaming bodies, and rate-limits safely; independent review accepts the exact
+  deployment before exposure.
+- **Exact acceptance journey:** create owner graph → enroll agent/device with real keys → invoke and
+  see receipt → kill process → restart/reconnect → inspect unchanged state → reject replay → backup
+  → restore isolated instance → verify graph/receipts → delete retained receipt according to policy
+  → agent on a second machine initializes against the public endpoint,
+  searches/describes/status/invokes with its own key, and a revoked grant denies there too.
+- **Demo/runbook:** migration, restart, backup, restore, retention/deletion, recovery, deployment,
+  rollback, and public-endpoint runbooks.
+- **URL/N/A:** public MCP URL recorded in the acceptance log after gate acceptance; fixture custody
+  only.
+- **Excluded claims:** real provider credential or custody, owner passkey administration UX (M3),
+  named-client support (M5), production readiness, or SLA.
 
 ### M3 — real identity and administration
 
-- **Status:** Planned; blocked by admin identity/passkey and device/agent key custody decisions.
-- **User-visible deliverable:** owner sign-in/recovery, admin sessions, device/agent/workload
-  enrollment, key replacement, grants, revocation, and accessible audit/receipt views.
+- **Status:** Planned; real device/agent enrollment moved into M2 per ADR 0006. Blocked by admin
+  identity/passkey and recovery decisions.
+- **User-visible deliverable:** owner sign-in/recovery, admin sessions, key replacement, grants,
+  revocation, and accessible audit/receipt views on the deployed service.
 - **Security gate:** phishing/recovery review, session/CSRF tests, no self-approval violation,
   cross-owner denial harness, key loss/rotation, and accessibility pass.
 - **Exact acceptance journey:** new owner signs in → enrolls admin device → creates agent → enrolls
@@ -401,9 +415,10 @@ Open decisions block the milestone in “Due” unless the required evidence sel
 
 ### M6 — private deployed alpha
 
-- **Status:** Planned; blocked by hosting/cost and all M2–M5 gates.
-- **User-visible deliverable:** invited owner uses a private admin URL and authenticated MCP
-  endpoint with real durable state and GitHub connection.
+- **Status:** Planned; first deployment moved to M2 per ADR 0006. Blocked by real-custody (M4) and
+  named-client (M5) gates.
+- **User-visible deliverable:** invited owner upgrades the deployed fixture-custody service to real
+  GitHub custody with real durable state.
 - **Security gate:** deployment review, private access, secret configuration, monitoring, limits,
   backup/restore, rollback, key rotation, retention/deletion, incident drill, and measured cost.
 - **Exact acceptance journey:** deploy → owner onboard/connect/enroll/grant → named client invoke
@@ -501,11 +516,15 @@ Priority order:
 
 1. Implement and qualify the selected Deno KV adapter without changing the 24 accepted durability
    scenarios; measure every atomic/value limit and use strong reads for authority decisions.
-2. Resolve M2 receipt retention/deletion and backup/recovery policy, then implement durable restart,
+2. Wire real Stage 0 enrollment (owner bootstrap, agent/device P-256 keys, revocation) into the
+   product path; no self-asserted identity may reach any hosted surface.
+3. Resolve M2 receipt retention/deletion and backup/recovery policy, then implement durable restart,
    receipts/usage persistence, deletion, export, and isolated restore for the single-owner graph.
-3. Deliver M3 real identity/admin, then M4 GitHub OAuth/custody, then M5 named-client evidence.
-4. Resolve hosting/cost and run M6 private alpha. Do not begin M7 or M8 by adding generic
-   infrastructure.
+4. Deploy the public authenticated fixture-custody MCP endpoint on Deno Deploy behind the
+   hosted-listener gates and independent review (ADR 0006).
+5. Deliver M3 owner administration (passkeys, recovery, sessions) on the deployed service, then M4
+   GitHub OAuth/custody, then M5 named-client evidence.
+6. Run M6 real-custody private alpha. Do not begin M7 or M8 by adding generic infrastructure.
 
 ## Governance and acceptance records
 

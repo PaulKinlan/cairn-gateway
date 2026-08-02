@@ -54,3 +54,10 @@ restore, and receipt retention/deletion. Capability/device key custody, named MC
 official transport, callback authority, vendor custody/key scope, revocation promise, and incident
 hold also remain blocked. Stage 1A adds no listener, vendor, credential, environment, fetch, remote
 import, UI, deploy configuration, or Git remote. It makes no external exactly-once claim.
+
+ADR 0006 (selected 2026-08-02) sets the public authenticated fixture-custody MCP endpoint as the
+M2/M3 goal. It authorizes the direction only. Public exposure remains blocked until the unchanged 24
+scenarios pass on the exact KV adapter/topology, real Stage 0 enrollment replaces every
+self-asserted identity on the hosted surface, the PLAN.md hosted-listener gates are evidenced, and
+independent review accepts the exact deployment. Real provider credentials, production custody,
+hosted provisioning, and private data stay blocked.
