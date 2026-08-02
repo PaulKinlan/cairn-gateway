@@ -28,7 +28,7 @@ The browser exercised the rendered controls rather than calling mutation routes 
 9. From the same browser origin, completed the Streamable HTTP initialize → initialized → search →
    describe → connection status → invoke sequence, initialized a distinct second session, and
    invoked again without rebuilding authority. Both calls returned the fixed projected user and
-   allow receipt; the refreshed UI showed four MCP receipts and replacement usage `3 of 5`.
+   allow receipt; the refreshed UI showed two MCP receipts and replacement usage `3 of 5`.
 
 Chrome initially sends `Origin: null` for the loopback form navigation. The corrected handler
 accepted it only with exact loopback host, same-origin Fetch Metadata, POST form navigation, live
