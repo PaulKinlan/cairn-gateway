@@ -1,0 +1,4 @@
+M0/M1 exact acceptance: ACCEPT
+Reviewer run: 1a4b6db6-8fcd-4839-be78-7c14c59ca826
+Reviewed commit: 869ce5cfc230f4876a332bb961040fdd5ed07c7e
+Residual boundaries: genuine enrollment M3; named clients M5; no durable/provider/production claim.
