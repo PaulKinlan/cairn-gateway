@@ -1,11 +1,14 @@
 import { MCP_CURRENT, MCP_LEGACY } from "../apps/gateway/mcp.ts";
 import type { FixtureGatewayHarness } from "../packages/mcp-bridge/mod.ts";
+import { BodyTooLargeError, readBoundedBody } from "./bounded_body.ts";
 
 export const MCP_ENDPOINT = "/mcp";
 export const MCP_TRANSPORT = "Streamable HTTP";
 export const MCP_PROTOCOL_VERSION = MCP_LEGACY;
 export const MAX_MCP_BODY_BYTES = 64 * 1024;
 const MAX_SESSIONS = 16;
+const DEFAULT_INITIALIZATION_TIMEOUT_MS = 30_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const encoder = new TextEncoder();
 
 interface JsonRpcRequest {
@@ -17,6 +20,14 @@ interface JsonRpcRequest {
 
 interface Session {
   initialized: boolean;
+  createdAt: number;
+  lastSeen: number;
+}
+
+export interface SessionPolicy {
+  now: () => number;
+  initializationTimeoutMs: number;
+  idleTimeoutMs: number;
 }
 
 function rpcError(id: string | number | null, code: number, message: string) {
@@ -71,25 +82,33 @@ function originAllowed(request: Request): boolean {
 }
 
 async function readBoundedJson(request: Request): Promise<unknown> {
-  const declared = Number(request.headers.get("Content-Length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_MCP_BODY_BYTES) {
-    throw new RangeError("request too large");
-  }
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > MAX_MCP_BODY_BYTES) throw new RangeError("request too large");
+  const bytes = await readBoundedBody(request, MAX_MCP_BODY_BYTES);
   return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
 }
 
 export class StreamableHttpFixtureTransport {
   readonly #harness: FixtureGatewayHarness;
   readonly #sessions = new Map<string, Session>();
+  readonly #policy: SessionPolicy;
 
-  constructor(harness: FixtureGatewayHarness) {
+  constructor(harness: FixtureGatewayHarness, policy: Partial<SessionPolicy> = {}) {
     this.#harness = harness;
+    this.#policy = {
+      now: policy.now ?? Date.now.bind(Date),
+      initializationTimeoutMs: policy.initializationTimeoutMs ??
+        DEFAULT_INITIALIZATION_TIMEOUT_MS,
+      idleTimeoutMs: policy.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
+    };
+    for (const timeout of [this.#policy.initializationTimeoutMs, this.#policy.idleTimeoutMs]) {
+      if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 24 * 60 * 60 * 1_000) {
+        throw new Error("session timeout denied");
+      }
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
     if (!originAllowed(request)) return jsonRpc(rpcError(null, -32000, "origin denied"), 403);
+    this.#purgeExpired();
 
     if (request.method === "GET") {
       return jsonRpc(rpcError(null, -32001, "SSE stream unavailable"), 405, {
@@ -118,8 +137,12 @@ export class StreamableHttpFixtureTransport {
       value = await readBoundedJson(request);
     } catch (error) {
       return jsonRpc(
-        rpcError(null, -32700, error instanceof RangeError ? "request too large" : "parse error"),
-        error instanceof RangeError ? 413 : 400,
+        rpcError(
+          null,
+          -32700,
+          error instanceof BodyTooLargeError ? "request too large" : "parse error",
+        ),
+        error instanceof BodyTooLargeError ? 413 : 400,
       );
     }
     if (!validRequest(value) || Array.isArray(value)) {
@@ -128,11 +151,16 @@ export class StreamableHttpFixtureTransport {
 
     if (value.method === "initialize") return this.#initialize(request, value);
 
-    const session = this.#sessionFor(request);
+    const sessionId = request.headers.get("Mcp-Session-Id");
+    if (!sessionId) {
+      return jsonRpc(rpcError(value.id ?? null, -32002, "session id required"), 400);
+    }
+    const session = this.#sessions.get(sessionId);
     if (!session) return jsonRpc(rpcError(value.id ?? null, -32002, "session not found"), 404);
     if (request.headers.get("MCP-Protocol-Version") !== MCP_PROTOCOL_VERSION) {
       return jsonRpc(rpcError(value.id ?? null, -32600, "protocol version denied"), 400);
     }
+    session.lastSeen = this.#now();
 
     if (value.method === "notifications/initialized") {
       if (value.id !== undefined || session.initialized) {
@@ -192,11 +220,13 @@ export class StreamableHttpFixtureTransport {
     if (request.headers.has("Mcp-Session-Id") || !validInitialize(value)) {
       return jsonRpc(rpcError(value.id ?? null, -32602, "initialize denied"), 400);
     }
+    if (this.#sessions.size >= MAX_SESSIONS) this.#evictOldestInitialization();
     if (this.#sessions.size >= MAX_SESSIONS) {
       return jsonRpc(rpcError(value.id ?? null, -32000, "session limit reached"), 503);
     }
     const id = crypto.randomUUID();
-    this.#sessions.set(id, { initialized: false });
+    const now = this.#now();
+    this.#sessions.set(id, { initialized: false, createdAt: now, lastSeen: now });
     return jsonRpc(
       {
         jsonrpc: "2.0",
@@ -213,19 +243,43 @@ export class StreamableHttpFixtureTransport {
     );
   }
 
-  #sessionFor(request: Request): Session | undefined {
-    const id = request.headers.get("Mcp-Session-Id");
-    return id ? this.#sessions.get(id) : undefined;
-  }
-
   #deleteSession(request: Request): Response {
     if (request.headers.get("MCP-Protocol-Version") !== MCP_PROTOCOL_VERSION) {
       return jsonRpc(rpcError(null, -32600, "protocol version denied"), 400);
     }
     const id = request.headers.get("Mcp-Session-Id");
-    if (!id || !this.#sessions.delete(id)) {
+    if (!id) return jsonRpc(rpcError(null, -32002, "session id required"), 400);
+    if (!this.#sessions.delete(id)) {
       return jsonRpc(rpcError(null, -32002, "session not found"), 404);
     }
     return new Response(null, { status: 204, headers: { "Cache-Control": "no-store" } });
+  }
+
+  #now(): number {
+    const now = this.#policy.now();
+    if (!Number.isSafeInteger(now) || now < 0) throw new Error("session clock denied");
+    return now;
+  }
+
+  #purgeExpired(): void {
+    const now = this.#now();
+    for (const [id, session] of this.#sessions) {
+      const timeout = session.initialized
+        ? this.#policy.idleTimeoutMs
+        : this.#policy.initializationTimeoutMs;
+      const reference = session.initialized ? session.lastSeen : session.createdAt;
+      if (now - reference >= timeout) this.#sessions.delete(id);
+    }
+  }
+
+  #evictOldestInitialization(): void {
+    let candidate: { id: string; createdAt: number } | undefined;
+    for (const [id, session] of this.#sessions) {
+      if (
+        !session.initialized &&
+        (!candidate || session.createdAt < candidate.createdAt)
+      ) candidate = { id, createdAt: session.createdAt };
+    }
+    if (candidate) this.#sessions.delete(candidate.id);
   }
 }

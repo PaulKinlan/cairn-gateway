@@ -2,12 +2,14 @@ import {
   createFixtureGatewayHarness,
   type FixtureGatewayHarness,
 } from "../packages/mcp-bridge/mod.ts";
+import { BodyTooLargeError, readBoundedBody } from "./bounded_body.ts";
 import { MCP_ENDPOINT, StreamableHttpFixtureTransport } from "./mcp_transport.ts";
 import { adminClientScript, renderAdminPage } from "./ui.ts";
 
 export const LOCAL_HOST = "127.0.0.1";
 export const DEFAULT_LOCAL_PORT = 8787;
 const MAX_FORM_BYTES = 2 * 1024;
+const DEFAULT_FIXTURE_GRANT_LIFETIME_MS = 24 * 60 * 60 * 1_000;
 const encoder = new TextEncoder();
 
 const SECURITY_HEADERS: ReadonlyArray<readonly [string, string]> = Object.freeze([
@@ -60,10 +62,7 @@ function allowedOrigin(request: Request): boolean {
 async function formValues(request: Request): Promise<URLSearchParams | undefined> {
   const contentType = request.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/x-www-form-urlencoded") return undefined;
-  const declared = Number(request.headers.get("Content-Length") ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_FORM_BYTES) return undefined;
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > MAX_FORM_BYTES) return undefined;
+  const bytes = await readBoundedBody(request, MAX_FORM_BYTES);
   try {
     return new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch {
@@ -99,17 +98,31 @@ async function fixtureInvocation(harness: FixtureGatewayHarness): Promise<string
 }
 
 export async function createLocalApp(): Promise<LocalApp> {
+  const now = Date.now.bind(Date);
+  const readNow = () => {
+    const value = now();
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error("local fixture clock denied");
+    return value;
+  };
+  const grantDeadline = (startedAt: number) =>
+    Math.floor(startedAt / 1_000) * 1_000 + DEFAULT_FIXTURE_GRANT_LIFETIME_MS;
+  const localStartedAt = readNow();
   const harness = await createFixtureGatewayHarness();
   const transport = new StreamableHttpFixtureTransport(harness);
   const csrfToken = crypto.randomUUID().replaceAll("-", "");
+  let grantExpiresAt = grantDeadline(localStartedAt);
 
   const page = async (request: Request, result?: string): Promise<Response> => {
     const origin = new URL(request.url).origin;
+    const rawGrantStatus = await harness.status("grant");
+    const grantStatus = rawGrantStatus === "active" && readNow() >= grantExpiresAt
+      ? "expired"
+      : rawGrantStatus;
     const html = renderAdminPage({
       origin,
       csrfToken,
       connectionStatus: await harness.status("connection"),
-      grantStatus: await harness.status("grant"),
+      grantStatus,
       ...(result === undefined ? {} : { result }),
     });
     return response(html, 200, "text/html; charset=utf-8");
@@ -148,7 +161,13 @@ export async function createLocalApp(): Promise<LocalApp> {
       if (request.headers.get("Origin") !== url.origin) {
         return jsonError(403, "same_origin_required");
       }
-      const values = await formValues(request);
+      let values: URLSearchParams | undefined;
+      try {
+        values = await formValues(request);
+      } catch (error) {
+        if (error instanceof BodyTooLargeError) return jsonError(413, "request_too_large");
+        return jsonError(400, "invalid_request_body");
+      }
       if (
         !values || values.get("csrf_token") !== csrfToken || [...values].length !== 1 ||
         [...values.keys()].some((key) => key !== "csrf_token")
@@ -161,7 +180,9 @@ export async function createLocalApp(): Promise<LocalApp> {
         return await page(request, "Fixture grant revoked. MCP calls now fail closed.");
       }
       if (url.pathname === "/admin/grant/reactivate") {
+        const reactivationStartedAt = readNow();
         await harness.revokeAndReactivate("grant");
+        grantExpiresAt = grantDeadline(reactivationStartedAt);
         return await page(request, "Fixture grant reactivated. MCP calls can run again.");
       }
       return await page(request, await fixtureInvocation(harness));

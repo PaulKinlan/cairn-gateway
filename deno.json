@@ -35,7 +35,7 @@
     "local:run": "deno run --allow-net=127.0.0.1 local/main.ts",
     "local:smoke": "deno run --allow-net=127.0.0.1 scripts/local_mcp_smoke.ts",
     "typecheck:local": "deno check local/main.ts local/server.ts local/mcp_transport.ts local/ui.ts scripts/local_mcp_smoke.ts tests/local/local_server.test.ts",
-    "test:local": "deno test --allow-net=127.0.0.1 tests/local",
+    "test:local": "deno test --allow-net=127.0.0.1 --allow-read=local tests/local",
     "check:local": "deno fmt --check local scripts/local_mcp_smoke.ts tests/local docs/local-setup.md PLAN.md && deno lint local scripts/local_mcp_smoke.ts tests/local && deno task typecheck:local && deno task test:local && deno task local:smoke",
     "check:stage0": "deno task stage0:preflight && deno task fmt && deno task lint && deno task typecheck && deno task mcp-contract && deno task test:stage0 && deno task security && deno task dependency-graph && deno task dependency-audit && deno task coverage:stage0",
     "check:stage1": "deno task stage1:denominator && deno task fmt && deno task lint && deno task typecheck && deno task test:stage1 && deno task security",

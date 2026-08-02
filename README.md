@@ -2,7 +2,7 @@
 
 Cairn lets agents call revocable, typed provider operations without receiving provider credentials
 or an arbitrary request surface. The current usable path is local and credential-free: a real MCP
-client talks to the accepted fixture authority over Streamable HTTP.
+wire client talks to the accepted fixture authority over Streamable HTTP.
 
 ## Run and connect
 
@@ -13,9 +13,11 @@ deno task local:run
 ```
 
 Open <http://127.0.0.1:8787/>. The page shows the MCP endpoint, live fixture connection and grant
-state, a VS Code configuration, and controls to invoke, revoke, and reactivate the fixture grant.
+state, a candidate VS Code configuration, and controls to invoke, revoke, and reactivate the fixture
+grant.
 
-For VS Code, create `.vscode/mcp.json` in the project that will use Cairn:
+The following `.vscode/mcp.json` is a candidate for Milestone 5 validation, not a supported-client
+claim:
 
 ```json
 {
@@ -28,7 +30,7 @@ For VS Code, create `.vscode/mcp.json` in the project that will use Cairn:
 }
 ```
 
-Start `cairn-local` from VS Code's MCP servers view. Call `invoke_operation` with:
+The wire-level smoke calls `invoke_operation` with:
 
 ```json
 {
@@ -59,7 +61,8 @@ network changes.
 ## Product direction
 
 [PLAN.md](PLAN.md) is the source of truth for the product, journeys, architecture, milestones,
-acceptance criteria, current gaps, and prioritized work. Milestone 1 is this usable local fixture.
+acceptance criteria, current gaps, and prioritized work. The current listener is a Milestone 1
+submilestone; M1 still needs local agent/device/workload/grant creation and a visible receipt.
 Production still needs admin identity and enrollment, durable storage, provider credential custody,
 GitHub connection onboarding, hosted MCP authentication, receipts and usage, recovery, and operating
 documentation.

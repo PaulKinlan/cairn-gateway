@@ -56,7 +56,7 @@ function hostileRequest(path: string, method = "POST") {
   };
 }
 
-Deno.test("GET / leads with exact local run and VS Code connection steps", async () => {
+Deno.test("GET / leads with local run steps and labels VS Code config as candidate", async () => {
   const response = request("/");
   equals(response.status, 200);
   equals(response.headers.get("content-type"), "text/html; charset=utf-8");
@@ -71,6 +71,8 @@ Deno.test("GET / leads with exact local run and VS Code connection steps", async
   assert(html.includes("Run Cairn on your machine."));
   assert(html.includes("deno task local:run"));
   assert(html.includes("http://127.0.0.1:8787/"));
+  assert(html.includes("candidate VS Code configuration pending named-client validation"));
+  assert(html.includes("not an accepted compatibility claim"));
   assert(html.includes(".vscode/mcp.json"));
   assert(html.includes('"type": "http"'));
   assert(html.includes("http://127.0.0.1:8787/mcp"));

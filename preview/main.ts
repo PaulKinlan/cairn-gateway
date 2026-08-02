@@ -74,12 +74,13 @@ const HOME_HTML = `<!DOCTYPE html>
     <h1>Run Cairn on your machine.</h1>
     <p class="lede">Clone the repository, install Deno 2.9.0, then start the loopback-only MCP server and setup page.</p>
     <code class="command">deno task local:run</code>
-    <p>Open <code>http://127.0.0.1:8787/</code>. The local page shows the endpoint, fixture grant state, test controls, and a copyable VS Code configuration.</p>
+    <p>Open <code>http://127.0.0.1:8787/</code>. The local page shows the endpoint, fixture grant state, test controls, and a candidate VS Code configuration pending named-client validation.</p>
   </header>
   <main>
     <section aria-labelledby="connect-vscode">
-      <h2 id="connect-vscode">Connect VS Code</h2>
-      <p>Create <code>.vscode/mcp.json</code> in the project that will use Cairn:</p>
+      <h2 id="connect-vscode">Candidate VS Code configuration</h2>
+      <p>This matches the local endpoint but is not an accepted compatibility claim. Milestone 5 owns the named-client run.</p>
+      <p>If you want to try the candidate, create <code>.vscode/mcp.json</code> in a disposable project:</p>
       <pre>{
   "servers": {
     "cairn-local": {

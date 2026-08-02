@@ -93,7 +93,7 @@ button?.addEventListener("click", async () => {
   const config = document.querySelector("#client-config")?.textContent ?? "";
   try {
     await navigator.clipboard.writeText(config);
-    status.textContent = "VS Code configuration copied.";
+    status.textContent = "Candidate VS Code configuration copied.";
   } catch {
     status.textContent = "Copy was blocked. Select the configuration and copy it manually.";
   }
@@ -139,20 +139,20 @@ export function renderAdminPage(state: AdminPageState): string {
 <body>
   <header>
     <p class="eyebrow">Local fixture</p>
-    <h1>Run Cairn, then connect VS Code.</h1>
+    <h1>Run Cairn and test the local fixture.</h1>
     <p class="lede">Start this page with:</p>
     <code class="command">deno task local:run</code>
-    <p>Put the configuration below in <code>.vscode/mcp.json</code>. VS Code connects to the Streamable HTTP endpoint at <code>${
+    <p>The Streamable HTTP endpoint is <code>${
     escapeHtml(endpoint)
-  }</code>.</p>
+  }</code>. The configuration below is a VS Code candidate pending named-client validation in Milestone 5.</p>
   </header>
   <main id="content">
     <section class="wide" aria-labelledby="connect-title">
-      <h2 id="connect-title">Connect VS Code</h2>
+      <h2 id="connect-title">Candidate client configuration</h2>
       <label for="endpoint">MCP endpoint</label>
       <input class="endpoint" id="endpoint" value="${escapeHtml(endpoint)}" readonly>
       <pre id="client-config">${escapeHtml(config)}</pre>
-      <button type="button" class="secondary" data-copy>Copy VS Code configuration</button>
+      <button type="button" class="secondary" data-copy>Copy candidate VS Code configuration</button>
       <p id="copy-status" class="copy-status" aria-live="polite"></p>
     </section>
     <section aria-labelledby="fixture-state">

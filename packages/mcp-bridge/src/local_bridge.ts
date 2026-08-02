@@ -25,6 +25,7 @@ const capturedDateNow = Date.now.bind(Date);
 const capturedMathFloor = Math.floor.bind(Math);
 const capturedNumberIsSafeInteger = Number.isSafeInteger.bind(Number);
 const systemClock = () => capturedMathFloor(capturedDateNow() / 1000);
+const FIXTURE_GRANT_LIFETIME_SECONDS = 24 * 60 * 60;
 
 interface PolicySession {
   capability: string;
@@ -350,7 +351,12 @@ function closedFixtureFacade(
         const value = (await store.getGrant(context, "grant_a"))!;
         await store.updateGrant(
           context,
-          { ...value, status: active ? "active" : "revoked", version: value.version + 1 },
+          {
+            ...value,
+            status: active ? "active" : "revoked",
+            version: value.version + 1,
+            expiresAt: active ? at + FIXTURE_GRANT_LIFETIME_SECONDS : value.expiresAt,
+          },
           "operator",
           at,
         );
@@ -469,7 +475,7 @@ export async function createFixtureGatewayHarness(): Promise<FixtureGatewayHarne
     operation: "github.user.read",
     status: "active",
     version: 1,
-    expiresAt: clock() + 600,
+    expiresAt: clock() + FIXTURE_GRANT_LIFETIME_SECONDS,
   });
   const custody = new MemoryCustodyFixture(encoder.encode(JSON.stringify({
     id: 1,

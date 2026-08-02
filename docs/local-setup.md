@@ -20,9 +20,11 @@ To choose another loopback port:
 deno task local:run --port 8790
 ```
 
-## Connect VS Code
+## Candidate VS Code configuration
 
-Create `.vscode/mcp.json` in the project you open with VS Code:
+Named-client validation belongs to Milestone 5. The configuration below matches the implemented HTTP
+endpoint but has not completed a disposable VS Code initialize/list/call/reconnect acceptance run,
+so it is a candidate rather than a support claim:
 
 ```json
 {
@@ -35,14 +37,13 @@ Create `.vscode/mcp.json` in the project you open with VS Code:
 }
 ```
 
-Start the `cairn-local` server from VS Code's MCP servers view. The endpoint implements Streamable
-HTTP for MCP protocol version `2025-06-18`: JSON-RPC requests use `POST /mcp` with
-`Content-Type: application/json` and an `Accept` header containing both `application/json` and
-`text/event-stream`. Initialization returns an `Mcp-Session-Id`; later requests send that session ID
-and `MCP-Protocol-Version: 2025-06-18`. The server returns JSON responses and does not offer a
-standalone SSE stream.
+The endpoint implements the wire-level Streamable HTTP lifecycle for MCP protocol version
+`2025-06-18`: JSON-RPC requests use `POST /mcp` with `Content-Type: application/json` and an
+`Accept` header containing both `application/json` and `text/event-stream`. Initialization returns
+an `Mcp-Session-Id`; later requests send that session ID and `MCP-Protocol-Version: 2025-06-18`. The
+server returns JSON responses and does not offer a standalone SSE stream.
 
-Ask VS Code to list the tools, then call `invoke_operation` with:
+The included wire smoke lists tools and calls `invoke_operation` with:
 
 ```json
 {
@@ -53,8 +54,8 @@ Ask VS Code to list the tools, then call `invoke_operation` with:
 ```
 
 The result contains the fixed `fixture` GitHub user. Use the browser page to test the same
-operation, revoke the fixture grant, and reactivate it. State is in memory and resets when the
-process exits.
+operation, revoke the fixture grant, and reactivate it with a fresh usable expiry/version. The
+default fixture grant lasts 24 hours; state is in memory and resets when the process exits.
 
 ## Verify the listener
 
@@ -70,7 +71,7 @@ The smoke test performs `initialize` → `notifications/initialized` → `tools/
 
 ## Current boundary
 
-This milestone proves a usable MCP and admin path over the fixture core. Responses are fixtures;
-GitHub authorization, production credential custody, authenticated remote administration, durable
-storage, and hosted MCP authentication are not connected yet. The public Deno preview remains a
-non-authority setup page.
+This M1 submilestone proves a usable wire-level MCP and admin path over the fixture core. It does
+not prove named-client compatibility or complete M1. Responses are fixtures; GitHub authorization,
+production credential custody, authenticated remote administration, durable storage, and hosted MCP
+authentication are not connected yet. The public Deno preview remains a non-authority setup page.
