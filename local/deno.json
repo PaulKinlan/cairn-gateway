@@ -1,0 +1,5 @@
+{
+  "name": "@cairn/local-fixture",
+  "version": "0.1.0",
+  "exports": "./server.ts"
+}

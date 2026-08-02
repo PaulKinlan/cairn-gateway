@@ -1,47 +1,78 @@
-# Cairn Gateway (provisional internal name)
+# Cairn Gateway
 
-The independently accepted Stage 0 fixture is exact commit
-`25ee6526f683fbd4aa1e955b93c3eb3adf53211d`. It remains an immutable 90-test, offline-only provenance
-base, not a deployable or rollback revision.
+Cairn lets agents call revocable, typed provider operations without receiving provider credentials
+or an arbitrary request surface. The current usable path is local and credential-free: a real MCP
+client talks to the accepted fixture authority over Streamable HTTP.
 
-Stage 1A adds only adapter-neutral durable-authority contracts and an offline file-backed reference
-conformance harness. The reference adapter qualifies the 24-scenario contract; it is not a selected
-production database. `deno task check:stage0` preserves the exact Stage 0 denominator and coverage
-floors (84.0% branch, 96.3% function, 90.6% line). `deno task check:stage1` runs exactly 24 durable
-scenarios. The Stage 1 denominator consumes actual JUnit execution names and rejects missing,
-duplicate, skipped, ignored, filtered, or failed events. The accepted authority foundation remains
-exactly 114 cases with zero skips; `deno task check` additionally runs the separate 12-test preview
-gate.
+## Run and connect
 
-No live invocation listener, live adapter, credential or environment access, remote import, vendor
-request, mutable management UI, or production provider resource exists. Storage, production key
-custody, MCP SDK and named clients, callback topology, revocation promise, and retention remain
-unresolved activation blockers. Stage 1A qualifies an opaque durable `reserved` → `dispatching`
-permit claim followed by adapter-neutral atomic `startDispatch` consumption; only that one-use
-result authorizes dispatch. The same neutral envelope and maintenance interface cover export,
-inspection, restore, migration, and recovery behind explicit privileged maintenance context. The
-candidate-factory conformance path also exercises abrupt worker death while holding the logical file
-lock and bounded stale-lock recovery. This remains test-only logical commit evidence, not filesystem
-fsync/power-loss durability or external exactly-once execution; `unknown_commit` and
-`dispatch_unknown` are durable ambiguity states and are never automatically retried. Concrete
-seed/view helpers are isolated behind the fixture driver.
+Requires Deno 2.9.0.
 
-Requires exact Deno 2.9.0. No network or package changes are needed.
+```sh
+deno task local:run
+```
 
-## Credential-free public preview
+Open <http://127.0.0.1:8787/>. The page shows the MCP endpoint, live fixture connection and grant
+state, a VS Code configuration, and controls to invoke, revoke, and reactivate the fixture grant.
 
-`preview/main.ts` is an isolated Deno Deploy status and architecture surface with a default exported
-fetch handler. It does not start a listener or access environment variables, credentials, storage,
-vendors, remote assets, or package dependencies. Integration invocation is disabled. The page
-identifies accepted public revision `08dc01a03ef229e40ff356da2eb03c3f01cf7a96` and its 114-case
-offline gate without representing the fixture as production-ready or MCP-conformant.
+For VS Code, create `.vscode/mcp.json` in the project that will use Cairn:
 
-Routes are exact: `GET /` serves the status page, `GET /healthz` serves canonical JSON, and every
-method on `/mcp` or `/mcp/legacy` returns a permanent `403` disabled response. Other known-route
-methods return `405`; unknown paths and paths with query strings return `404`.
+```json
+{
+  "servers": {
+    "cairn-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp"
+    }
+  }
+}
+```
 
-Run the permission-free local handler smoke check with `deno task preview:run`, its tests with
-`deno task test:preview`, or the dedicated format/lint/type/test gate with
-`deno task check:preview`. Deno Deploy is configured at the repository root with the exact runtime
-entrypoint `preview/server.ts`, a two-line hosting adapter that passes requests to the
-permission-free default handler in `preview/main.ts`. It requires no environment setup.
+Start `cairn-local` from VS Code's MCP servers view. Call `invoke_operation` with:
+
+```json
+{
+  "operation": "github.user.read@v1",
+  "connection": "connection_a",
+  "arguments": {}
+}
+```
+
+The response is the fixed `fixture` GitHub user. No GitHub authorization or production credential is
+connected yet. See [the local setup guide](docs/local-setup.md) for the transport details, alternate
+port command, and verification steps.
+
+## Verify
+
+```sh
+deno task check:local
+deno task check
+```
+
+`deno task local:smoke` starts an actual loopback listener and proves `initialize` →
+`notifications/initialized` → `tools/list` → `invoke_operation`.
+
+The full gate preserves the accepted 90 Stage 0 cases and coverage floors, the exact 24-scenario
+Stage 1 durable-authority contract, and the separate public preview gate. It needs no package or
+network changes.
+
+## Product direction
+
+[PLAN.md](PLAN.md) is the source of truth for the product, journeys, architecture, milestones,
+acceptance criteria, current gaps, and prioritized work. Milestone 1 is this usable local fixture.
+Production still needs admin identity and enrollment, durable storage, provider credential custody,
+GitHub connection onboarding, hosted MCP authentication, receipts and usage, recovery, and operating
+documentation.
+
+## Public preview
+
+The Deno deployment remains a credential-free setup page. `GET /` explains how to run the local
+product, and `GET /healthz` returns its stable preview health document. Every method on `/mcp` and
+`/mcp/legacy` remains permanently disabled with `403`; the deployment does not start an authority
+service.
+
+Run its dedicated gate with:
+
+```sh
+deno task check:preview
+```

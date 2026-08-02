@@ -56,7 +56,7 @@ function hostileRequest(path: string, method = "POST") {
   };
 }
 
-Deno.test("GET / is an accessible credential-free preview status page", async () => {
+Deno.test("GET / leads with exact local run and VS Code connection steps", async () => {
   const response = request("/");
   equals(response.status, 200);
   equals(response.headers.get("content-type"), "text/html; charset=utf-8");
@@ -65,17 +65,18 @@ Deno.test("GET / is an accessible credential-free preview status page", async ()
   assert(html.includes('<html lang="en">'));
   assert(html.includes('<meta name="viewport" content="width=device-width, initial-scale=1.0">'));
   equals(html.match(/<h1(?:\s|>)/g)?.length, 1);
-  for (const landmark of ["<header>", "<main>", "<section", "<aside", "<footer>"]) {
+  for (const landmark of ["<header>", "<main>", "<section", "<footer>"]) {
     assert(html.includes(landmark), `missing ${landmark}`);
   }
-  assert(html.includes("Credential-free"));
-  assert(html.includes("Invocation is disabled."));
-  assert(html.includes("Credential access"));
-  assert(html.includes("Storage mode"));
-  assert(html.includes("Vendor mode"));
-  assert(html.includes(ACCEPTED_REVISION));
-  assert(html.includes("114 cases"));
-  assert(!html.includes("126 cases"));
+  assert(html.includes("Run Cairn on your machine."));
+  assert(html.includes("deno task local:run"));
+  assert(html.includes("http://127.0.0.1:8787/"));
+  assert(html.includes(".vscode/mcp.json"));
+  assert(html.includes('"type": "http"'));
+  assert(html.includes("http://127.0.0.1:8787/mcp"));
+  assert(html.includes("github.user.read@v1"));
+  assert(!html.includes("114 cases"));
+  assert(!html.includes(ACCEPTED_REVISION));
   assert(html.includes(`href="${REPOSITORY_URL}"`));
 });
 
@@ -95,21 +96,22 @@ Deno.test("preview HTML needs no scripts, forms, remote assets, cookies, or anal
       /analytics|telemetry|tracking pixel/i,
     ]
   ) assert(!forbidden.test(html), String(forbidden));
-  const externalUrls = html.match(/https?:\/\/[^"'\s<]+/g) ?? [];
-  equals(externalUrls, [REPOSITORY_URL]);
+  const urls = html.match(/https?:\/\/[^"'\s<]+/g) ?? [];
+  equals(urls, [
+    "http://127.0.0.1:8787/",
+    "http://127.0.0.1:8787/mcp",
+    REPOSITORY_URL,
+  ]);
 });
 
-Deno.test("preview page states the non-production activation boundary", async () => {
+Deno.test("preview keeps the public deployment outside the local authority", async () => {
   const html = await bodyOf("/");
-  assert(html.includes("Activation remains blocked"));
+  assert(html.includes("The local server uses fixtures, not a GitHub credential."));
+  assert(html.includes("Production custody"));
+  assert(html.includes("durable storage"));
   assert(
-    html.includes(
-      "no production-readiness, production key custody, storage, vendor integration, or MCP transport/protocol conformance claim",
-    ),
+    html.includes("This public deployment does not run the local authority or accept MCP calls."),
   );
-  assert(html.includes("cannot invoke an integration"));
-  assert(html.includes("read a credential"));
-  assert(html.includes("mutate state"));
 });
 
 Deno.test("GET /healthz returns the canonical stable health schema", async () => {
@@ -288,8 +290,12 @@ Deno.test("preview source has no activation, dependency, or mutable browser surf
       /\bSet-Cookie\b/i,
     ]
   ) assert(!forbidden.test(source), String(forbidden));
-  const externalUrls = source.match(/https?:\/\/[^"'\s<]+/g) ?? [];
-  equals(externalUrls, [REPOSITORY_URL]);
+  const urls = source.match(/https?:\/\/[^"'\s<]+/g) ?? [];
+  equals(urls, [
+    REPOSITORY_URL,
+    "http://127.0.0.1:8787/",
+    "http://127.0.0.1:8787/mcp",
+  ]);
   const server = await Deno.readTextFile("preview/server.ts");
   equals(
     server,

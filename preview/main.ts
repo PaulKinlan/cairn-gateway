@@ -28,7 +28,7 @@ const HOME_HTML = `<!DOCTYPE html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light dark">
-  <title>Cairn Gateway — credential-free public preview</title>
+  <title>Run Cairn locally</title>
   <style>
     :root {
       color-scheme: light dark;
@@ -36,11 +36,8 @@ const HOME_HTML = `<!DOCTYPE html>
       --surface: #fffdf7;
       --text: #17211c;
       --muted: #4f5c55;
-      --line: #c9d0c8;
+      --line: #aeb8b0;
       --accent: #17633c;
-      --accent-soft: #dcecdf;
-      --warning: #7a4912;
-      --warning-soft: #f5e6cc;
     }
     * { box-sizing: border-box; }
     body {
@@ -50,130 +47,64 @@ const HOME_HTML = `<!DOCTYPE html>
       font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       line-height: 1.6;
     }
+    header, main, footer { width: min(64rem, calc(100% - 2rem)); margin-inline: auto; }
+    header { padding-block: clamp(3rem, 9vw, 7rem) 2rem; }
+    main { display: grid; gap: 1rem; padding-block: 1rem 4rem; }
+    section { border: 1px solid var(--line); border-radius: 0.8rem; background: var(--surface); padding: clamp(1.25rem, 4vw, 2rem); }
+    h1 { max-width: 14ch; margin: 0; font-size: clamp(2.6rem, 7vw, 5.5rem); line-height: 0.98; letter-spacing: -0.04em; }
+    h2 { margin-block: 0 0.8rem; font-size: 1.4rem; }
+    p { max-width: 67ch; }
+    .eyebrow { color: var(--accent); font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; }
+    .lede { color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.25rem); }
+    code, pre { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+    .command { display: block; width: fit-content; border-radius: 0.45rem; background: var(--text); color: var(--surface); padding: 0.8rem 1rem; }
+    pre { overflow-x: auto; border: 1px solid var(--line); border-radius: 0.45rem; background: var(--background); padding: 1rem; }
     a { color: var(--accent); text-underline-offset: 0.18em; }
     a:focus-visible { outline: 0.2rem solid var(--accent); outline-offset: 0.2rem; }
-    code {
-      overflow-wrap: anywhere;
-      font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-      font-size: 0.9em;
-    }
-    header, main, footer { width: min(68rem, calc(100% - 2rem)); margin-inline: auto; }
-    header { padding-block: clamp(3rem, 9vw, 7rem) 2rem; }
-    .eyebrow {
-      margin: 0 0 0.7rem;
-      color: var(--accent);
-      font-size: 0.82rem;
-      font-weight: 750;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
-    h1 { max-width: 15ch; margin: 0; font-size: clamp(2.4rem, 7vw, 5.5rem); line-height: 0.98; }
-    .lede { max-width: 57ch; margin: 1.5rem 0 0; color: var(--muted); font-size: clamp(1.05rem, 2vw, 1.3rem); }
-    main { display: grid; gap: 1rem; padding-block: 1rem 4rem; }
-    section, aside {
-      border: 1px solid var(--line);
-      border-radius: 1rem;
-      background: var(--surface);
-      padding: clamp(1.25rem, 4vw, 2rem);
-    }
-    h2 { margin: 0 0 1rem; font-size: clamp(1.25rem, 3vw, 1.65rem); line-height: 1.2; }
-    p:last-child, ul:last-child { margin-bottom: 0; }
-    dl { display: grid; grid-template-columns: minmax(10rem, 0.7fr) 1fr; gap: 0; margin: 0; }
-    dt, dd { margin: 0; padding-block: 0.75rem; border-top: 1px solid var(--line); }
-    dt { color: var(--muted); padding-right: 1rem; }
-    dd { font-weight: 650; }
-    dt:first-of-type, dd:first-of-type { border-top: 0; }
-    .status {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      border-radius: 999px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      padding: 0.28rem 0.7rem;
-      font-size: 0.9rem;
-      font-weight: 750;
-    }
-    .status::before { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: currentColor; content: ""; }
-    aside { border-color: color-mix(in srgb, var(--warning) 35%, var(--line)); background: var(--warning-soft); }
-    aside h2 { color: var(--warning); }
-    ul { padding-left: 1.3rem; }
     footer { border-top: 1px solid var(--line); padding-block: 1.5rem 3rem; color: var(--muted); }
-    @media (min-width: 48rem) {
-      main { grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.65fr); }
-      main section:first-child { grid-column: 1 / -1; }
-    }
-    @media (max-width: 34rem) {
-      dl { grid-template-columns: 1fr; }
-      dt { border-top: 0; padding-bottom: 0.1rem; }
-      dt:not(:first-of-type) { border-top: 1px solid var(--line); }
-      dd { border-top: 0; padding-top: 0.1rem; }
-    }
+    @media (min-width: 48rem) { main { grid-template-columns: 1fr 1fr; } main section:first-child { grid-column: 1 / -1; } }
     @media (prefers-color-scheme: dark) {
-      :root {
-        --background: #101612;
-        --surface: #18211b;
-        --text: #edf4ee;
-        --muted: #b3c0b6;
-        --line: #3b4940;
-        --accent: #83d7a2;
-        --accent-soft: #203d2b;
-        --warning: #f2bd76;
-        --warning-soft: #382817;
-      }
+      :root { --background: #101612; --surface: #18211b; --text: #edf4ee; --muted: #b3c0b6; --line: #69776d; --accent: #83d7a2; }
     }
   </style>
 </head>
 <body>
   <header>
-    <p class="eyebrow">Public engineering preview · Credential-free</p>
-    <h1>Delegate access. Keep the credentials.</h1>
-    <p class="lede">Cairn Gateway is an authority boundary for agents: narrowly scoped capabilities, explicit policy, revocable identity, and no caller access to underlying credentials. This deployment exposes project evidence only. Invocation is disabled.</p>
+    <p class="eyebrow">Cairn local fixture</p>
+    <h1>Run Cairn on your machine.</h1>
+    <p class="lede">Clone the repository, install Deno 2.9.0, then start the loopback-only MCP server and setup page.</p>
+    <code class="command">deno task local:run</code>
+    <p>Open <code>http://127.0.0.1:8787/</code>. The local page shows the endpoint, fixture grant state, test controls, and a copyable VS Code configuration.</p>
   </header>
   <main>
-    <section aria-labelledby="preview-status">
-      <h2 id="preview-status">Preview status</h2>
-      <dl>
-        <dt>Preview process</dt>
-        <dd><span class="status">Healthy</span></dd>
-        <dt>Invocation</dt>
-        <dd>Disabled</dd>
-        <dt>Credential access</dt>
-        <dd>False</dd>
-        <dt>Storage mode</dt>
-        <dd>None</dd>
-        <dt>Vendor mode</dt>
-        <dd>None</dd>
-      </dl>
+    <section aria-labelledby="connect-vscode">
+      <h2 id="connect-vscode">Connect VS Code</h2>
+      <p>Create <code>.vscode/mcp.json</code> in the project that will use Cairn:</p>
+      <pre>{
+  "servers": {
+    "cairn-local": {
+      "type": "http",
+      "url": "http://127.0.0.1:8787/mcp"
+    }
+  }
+}</pre>
     </section>
-    <section aria-labelledby="project-purpose">
-      <h2 id="project-purpose">What exists today</h2>
-      <ul>
-        <li>A capability and policy core with exact route allowlisting and tenant isolation.</li>
-        <li>An adapter-neutral durability contract covering ambiguous commits without unsafe retries.</li>
-        <li>Separate owner, device, agent, workload, and credential-custody authority boundaries.</li>
-        <li>Fail-closed request proofs, revocation, replay protection, and exact operation projection.</li>
-      </ul>
+    <section aria-labelledby="try-operation">
+      <h2 id="try-operation">Try one operation</h2>
+      <p>Call <code>invoke_operation</code> with <code>github.user.read@v1</code> and <code>connection_a</code>. Cairn returns the fixed GitHub user fixture.</p>
     </section>
-    <section aria-labelledby="accepted-evidence">
-      <h2 id="accepted-evidence">Evidence, not promises</h2>
-      <p>Accepted foundation: <strong>114 cases</strong> — 90 Stage 0 plus 24 Stage 1A, zero skips.</p>
-      <p>Accepted foundation revision:</p>
-      <p><code>${ACCEPTED_REVISION}</code></p>
+    <section aria-labelledby="current-boundary">
+      <h2 id="current-boundary">Current boundary</h2>
+      <p>The local server uses fixtures, not a GitHub credential. Production custody, provider authorization, durable storage, and hosted MCP authentication are not connected yet.</p>
+      <p>This public deployment does not run the local authority or accept MCP calls.</p>
     </section>
-    <aside aria-labelledby="activation-boundary">
-      <h2 id="activation-boundary">Activation remains blocked</h2>
-      <p>This preview makes no production-readiness, production key custody, storage, vendor integration, or MCP transport/protocol conformance claim.</p>
-      <p>It cannot invoke an integration, read a credential, mutate state, or proxy to a caller-selected destination.</p>
-    </aside>
   </main>
   <footer>
-    <p>Source: <a href="${REPOSITORY_URL}">Cairn Gateway on GitHub</a></p>
+    <p><a href="${REPOSITORY_URL}">Source and setup guide</a></p>
   </footer>
 </body>
 </html>
 `;
-
 const HEALTH_JSON = `${
   JSON.stringify({
     schema: "cairn.preview.health.v1",
