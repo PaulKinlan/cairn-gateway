@@ -330,7 +330,7 @@ Open decisions block the milestone in “Due” unless the required evidence sel
   - [x] Independent implementation/security review accepted the partial submilestone with no
         blocker.
   - [x] Clean-browser journey, keyboard forms, accessibility, responsive, light/dark, and visual
-        validation passed at source commit `90808f8`.
+        validation passed at source commit `0e5a584`.
 
 ### M2 — durable single-user deployment
 
