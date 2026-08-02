@@ -24,6 +24,7 @@ import {
   serializeDurableAuthority,
 } from "../../packages/core/src/store/schema.ts";
 import {
+  candidateWorkerRuntimeArgs,
   createCandidateAdapter,
   FIXTURE_JWKS,
   FIXTURE_THUMBPRINTS,
@@ -63,6 +64,8 @@ async function run(input: WorkerInput): Promise<WorkerResult> {
     args: [
       "run",
       "--no-config",
+      // Empty for the canonical offline reference; the kv-candidate task adds its required flags.
+      ...candidateWorkerRuntimeArgs(),
       "--allow-read",
       "--allow-write",
       "--allow-run=kill",

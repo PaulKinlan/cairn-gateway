@@ -146,7 +146,8 @@ const ownerPrefix = (ctx: TenantContext): string => `tenant/${ctx.tenantId}/user
 const key = (ctx: TenantContext, kind: string, id: string): string =>
   entityKey(ctx, kind, clean(id));
 const subjectKey = (ctx: TenantContext, id: string): string => key(ctx, "subject", id);
-const emptyEnvelope = (): DurableAuthorityEnvelope => ({
+/** Pristine envelope shared with candidate adapters that reuse this transaction core. */
+export const emptyEnvelope = (): DurableAuthorityEnvelope => ({
   schemaVersion: 2,
   authorityGeneration: 1,
   effectiveNow: 0,
@@ -326,7 +327,7 @@ export class OfflineReferenceAuthority
   readonly statePath: string;
   readonly lockPath: string;
   private readonly maintenanceContexts = new WeakMap<object, StoredMaintenanceAuthorization>();
-  constructor(readonly root: string, private readonly injectedFault?: FaultPoint) {
+  constructor(readonly root: string, protected readonly injectedFault?: FaultPoint) {
     this.statePath = `${root}/authority.json`;
     this.lockPath = `${root}/authority.lock`;
   }
@@ -466,12 +467,10 @@ export class OfflineReferenceAuthority
     await Deno.rename(temporary, this.statePath);
     if (fault === "abrupt_after_commit") Deno.exit(75);
   }
-  private async locked<T>(
-    operation: (state: DurableAuthorityEnvelope) => T | Promise<T>,
-    requireCurrent = true,
-    fault?: FaultPoint,
-  ): Promise<T> {
-    await this.initialize();
+  // Protected (not private) so candidate adapters that swap the persistence core (e.g. Deno KV)
+  // keep the identical shared crash-recovery lock protocol: the complete owner record exists
+  // before one atomic hard-link acquisition, and dead-owner recovery is bounded.
+  protected async acquireLock(): Promise<void> {
     for (let attempt = 0;; attempt++) {
       const claimant = `${this.lockPath}.${Deno.pid}.${crypto.randomUUID()}.claim`;
       try {
@@ -510,6 +509,19 @@ export class OfflineReferenceAuthority
         await new Promise((resolve) => setTimeout(resolve, 1 + attempt % 7));
       }
     }
+  }
+  protected async releaseLock(): Promise<void> {
+    await Deno.remove(this.lockPath).catch(() => undefined);
+  }
+  // Protected (not private) so candidate adapters can swap the persistence core (e.g. Deno KV
+  // versionstamp CAS) while reusing the identical transaction/maintenance operation logic.
+  protected async locked<T>(
+    operation: (state: DurableAuthorityEnvelope) => T | Promise<T>,
+    requireCurrent = true,
+    fault?: FaultPoint,
+  ): Promise<T> {
+    await this.initialize();
+    await this.acquireLock();
     try {
       const state = await this.read(requireCurrent);
       const result = await operation(state);
@@ -517,7 +529,7 @@ export class OfflineReferenceAuthority
       await this.write(state, fault ?? this.injectedFault);
       return result;
     } finally {
-      await Deno.remove(this.lockPath).catch(() => undefined);
+      await this.releaseLock();
     }
   }
 

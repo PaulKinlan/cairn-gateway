@@ -21,6 +21,8 @@
     "test:security": "deno test --allow-read=. --allow-run=git tests/security",
     "test:stage0": "deno task test:unit && deno task test:integration && deno task test:security",
     "test:stage1": "deno test --allow-read --allow-write --allow-run tests/stage1/durability_contract.test.ts",
+    "typecheck:stage1:kv-candidate": "deno check --unstable-kv tests/stage1/fixtures/deno_kv_candidate_adapter.ts tests/stage1/kv_candidate_limits.test.ts",
+    "test:stage1:kv-candidate": "deno task typecheck:stage1:kv-candidate && CAIRN_STAGE1_CANDIDATE=deno-kv deno test --unstable-kv --allow-env=CAIRN_STAGE1_CANDIDATE --allow-read --allow-write --allow-run tests/stage1/durability_contract.test.ts tests/stage1/kv_candidate_limits.test.ts",
     "test": "deno task test:stage0 && deno task test:stage1",
     "coverage:stage0": "rm -rf .coverage && deno test --allow-read=. --allow-run=git --coverage=.coverage tests/unit tests/integration tests/security && deno coverage .coverage --detailed && deno run --allow-read=.coverage scripts/stage0_coverage.ts",
     "coverage": "deno task coverage:stage0",

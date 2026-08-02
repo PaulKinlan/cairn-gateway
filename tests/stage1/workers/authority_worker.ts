@@ -185,11 +185,18 @@ try {
       );
       break;
     case "replace":
-      await Deno.copyFile(input.path!, fixture.statePath);
+      // Candidates with a non-file durable store install the snapshot through their fixture seam.
+      if (fixture.installSnapshot) await fixture.installSnapshot(input.path!);
+      else await Deno.copyFile(input.path!, fixture.statePath);
       value = true;
       break;
     case "mutate":
     case "mutatePath": {
+      if (input.action === "mutate" && fixture.injectRawMutation) {
+        await fixture.injectRawMutation(input.mutation!);
+        value = true;
+        break;
+      }
       const targetPath = input.action === "mutatePath" ? input.path! : fixture.statePath;
       const state = JSON.parse(await Deno.readTextFile(targetPath)) as Record<string, unknown>;
       const segments = input.mutation!.path.split(".");
