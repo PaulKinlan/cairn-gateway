@@ -1,4 +1,4 @@
-import { ids, type TenantContext } from "../../core/src/domain/types.ts";
+import { ids, type Principal, type TenantContext } from "../../core/src/domain/types.ts";
 import type { MetadataStore } from "../../core/src/store/store.ts";
 import type { DeviceSigner } from "../../core/src/crypto/device_signer.ts";
 import { MemoryStore } from "../../core/src/store/memory_store.ts";
@@ -7,6 +7,21 @@ import {
   fixtureCapabilityKeyring,
   fixtureDeviceSigner,
 } from "../../core/src/crypto/fixture_keys.ts";
+import {
+  generateCapabilityKeyring,
+  generateP256Signer,
+} from "../../core/src/crypto/generated_signer.ts";
+import {
+  DeviceEnrollmentService,
+  type PossessionProof,
+} from "../../core/src/identity/enrollment.ts";
+import {
+  approvalTransaction,
+  bootstrapTransaction,
+  enrollmentTransaction,
+  removalTransaction,
+} from "../../core/src/identity/transactions.ts";
+import { base64url, canonical } from "../../core/src/crypto/encoding.ts";
 import { MemoryCustodyFixture } from "../../core/src/custody/memory_fixture.ts";
 import { MemorySafeLogger } from "../../core/src/logging/safe_logger.ts";
 import {
@@ -287,7 +302,9 @@ function closedFixtureFacade(
   bridge: BoundFixtureBridge,
   context: TenantContext,
   clock: () => number,
+  overrides?: { deviceId?: string; revokeDevice?: (at: number) => Promise<void> },
 ): FixtureGatewayHarness {
+  const deviceSubject = overrides?.deviceId ?? "device_a";
   let legacySession: LegacyMcpSession | undefined;
   const dispatch = async (
     receivedBody: Uint8Array,
@@ -338,7 +355,11 @@ function closedFixtureFacade(
         break;
       }
       case "device": {
-        const value = (await store.getDevice(context, "device_a"))!;
+        if (!active && overrides?.revokeDevice) {
+          await overrides.revokeDevice(at);
+          break;
+        }
+        const value = (await store.getDevice(context, deviceSubject))!;
         await store.updateDevice(
           context,
           { ...value, status: active ? "active" : "revoked", epoch: value.epoch + 1 },
@@ -401,7 +422,7 @@ function closedFixtureFacade(
       case "agent":
         return (await store.getAgent(context, "agent_a"))?.status ?? "missing";
       case "device":
-        return (await store.getDevice(context, "device_a"))?.status ?? "missing";
+        return (await store.getDevice(context, deviceSubject))?.status ?? "missing";
       case "grant":
         return (await store.getGrant(context, "grant_a"))?.status ?? "missing";
       case "connection":
@@ -521,4 +542,230 @@ export async function createFixtureGatewayHarness(): Promise<FixtureGatewayHarne
     clock,
   );
   return closedFixtureFacade(store, bridge, context, clock);
+}
+
+/** Signs the exact challenge-bound enrollment transaction the service verifies. */
+async function possession(
+  signer: DeviceSigner,
+  transaction: unknown,
+  challenge: string,
+): Promise<PossessionProof> {
+  return {
+    challenge,
+    signature: base64url(
+      await signer.sign(encoder.encode(canonical({ ...(transaction as object), challenge }))),
+    ),
+  };
+}
+
+/**
+ * M2 product-path composition root: identical served surface to the fixture
+ * harness, but every identity enters the authority graph through the accepted
+ * Stage 0 enrollment core with real generated P-256 keys and proof of
+ * possession. No fixture key material, direct store seeding, or self-asserted
+ * identity is used: the owner principal, agent, and admin device are created by
+ * the bootstrap ceremony; the grant-holding member device is created by the
+ * request/approval ceremony; device revocation runs the removal ceremony.
+ *
+ * Custody remains the sanctioned fixture (ADR 0006: fixture custody only), and
+ * the grant/connection authorization rows are seeded exactly as in the fixture
+ * harness — grant-administration UX is M3 scope.
+ */
+export async function createEnrolledGatewayHarness(): Promise<FixtureGatewayHarness> {
+  const context: TenantContext = {
+    tenantId: ids.tenant("tenant_a"),
+    userId: ids.user("user_a"),
+  };
+  const store = new MemoryStore();
+  const enrollment = new DeviceEnrollmentService(store);
+  const clock = systemClock;
+  const startedAt = clock();
+  const agentId = ids.agent("agent_a");
+  const adminDeviceId = ids.device("device_a");
+  const memberDeviceId = ids.device("device_b");
+
+  const agentSigner = await generateP256Signer(agentId);
+  const adminSigner = await generateP256Signer(adminDeviceId);
+  const memberSigner = await generateP256Signer(memberDeviceId);
+  const agentJwk = await agentSigner.publicJwk();
+  const adminJwk = await adminSigner.publicJwk();
+  const memberJwk = await memberSigner.publicJwk();
+
+  const principal: Principal = {
+    id: context.userId,
+    tenantId: context.tenantId,
+    kind: "cryptographic",
+    status: "active",
+    emailRequired: false,
+    epoch: 0,
+  };
+
+  // Owner bootstrap ceremony: agent and admin device both prove possession over
+  // the challenge-bound bootstrap transaction.
+  const bootstrapTx = await bootstrapTransaction(
+    context,
+    principal,
+    { id: agentId, publicJwk: agentJwk },
+    { id: adminDeviceId, publicJwk: adminJwk },
+  );
+  const bootstrapChallenge = await enrollment.bootstrapChallenge(
+    context,
+    principal,
+    agentId,
+    agentJwk,
+    adminDeviceId,
+    adminJwk,
+    startedAt,
+  );
+  await enrollment.bootstrap(
+    context,
+    principal,
+    agentId,
+    agentJwk,
+    adminDeviceId,
+    adminJwk,
+    await possession(adminSigner, bootstrapTx, bootstrapChallenge),
+    await possession(agentSigner, bootstrapTx, bootstrapChallenge),
+    startedAt,
+  );
+
+  // Member device enrollment ceremony: candidate proves possession, the admin
+  // device approves over the fingerprint-bound approval transaction.
+  const requestValue = {
+    id: "enroll_device_b",
+    tenantId: context.tenantId,
+    userId: context.userId,
+    agentId,
+    candidateJwk: memberJwk,
+    expiresAt: startedAt + 600,
+  };
+  const seededPrincipal = (await store.getPrincipal(context, context.userId))!;
+  const seededAgent = (await store.getAgent(context, agentId))!;
+  const requestTx = await enrollmentTransaction(
+    context,
+    requestValue,
+    seededPrincipal,
+    seededAgent,
+  );
+  const requestChallenge = await enrollment.requestChallenge(context, requestValue, startedAt);
+  const { request, fingerprint } = await enrollment.request(
+    context,
+    requestValue,
+    await possession(memberSigner, requestTx, requestChallenge),
+    startedAt,
+  );
+  const approver = (await store.getDevice(context, adminDeviceId))!;
+  const approvalTx = await approvalTransaction(
+    context,
+    seededPrincipal,
+    seededAgent,
+    request,
+    approver,
+    memberDeviceId,
+  );
+  const approvalChallenge = await enrollment.approvalChallenge(
+    context,
+    request.id,
+    adminDeviceId,
+    memberDeviceId,
+    fingerprint,
+    startedAt,
+  );
+  await enrollment.approve(
+    context,
+    request.id,
+    adminDeviceId,
+    memberDeviceId,
+    fingerprint,
+    await possession(adminSigner, approvalTx, approvalChallenge),
+    startedAt,
+  );
+
+  await store.putConnection(context, {
+    id: ids.connection("connection_a"),
+    tenantId: context.tenantId,
+    userId: context.userId,
+    provider: "github",
+    adapter: "fixture",
+    custodyRef: "ref_a",
+    status: "active",
+    epoch: 1,
+  });
+  await store.putGrant(context, {
+    id: "grant_a",
+    tenantId: context.tenantId,
+    userId: context.userId,
+    agentId,
+    deviceId: memberDeviceId,
+    connectionId: ids.connection("connection_a"),
+    operation: "github.user.read",
+    status: "active",
+    version: 1,
+    expiresAt: startedAt + FIXTURE_GRANT_LIFETIME_SECONDS,
+  });
+  const custody = new MemoryCustodyFixture(encoder.encode(JSON.stringify({
+    id: 1,
+    login: "fixture",
+    name: null,
+    html_url: "https:" + "//github.com/fixture",
+    avatar_url: "https:" + "//avatars.githubusercontent.com/u/1",
+  })));
+  const binding = {
+    context,
+    connectionId: "connection_a",
+    connectionRef: "ref_a",
+    integration: "github-cairn-v1" as const,
+    redirectUri: "https://fixture.cairn.invalid/oauth/github/callback" as const,
+  };
+  await custody.beginAuthorization({ flowId: "flow_a", binding, now: startedAt });
+  await custody.completeAuthorization({
+    flowId: "flow_a",
+    binding,
+    ...custody.fixtureCallbackMaterial(binding, "flow_a"),
+    code: "fixture_authorization_code",
+    now: startedAt,
+  });
+  const service = new InvocationService(
+    store,
+    await generateCapabilityKeyring(`enrolled-${crypto.randomUUID()}`),
+    custody,
+    new MemorySafeLogger(),
+  );
+  const bridge = new BoundFixtureBridge(
+    store,
+    service,
+    context,
+    "grant_a",
+    memberSigner,
+    agentSigner,
+    "fixture.cairn.invalid",
+    clock,
+  );
+  // Device revocation runs the Stage 0 removal ceremony: the admin device proves
+  // possession over the challenge-bound removal transaction. Reactivation has no
+  // enrollment ceremony and keeps the facade's operator transition (same
+  // mechanism as the fixture facade).
+  const revokeDevice = async (at: number): Promise<void> => {
+    const agent = (await store.getAgent(context, agentId))!;
+    const adminDevice = (await store.getDevice(context, adminDeviceId))!;
+    const target = (await store.getDevice(context, memberDeviceId))!;
+    const removalTx = await removalTransaction(context, agent, adminDevice, target);
+    const challenge = await enrollment.removalChallenge(
+      context,
+      adminDeviceId,
+      memberDeviceId,
+      at,
+    );
+    await enrollment.remove(
+      context,
+      adminDeviceId,
+      memberDeviceId,
+      await possession(adminSigner, removalTx, challenge),
+      at,
+    );
+  };
+  return closedFixtureFacade(store, bridge, context, clock, {
+    deviceId: memberDeviceId,
+    revokeDevice,
+  });
 }

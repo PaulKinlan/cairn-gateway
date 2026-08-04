@@ -6,7 +6,7 @@ import {
 } from "../../local/mcp_transport.ts";
 import { createLocalApp, startLocalServer } from "../../local/server.ts";
 import { createLocalFixtureController } from "../../local/fixture_controller.ts";
-import { createFixtureGatewayHarness } from "../../packages/mcp-bridge/mod.ts";
+import { createEnrolledGatewayHarness } from "../../packages/mcp-bridge/mod.ts";
 
 const mcpHeaders = (session?: string): Headers => {
   const headers = new Headers({
@@ -871,7 +871,7 @@ Deno.test("Streamable HTTP host, negotiation, lifecycle, and unrelated sessions 
     404,
   );
 
-  const harness = await createFixtureGatewayHarness();
+  const harness = await createEnrolledGatewayHarness();
   let now = 1_000;
   const isolated = new StreamableHttpFixtureTransport(harness, {
     now: () => now,

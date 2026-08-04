@@ -1,5 +1,5 @@
 import {
-  createFixtureGatewayHarness,
+  createEnrolledGatewayHarness,
   type FixtureGatewayHarness,
 } from "../packages/mcp-bridge/mod.ts";
 
@@ -276,7 +276,7 @@ function closedFacade(state: MutableState): LocalFixtureController {
         state.grant
       ) throw new Error("grant lifecycle denied");
       const generation = state.generation;
-      const harness = await createFixtureGatewayHarness();
+      const harness = await createEnrolledGatewayHarness();
       if (
         generation !== state.generation || !state.owner || !state.agentLabel ||
         !state.deviceLabel || !state.workloadLabel || state.grant

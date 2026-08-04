@@ -339,8 +339,10 @@ Open decisions block the milestone in “Due” unless the required evidence sel
   fixture-custody direction on 2026-08-02 (ADR 0006). Acceptance remains blocked by the unchanged
   24-scenario run against the exact KV adapter/topology, atomic-size and strong-read/CAS evidence,
   explicit handling of hosted US storage/transit, usable export/restore proof, receipt, backup, and
-  retention policy decisions, real-enrollment wiring, hosted-listener evidence, and independent
-  review.
+  retention policy decisions, hosted-listener evidence, and independent review. Real Stage 0
+  enrollment (owner bootstrap, agent/device P-256 keys with proof of possession, and revocation
+  ceremonies) is wired into the loopback product path on `feature/m2-real-enrollment` pending
+  independent review and merge.
 - **User-visible deliverable:** the single owner's authority graph, receipts, usage, replay, and
   permits survive restart with backup/restore controls, and an enrolled agent reaches the same
   fixture-custody authority over a public authenticated HTTP MCP endpoint from any machine. No real
