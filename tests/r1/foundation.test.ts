@@ -19,6 +19,31 @@ async function journeyCall(
   });
 }
 
+Deno.test("fixture clients do not expose signing authority or gateway runtime properties", async () => {
+  const foundation = await createR1FoundationFixture();
+  const client = foundation.tenantA.clientA;
+  equals(Reflect.ownKeys(client), ["id"]);
+  equals(Reflect.ownKeys(Object.getPrototypeOf(client)).sort(), ["call", "constructor"]);
+  assert(Object.isFrozen(client));
+
+  const exposed = client as unknown as Record<string, unknown>;
+  for (const key of ["signer", "gateway", "now", "sign", "dispatch", "privateKey", "publicJwk"]) {
+    assert(!(key in exposed), `client exposes ${key}`);
+    equals(exposed[key], undefined);
+  }
+});
+
+Deno.test("verified request bodies strictly determine dispatch semantics", async () => {
+  const foundation = await createR1FoundationFixture();
+  equals(foundation.dispatchAdversarialResults, {
+    malformed: "body denied",
+    extraField: "body denied",
+    schemaMismatch: "body denied",
+    nonCanonical: "body denied",
+    replay: "replay denied",
+  });
+});
+
 Deno.test("one tenant-owned GitHub connection serves two named clients with independent revocation", async () => {
   const foundation = await createR1FoundationFixture();
   const tenant = foundation.tenantA;

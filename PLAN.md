@@ -38,9 +38,11 @@ only one LLM credential is configured.
   journal. Client private keys remain local and are never uploaded.
 - Receipts contain allowlisted metadata only. LLM prompts and outputs and provider request/response
   bodies are never receipt fields.
-- The 90 Stage 0 tests, 24 Stage 1 scenarios, local fixture journey, acceptance records, and fixture
-  adapters remain regression and historical assets. They are not the current product, milestone
-  sequence, deployment prerequisite, or evidence of a live provider.
+- The accepted Stage 0 base had 90 cases; the current denominator is 96 after adding six cases in
+  the two pinned enrollment-wiring test files. Those cases, the 24 Stage 1 scenarios, local fixture
+  journey, acceptance records, and fixture adapters remain regression and historical assets. They
+  are not the current product, milestone sequence, deployment prerequisite, or evidence of a live
+  provider.
 
 ## Tenant-safe model from day one
 
@@ -197,7 +199,8 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
   custody references. Server-rendered Connections and Agents/grants views distinguish configured
   from health, show both fingerprints and revocation impact, and use native POST forms with
   same-origin/CSRF checks and no client scripts. `tests/r1/foundation.test.ts` is the executable
-  evidence; the historical 96 Stage 0 cases and 24 Stage 1 scenarios remain unchanged.
+  evidence; the current 96-case Stage 0 denominator (the historical accepted 90-case base plus six
+  cases in two pinned enrollment-wiring test files) and 24 Stage 1 scenarios remain unchanged.
 - **Not proved by that foundation:** hosted/durable persistence, selected owner authentication,
   provider OAuth/callbacks, custody behavior, real GitHub calls, upstream revoke/delete, restart,
   local key persistence/config writing, provisioning, deployment, or R1 acceptance.

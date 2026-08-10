@@ -40,6 +40,27 @@ type ToolName =
   | "connection_status"
   | "invoke_operation";
 
+type DispatchSemantic =
+  | { tool: "search_capabilities"; arguments: { query: string } }
+  | { tool: "describe_operation"; arguments: { operation: typeof OPERATION } }
+  | { tool: "connection_status"; arguments: { connection: string } }
+  | {
+    tool: "invoke_operation";
+    arguments: {
+      operation: typeof OPERATION;
+      connection: string;
+      arguments: Record<string, never>;
+    };
+  };
+
+export interface R1DispatchAdversarialResults {
+  readonly malformed: string;
+  readonly extraField: string;
+  readonly schemaMismatch: string;
+  readonly nonCanonical: string;
+  readonly replay: string;
+}
+
 interface OwnerAuthorityContext {
   tenantId: R1TenantId;
   userId: R1UserId;
@@ -102,6 +123,65 @@ function clean(value: string): string {
 }
 function randomId(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+function exactObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
+}
+
+function parseDispatchBody(body: Uint8Array): DispatchSemantic {
+  let text: string;
+  let parsed: unknown;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(body);
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("body denied");
+  }
+  if (!exactObject(parsed, ["tool", "arguments"]) || typeof parsed.tool !== "string") {
+    throw new Error("body denied");
+  }
+
+  let semantic: DispatchSemantic;
+  if (parsed.tool === "search_capabilities") {
+    if (!exactObject(parsed.arguments, ["query"]) || typeof parsed.arguments.query !== "string") {
+      throw new Error("body denied");
+    }
+    semantic = { tool: parsed.tool, arguments: { query: parsed.arguments.query } };
+  } else if (parsed.tool === "describe_operation") {
+    if (
+      !exactObject(parsed.arguments, ["operation"]) ||
+      parsed.arguments.operation !== OPERATION
+    ) throw new Error("body denied");
+    semantic = { tool: parsed.tool, arguments: { operation: OPERATION } };
+  } else if (parsed.tool === "connection_status") {
+    if (
+      !exactObject(parsed.arguments, ["connection"]) ||
+      typeof parsed.arguments.connection !== "string"
+    ) throw new Error("body denied");
+    semantic = { tool: parsed.tool, arguments: { connection: parsed.arguments.connection } };
+  } else if (parsed.tool === "invoke_operation") {
+    if (
+      !exactObject(parsed.arguments, ["operation", "connection", "arguments"]) ||
+      parsed.arguments.operation !== OPERATION ||
+      typeof parsed.arguments.connection !== "string" ||
+      !exactObject(parsed.arguments.arguments, [])
+    ) throw new Error("body denied");
+    semantic = {
+      tool: parsed.tool,
+      arguments: {
+        operation: OPERATION,
+        connection: parsed.arguments.connection,
+        arguments: {},
+      },
+    };
+  } else {
+    throw new Error("body denied");
+  }
+
+  if (text !== JSON.stringify(semantic)) throw new Error("body denied");
+  return semantic;
 }
 
 class R1Store {
@@ -376,8 +456,6 @@ class R1Gateway {
 
   async dispatch(request: {
     clientPrincipalId: ClientPrincipalId;
-    tool: ToolName;
-    arguments: Record<string, unknown>;
     receivedBody: Uint8Array;
     proof: Awaited<ReturnType<typeof signRequestProof>>;
   }): Promise<Record<string, unknown>> {
@@ -401,23 +479,22 @@ class R1Gateway {
     ) {
       throw new Error("replay denied");
     }
+    const semantic = parseDispatchBody(request.receivedBody);
     if (client.status !== "active") throw new Error("client denied");
     const grant = this.store.grantForClient(client.tenantId, client.id);
     if (!grant || grant.expiresAt <= at) throw new Error("grant denied");
     const connection = this.store.getConnection(client.tenantId, grant.providerConnectionId);
     if (!connection || connection.lifecycle !== "connected") throw new Error("connection denied");
 
-    if (request.tool === "search_capabilities") {
-      const query = request.arguments.query;
-      if (typeof query !== "string") throw new Error("arguments denied");
+    if (semantic.tool === "search_capabilities") {
+      const query = semantic.arguments.query;
       const match = query.toLowerCase().includes("github") || query.toLowerCase().includes("user");
       return {
         operations: match ? [{ id: OPERATION, connection: connection.id }] : [],
         count: match ? 1 : 0,
       };
     }
-    if (request.tool === "describe_operation") {
-      if (request.arguments.operation !== OPERATION) throw new Error("operation denied");
+    if (semantic.tool === "describe_operation") {
       return {
         id: OPERATION,
         provider: "github",
@@ -425,8 +502,8 @@ class R1Gateway {
         requestUnits: 1,
       };
     }
-    if (request.tool === "connection_status") {
-      if (request.arguments.connection !== connection.id) throw new Error("connection denied");
+    if (semantic.tool === "connection_status") {
+      if (semantic.arguments.connection !== connection.id) throw new Error("connection denied");
       return {
         connection: connection.id,
         status: connection.lifecycle,
@@ -435,12 +512,7 @@ class R1Gateway {
         operation: OPERATION,
       };
     }
-    if (
-      request.arguments.operation !== OPERATION || request.arguments.connection !== connection.id ||
-      !request.arguments.arguments || typeof request.arguments.arguments !== "object" ||
-      Array.isArray(request.arguments.arguments) ||
-      Object.keys(request.arguments.arguments as Record<string, unknown>).length !== 0
-    ) throw new Error("operation denied");
+    if (semantic.arguments.connection !== connection.id) throw new Error("operation denied");
     const attempt: Attempt = {
       id: randomId("attempt"),
       tenantId: client.tenantId,
@@ -475,16 +547,24 @@ class R1Gateway {
 }
 
 class R1FixtureClient {
+  readonly #signer: DeviceSigner;
+  readonly #gateway: R1Gateway;
+  readonly #now: () => number;
+
   constructor(
     readonly id: ClientPrincipalId,
-    private readonly signer: DeviceSigner,
-    private readonly gateway: R1Gateway,
-    private readonly now: () => number,
-  ) {}
+    signer: DeviceSigner,
+    gateway: R1Gateway,
+    now: () => number,
+  ) {
+    this.#signer = signer;
+    this.#gateway = gateway;
+    this.#now = now;
+  }
 
   async call(tool: ToolName, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     const receivedBody = encoder.encode(JSON.stringify({ tool, arguments: args }));
-    const proof = await signRequestProof(this.signer, {
+    const proof = await signRequestProof(this.#signer, {
       v: 1,
       method: "POST",
       authority: AUTHORITY,
@@ -492,15 +572,13 @@ class R1FixtureClient {
       query: "",
       audience: "urn:cairn:gateway",
       body_sha256: await bodyHash(receivedBody),
-      issued_at: this.now(),
+      issued_at: this.#now(),
       nonce: randomId("client_request"),
       device_id: this.id,
       agent_id: this.id,
     });
-    return await this.gateway.dispatch({
+    return await this.#gateway.dispatch({
       clientPrincipalId: this.id,
-      tool,
-      arguments: args,
       receivedBody,
       proof,
     });
@@ -521,7 +599,22 @@ export interface R1TenantFixture {
 export interface R1FoundationFixture {
   tenantA: R1TenantFixture;
   tenantB: R1TenantFixture;
+  dispatchAdversarialResults: R1DispatchAdversarialResults;
   assertCustodyReferenceUniqueAcrossTenants(): Promise<void>;
+}
+
+interface EnrolledFixtureClient {
+  client: R1FixtureClient;
+  runDispatchAdversarialProbe(): Promise<R1DispatchAdversarialResults>;
+}
+
+async function denial(work: () => Promise<unknown>): Promise<string> {
+  try {
+    await work();
+    return "accepted";
+  } catch (error) {
+    return error instanceof Error ? error.message : "unknown denial";
+  }
 }
 
 async function enrollClient(
@@ -532,7 +625,7 @@ async function enrollClient(
   label: string,
   connectionId: ProviderConnectionId,
   now: () => number,
-): Promise<R1FixtureClient> {
+): Promise<EnrolledFixtureClient> {
   const clientId = r1Ids.client(`client_${clean(suffix)}`);
   const reference = randomId("one_use_enrollment");
   await store.issueEnrollment(context, clientId, label, reference, now());
@@ -572,7 +665,56 @@ async function enrollClient(
     expiresAt: now() + 86_400,
     maxRequestUnits: 1,
   });
-  return new R1FixtureClient(clientId, signer, gateway, now);
+  const client = new R1FixtureClient(clientId, signer, gateway, now);
+  Object.freeze(client);
+  const signedRequest = async (body: Uint8Array) => ({
+    clientPrincipalId: clientId,
+    receivedBody: body,
+    proof: await signRequestProof(signer, {
+      v: 1,
+      method: "POST" as const,
+      authority: AUTHORITY,
+      path: "/mcp" as const,
+      query: "" as const,
+      audience: "urn:cairn:gateway" as const,
+      body_sha256: await bodyHash(body),
+      issued_at: now(),
+      nonce: randomId("adversarial_request"),
+      device_id: clientId,
+      agent_id: clientId,
+    }),
+  });
+  return {
+    client,
+    runDispatchAdversarialProbe: async () => {
+      const malformed = await signedRequest(encoder.encode("{"));
+      const extraField = await signedRequest(encoder.encode(JSON.stringify({
+        tool: "search_capabilities",
+        arguments: { query: "github" },
+        extra: true,
+      })));
+      const schemaMismatch = await signedRequest(encoder.encode(JSON.stringify({
+        tool: "invoke_operation",
+        arguments: { query: "github" },
+      })));
+      const nonCanonical = await signedRequest(encoder.encode(JSON.stringify({
+        arguments: { query: "github" },
+        tool: "search_capabilities",
+      })));
+      const replay = await signedRequest(encoder.encode(JSON.stringify({
+        tool: "search_capabilities",
+        arguments: { query: "github" },
+      })));
+      await gateway.dispatch(replay);
+      return Object.freeze({
+        malformed: await denial(() => gateway.dispatch(malformed)),
+        extraField: await denial(() => gateway.dispatch(extraField)),
+        schemaMismatch: await denial(() => gateway.dispatch(schemaMismatch)),
+        nonCanonical: await denial(() => gateway.dispatch(nonCanonical)),
+        replay: await denial(() => gateway.dispatch(replay)),
+      });
+    },
+  };
 }
 
 async function createTenantFixture(
@@ -580,7 +722,12 @@ async function createTenantFixture(
   gateway: R1Gateway,
   suffix: string,
   now: () => number,
-): Promise<{ fixture: R1TenantFixture; context: OwnerAuthorityContext; custodyReference: string }> {
+): Promise<{
+  fixture: R1TenantFixture;
+  context: OwnerAuthorityContext;
+  custodyReference: string;
+  runDispatchAdversarialProbe(): Promise<R1DispatchAdversarialResults>;
+}> {
   const context = store.createOwnerTenant(`Tenant ${suffix.toUpperCase()}`, suffix);
   let connectionId = r1Ids.connection(`github_${clean(suffix)}_1`);
   const custodyReference = `opaque_custody_${suffix}_1`;
@@ -594,7 +741,7 @@ async function createTenantFixture(
     health: "unknown",
     authorityEpoch: 1,
   });
-  const clientA = await enrollClient(
+  const enrolledA = await enrollClient(
     store,
     gateway,
     context,
@@ -603,7 +750,7 @@ async function createTenantFixture(
     connectionId,
     now,
   );
-  const clientB = await enrollClient(
+  const enrolledB = await enrollClient(
     store,
     gateway,
     context,
@@ -612,6 +759,8 @@ async function createTenantFixture(
     connectionId,
     now,
   );
+  const clientA = enrolledA.client;
+  const clientB = enrolledB.client;
   let reconnectCount = 1;
   const fixture: R1TenantFixture = {
     tenantId: context.tenantId,
@@ -656,7 +805,12 @@ async function createTenantFixture(
     },
     snapshot: () => store.snapshot(context),
   };
-  return { fixture: Object.freeze(fixture), context, custodyReference };
+  return {
+    fixture: Object.freeze(fixture),
+    context,
+    custodyReference,
+    runDispatchAdversarialProbe: enrolledA.runDispatchAdversarialProbe,
+  };
 }
 
 /**
@@ -669,9 +823,11 @@ export async function createR1FoundationFixture(): Promise<R1FoundationFixture> 
   const gateway = new R1Gateway(store, now);
   const a = await createTenantFixture(store, gateway, "a", now);
   const b = await createTenantFixture(store, gateway, "b", now);
+  const dispatchAdversarialResults = await a.runDispatchAdversarialProbe();
   return Object.freeze({
     tenantA: a.fixture,
     tenantB: b.fixture,
+    dispatchAdversarialResults,
     assertCustodyReferenceUniqueAcrossTenants: async () => {
       await store.putConnection(b.context, {
         id: r1Ids.connection("github_a_1"),

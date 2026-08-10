@@ -41,10 +41,12 @@ one tenant-owned fixture connection, independent client revocation, disconnect/f
 a synthetic second tenant. It does not add a provider call, hosted persistence, owner
 authentication, OAuth, custody, deployment, or live GitHub. Run it with `deno task test:r1`.
 
-The Stage 0 90-case suite, Stage 1 24-scenario contract, fixtures, and `docs/acceptance/` records
-are preserved regression/historical assets. They do not prove hosted custody, a real provider, a
-named client, or current milestone completion. The Deno KV global 64 KiB envelope candidate is
-rejected; the latest direct candidate result is 27/28 with `DUR-24` unresolved.
+The accepted Stage 0 base had 90 cases. The current Stage 0 denominator is 96: that historical base
+plus six cases in the two pinned enrollment-wiring test files. The Stage 1 24-scenario contract,
+fixtures, and `docs/acceptance/` records are likewise preserved regression/historical assets. They
+do not prove hosted custody, a real provider, a named client, or current milestone completion. The
+Deno KV global 64 KiB envelope candidate is rejected; the latest direct candidate result is 27/28
+with `DUR-24` unresolved.
 
 ## Run the historical local fixture
 
