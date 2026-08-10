@@ -1,15 +1,28 @@
-# Stage 0 threat model
+# Cairn threat model
 
-Assets: custodian-held provider tokens, signing/device private keys, flow material,
-ownership/grants, connection state, provider response, and receipt integrity. Treat models,
-MCP/browser inputs, IDs, callback fields, provider strings, stolen capabilities, stale catalogs,
-redirects and a second tenant as hostile.
+The Stage 0 model remains a regression baseline; this document adds the R1 private-control-plane
+boundaries from `PLAN.md`.
 
-Controls: composite ownership keys; proof of possession; nonce/JTI CAS; strict short capabilities;
-call-time epochs/revocation; fixed connector; bounded projection; narrow custody; metadata-only
-logs; one-time state/PKCE; independent per-request MCP authentication; global emergency deny.
+Assets are custodian-held OAuth/API-key credentials, client P-256 private keys, owner sessions,
+membership and grant authority, OAuth/enrollment flow material, connection state, provider and LLM
+content, attempt integrity, and secret-free receipts. Treat models, local helpers, MCP/browser
+inputs, IDs, callback fields, provider strings, stolen capabilities/references, stale catalogs,
+redirects, vendor administration, and a second tenant as hostile.
 
-Trust boundaries are model→local bridge→gateway→custodian→GitHub and control callback→custodian
-status. Compromise of one route must not create credential retrieval. Residual centralization,
-software key copyability, provider revoke semantics, and vendor redirect/key-scope behavior block
-production review.
+Controls are tenant-partitioned records; tenant derived only from authenticated session/client
+proof; purpose-bound login, provider, and enrollment flows; explicit fingerprint approval; proof of
+possession; nonce/JTI CAS; strict short capabilities; call-time expiry/revocation; one-use dispatch
+permits; fixed connectors and projections; bounded LLM input/output/cost; exclusive custody;
+metadata-only logs/receipts; and global emergency deny. One connection may back many grants without
+becoming client-owned.
+
+Trust boundaries are owner browser→owner session→control UI, local helper/key store→MCP signing
+bridge→gateway, gateway→authority/receipt store, gateway→custodian→GitHub/X/Kimi, and OAuth
+callback→purpose-bound flow→custody status. Login callbacks cannot complete connection flows or
+bootstrap ownership. Agent credentials cannot read provider tokens or access custodian
+administration. Compromise of one route must not create credential retrieval, tenant selection, or a
+generic request primitive.
+
+Residual centralization, software key copyability, owner recovery before R5, provider revoke/delete
+semantics, Kimi Code hosted-proxy permission, Nango callback/tag/token-read behavior, X scopes, and
+the replacement durable-store topology block the relevant activation gate.

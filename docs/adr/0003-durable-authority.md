@@ -1,7 +1,8 @@
 # ADR 0003: Durable authority contract and Deno KV candidate
 
-- **Status:** Contract accepted for offline qualification; Deno KV selected for M2 on 2026-08-02,
-  implementation and hosted qualification pending
+- **Status:** Historical contract decision. The transaction invariants remain regression
+  requirements; ADR 0007 rejects the global single-value Deno KV envelope and supersedes its M2
+  selection.
 
 ## Decision
 

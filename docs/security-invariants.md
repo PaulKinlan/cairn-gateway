@@ -1,6 +1,11 @@
 # Security invariants
 
-1. Every record lookup and mutation includes tenant and owner context; opaque IDs never authorize.
+These invariants combine the preserved fixture security core with the R1 target model in `PLAN.md`.
+Fixture names such as agent/device remain regression terminology; new product authority uses
+Tenant/User/Membership/ClientPrincipal/Grant without weakening the proof or replay rules.
+
+1. Every record lookup and mutation includes tenant context derived only from an authenticated owner
+   session or verified client proof; caller tenant values and opaque IDs never authorize.
 2. Device and agent nonces are independently single-use in shared authoritative state and are
    consumed together atomically; capability JTIs are consumed atomically before dispatch. An
    isolate-local replay cache or composite nonce-pair key is never sufficient.
@@ -40,3 +45,15 @@
     boundary.
 17. The committed MCP contract gate consumes every immutable fixture leaf and validates the actual
     lifecycle and call-result envelope rules; any new or mutated unconsumed constraint fails CI.
+18. User identity is independent from tenancy. Membership supplies the tenant role, and every
+    ProviderConnection, ClientPrincipal, Grant, OAuthFlow, Receipt, and Attempt is tenant-owned.
+19. One ProviderConnection may serve multiple client grants. A connection is never owned by or
+    inferred from the first client, grant, callback, or opaque custody reference.
+20. Login OAuth and provider-connection OAuth are distinct purpose-bound flows. Neither the first
+    callback nor a provider identity bootstraps the owner.
+21. Enrollment references are short-lived, one-use, and non-invoking. Only explicit owner approval
+    of a locally generated P-256 public-key fingerprint creates client authority.
+22. Configured and healthy are separate connection facts. Local denial is immediate on disconnect;
+    upstream revoke/deletion certainty is reported separately and stale authority cannot reactivate.
+23. API-key intake never redisplays a secret. LLM prompt/output, provider bodies, credentials, and
+    client private keys are absent from HTML, clipboard data, commands, config, logs, and receipts.

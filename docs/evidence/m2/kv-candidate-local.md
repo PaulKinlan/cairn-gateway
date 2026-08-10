@@ -1,8 +1,9 @@
-# M2 evidence: Deno KV candidate adapter (local, offline-only)
+# Historical M2 evidence: Deno KV candidate adapter (local, offline-only)
 
-- **Status:** local candidate evidence only. Not production storage evidence, not hosted-topology
-  qualification, and not M2 acceptance. ADR 0003's selection remains "implementation and hosted
-  qualification pending".
+- **Status:** historical candidate evidence only. ADR 0007 rejects this global single-value
+  envelope. A later direct run on 2026-08-09 passed 27/28 and failed `DUR-24` cross-tenant
+  custody-reference uniqueness; that unresolved result supersedes this retained run for current
+  qualification. This file is not production evidence or current milestone acceptance.
 - **Code commit:** `5cd99d0` on `feature/m2-kv-adapter` (base `bfcd09c`).
 - **Runtime:** Deno 2.8.1 (stable, release, x86_64-unknown-linux-gnu; v8 14.9.207.2-rusty). No
   network access was used; no credentials, hosted KV, or Deno Deploy provisioning of any kind.

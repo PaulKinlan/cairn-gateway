@@ -1,6 +1,11 @@
-# Activation gates
+# Historical fixture activation gates
 
-## Frozen evidence
+> **Non-current milestone document.** These gates preserve the fixture/durability regression
+> boundary. ADR 0007 and `PLAN.md` replace the M2 public-fixture sequence; R1 has new custody,
+> authentication, tenant-partitioning, and real-GitHub gates. The latest opt-in KV candidate run is
+> 27/28 with DUR-24 unresolved, so no older retained result qualifies that adapter.
+
+## Frozen historical evidence
 
 - Accepted Stage 0 base: `25ee6526f683fbd4aa1e955b93c3eb3adf53211d`.
 - Stage 0 denominator: exactly 90 unchanged tests, zero skipped.

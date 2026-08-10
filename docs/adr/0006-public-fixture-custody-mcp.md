@@ -1,6 +1,7 @@
 # ADR 0006: Public authenticated MCP with fixture custody precedes live custody
 
-- **Status:** Selected by Paul on 2026-08-02; implementation and hosted qualification pending
+- **Status:** Superseded by ADR 0007 on 2026-08-09. Retained as historical rationale only; a public
+  fixture-custody deployment is no longer a prerequisite.
 
 ## Decision
 
