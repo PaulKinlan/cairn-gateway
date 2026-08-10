@@ -35,6 +35,12 @@ The existing public deployment is likewise a historical credential-free preview.
 intentionally disabled. It is not R1 acceptance and need not be expanded before the real GitHub
 slice.
 
+Branch `feat/r1-foundation` adds an in-memory, credential-free executable R1 model and
+server-rendered Connections/Agents views. Its focused journey proves two named P-256 clients sharing
+one tenant-owned fixture connection, independent client revocation, disconnect/fresh reconnect, and
+a synthetic second tenant. It does not add a provider call, hosted persistence, owner
+authentication, OAuth, custody, deployment, or live GitHub. Run it with `deno task test:r1`.
+
 The Stage 0 90-case suite, Stage 1 24-scenario contract, fixtures, and `docs/acceptance/` records
 are preserved regression/historical assets. They do not prove hosted custody, a real provider, a
 named client, or current milestone completion. The Deno KV global 64 KiB envelope candidate is

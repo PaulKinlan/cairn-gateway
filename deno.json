@@ -21,6 +21,7 @@
     "test:security": "deno test --allow-read=. --allow-run=git tests/security",
     "test:stage0": "deno task test:unit && deno task test:integration && deno task test:security",
     "test:stage1": "deno test --allow-read --allow-write --allow-run tests/stage1/durability_contract.test.ts",
+    "test:r1": "deno test tests/r1",
     "typecheck:stage1:kv-candidate": "deno check --unstable-kv tests/stage1/fixtures/deno_kv_candidate_adapter.ts tests/stage1/kv_candidate_limits.test.ts",
     "test:stage1:kv-candidate": "deno task typecheck:stage1:kv-candidate && CAIRN_STAGE1_CANDIDATE=deno-kv deno test --unstable-kv --allow-env=CAIRN_STAGE1_CANDIDATE --allow-read --allow-write --allow-run tests/stage1/durability_contract.test.ts tests/stage1/kv_candidate_limits.test.ts",
     "test": "deno task test:stage0 && deno task test:stage1",
@@ -42,7 +43,8 @@
     "check:local": "deno fmt --check local scripts/local_mcp_smoke.ts tests/local docs/local-setup.md PLAN.md && deno lint local scripts/local_mcp_smoke.ts tests/local && deno task typecheck:local && deno task test:local && deno task local:smoke",
     "check:stage0": "deno task stage0:preflight && deno task fmt && deno task lint && deno task typecheck && deno task mcp-contract && deno task test:stage0 && deno task security && deno task dependency-graph && deno task dependency-audit && deno task coverage:stage0",
     "check:stage1": "deno task stage1:denominator && deno task fmt && deno task lint && deno task typecheck && deno task test:stage1 && deno task security",
-    "check": "deno task check:stage0 && deno task check:stage1 && deno task check:preview && deno task check:local"
+    "check:r1": "deno fmt --check packages/core/src/r1 apps/control/r1_ui.ts tests/r1 docs/evidence/r1 && deno lint packages/core/src/r1 apps/control/r1_ui.ts tests/r1 && deno check packages/core/src/r1/foundation.ts apps/control/r1_ui.ts tests/r1/foundation.test.ts && deno task test:r1",
+    "check": "deno task check:stage0 && deno task check:stage1 && deno task check:preview && deno task check:local && deno task check:r1"
   },
   "deploy": {
     "org": "paulkinlan-ea",

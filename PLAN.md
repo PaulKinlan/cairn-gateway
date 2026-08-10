@@ -173,7 +173,7 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
 
 ## Delivery milestones
 
-### R0 — reset and model (current)
+### R0 — reset and model (accepted at `b927ca7`)
 
 - Canonical plan, pivot ADR, README, UI IA, historical labels, tenancy model, and decision gates
   agree.
@@ -181,11 +181,26 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
 - **Accept:** documentation checks and full existing gate pass; independent review finds no
   contradiction or widened scope.
 
-### R1 — real GitHub vertical slice
+### R1 — real GitHub vertical slice (current; executable foundation only)
 
 - Decide owner authentication and custody after focused spikes.
 - Implement tenant-partitioned authority, hosted owner UI, GitHub connect/disconnect/reconnect,
   `github.user.read@v1`, exact client handoff, and two independently revocable clients.
+- **Foundation evidence on `feat/r1-foundation`:** a credential-free in-memory slice now expresses
+  Tenant/User/owner Membership, tenant-owned ProviderConnection, named ClientPrincipal, Grant,
+  purpose-bound OAuthFlow, Attempt, and Receipt contracts. One-use enrollment submits a locally
+  generated non-extractable P-256 public key and proof, then requires owner approval. Two named
+  clients receive grants to one connection and exercise the four fixed tool names; revoking one
+  denies discovery, description, status, and invocation while the other continues. Disconnect denies
+  both; reconnect creates a new connection ID and grant authority. A synthetic second tenant proves
+  proof-derived tenant context, connection/grant/receipt isolation, and globally unique opaque
+  custody references. Server-rendered Connections and Agents/grants views distinguish configured
+  from health, show both fingerprints and revocation impact, and use native POST forms with
+  same-origin/CSRF checks and no client scripts. `tests/r1/foundation.test.ts` is the executable
+  evidence; the historical 96 Stage 0 cases and 24 Stage 1 scenarios remain unchanged.
+- **Not proved by that foundation:** hosted/durable persistence, selected owner authentication,
+  provider OAuth/callbacks, custody behavior, real GitHub calls, upstream revoke/delete, restart,
+  local key persistence/config writing, provisioning, deployment, or R1 acceptance.
 - **Accept:** owner connects GitHub; two separately enrolled Pi/MCP clients invoke; revoking one
   denies it at use time while the other continues; receipts are secret-free; disconnect denies and
   reconnect creates fresh authority. Record callback, deletion, restart, replay, and sentinel tests.
