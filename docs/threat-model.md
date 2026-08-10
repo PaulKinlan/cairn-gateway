@@ -17,12 +17,14 @@ metadata-only logs/receipts; and global emergency deny. One connection may back 
 becoming client-owned.
 
 Trust boundaries are owner browser→owner session→control UI, local helper/key store→MCP signing
-bridge→gateway, gateway→authority/receipt store, gateway→custodian→GitHub/X/Kimi, and OAuth
-callback→purpose-bound flow→custody status. Login callbacks cannot complete connection flows or
-bootstrap ownership. Agent credentials cannot read provider tokens or access custodian
-administration. Compromise of one route must not create credential retrieval, tenant selection, or a
-generic request primitive.
+bridge→gateway, gateway→authority/receipt store, gateway→custodian→GitHub/X/DeepSeek, and OAuth
+callback→purpose-bound flow→custody status. API-key intake adds owner browser→top-level custodian
+origin→custodian ingestion: the secret is necessarily transient in the browser but never traverses
+Cairn. Login callbacks cannot complete connection flows or bootstrap ownership. Agent credentials
+cannot read provider tokens or access custodian administration. Compromise of one route must not
+create credential retrieval, tenant selection, or a generic request primitive.
 
 Residual centralization, software key copyability, owner recovery before R5, provider revoke/delete
-semantics, Kimi Code hosted-proxy permission, Nango callback/tag/token-read behavior, X scopes, and
-the replacement durable-store topology block the relevant activation gate.
+semantics, DeepSeek endpoint/model current-documentation verification, Nango static and approved
+sandbox findings, X scopes, and the replacement durable-store topology block the relevant activation
+gate.

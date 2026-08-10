@@ -8,7 +8,7 @@ The UI has five destinations only:
 
 1. **Setup / Home** — authentication state, incomplete setup, configured-versus-healthy summary, and
    the next safe action.
-2. **Connections** — GitHub, X, and the selected API-key LLM connection lifecycle.
+2. **Connections** — GitHub, X, and the initial DeepSeek API-key connection lifecycle.
 3. **Agents** — named client principals; enrollment, key fingerprint/status, and grants are nested
    under each client rather than separate top-level areas.
 4. **Activity** — allowlisted receipt/attempt outcomes and bounded usage/cost metadata.
@@ -39,14 +39,26 @@ not client-owned.
 
 ## Secure API-key intake
 
-The key form is authenticated, same-origin, CSRF-protected, rate-limited, and purpose-bound to one
-pending connection. Submission goes directly to the approved custodian or one-use custody intake
-endpoint. The stored value is never returned to the browser.
+1. The authenticated Connections UI asks the selected custodian to create a short-lived,
+   purpose-bound intake session for the pending tenant connection.
+2. Cairn navigates Paul to a top-level page on the custodian origin. This is not an embedded or
+   Cairn-hosted form.
+3. The custodian page renders a masked input that is empty on every render. The value necessarily
+   exists transiently in Paul's browser while he types/submits it, then posts directly to the
+   custodian over HTTPS.
+4. On submission the custodian clears/replaces the secret-bearing DOM and retains the value only in
+   approved custody; ingestion memory is bounded and not logged. Cairn receives only an opaque
+   connection reference and bounded status.
 
+The value may exist transiently only in Paul's browser and custodian ingestion memory. It must never
+enter Cairn HTML or DOM, Cairn application process/storage/logs, client framework state, URL or
+history, analytics, clipboard, receipts, support output, config, commands, journal, or redisplay.
 After submission show only provider, owner label, connection state, created/rotated time, last
-health check, and—only if safely derived by custody—the last four fingerprint characters. Never
-provide reveal, copy, download, debug, support-export, receipt, or log controls for a key. Do not
-put the key in a URL, HTML, client state, analytics, command, config, or journal.
+health check, and—only if safely derived by custody—a short fingerprint suffix.
+
+If the selected custodian cannot provide this exact flow, R3 remains blocked until the dedicated
+custody service provides the equivalent. A normal Cairn form, including a server-rendered or
+client-framework secret field posting through Cairn, is forbidden.
 
 ## Exact client enrollment handoff
 

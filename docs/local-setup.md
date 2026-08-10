@@ -1,4 +1,7 @@
-# Run Cairn locally
+# Historical local fixture setup
+
+> **Non-current product path.** This guide preserves the accepted M1 fixture/regression journey. The
+> current R0–R5 target and milestones are defined only in [`PLAN.md`](../PLAN.md).
 
 This path runs entirely on your machine. It uses a fixed GitHub user fixture, so no provider account
 or credential is needed.
@@ -127,9 +130,11 @@ deno task check:local
 deno task check
 ```
 
-## Boundary
+## Historical boundary
 
-M1 passed independent review and the parent-run browser journey. It uses display labels mapped to
-fixed test authority; real cryptographic enrollment and workload identity are M3 work. M1 does not
-prove a named client, durable restart, real owner identity, real GitHub OAuth, credential custody,
-hosted authority, or multi-user support. The public Deno preview remains a non-authority setup page.
+Under the superseded M0–M7 plan, M1 passed independent review and the parent-run browser journey. It
+uses display labels mapped to fixed test authority. The current plan preserves P-256 enrollment as a
+regression asset and schedules real client handoff in R1; separate workload identity is deferred.
+This fixture does not prove any current R0–R5 milestone, named-client support, durable restart, real
+owner identity, real GitHub OAuth, credential custody, hosted authority, or multiuser support. The
+public Deno preview remains a historical non-authority page.

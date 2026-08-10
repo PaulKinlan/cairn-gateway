@@ -20,20 +20,23 @@ sharing credentials.
 
 ## Decision
 
-Cairn becomes a privately hosted, single-owner control plane now, while storing all authority and
-custody metadata in tenant-partitioned contracts from day one. The canonical milestones are R0
+Cairn's immediate product target is a privately hosted, single-owner control plane, while storing
+all authority and custody metadata in tenant-partitioned contracts from day one. The current
+implementation is still the historical fixture/regression harness. The canonical milestones are R0
 reset, R1 real GitHub vertical slice with hosted owner UI and two-client handoff, R2 X, R3 one
 API-key LLM, R4 fleet rollout, and R5 multiuser readiness/beta.
 
-Kimi is provisional only because the credential inventory confirms a configured Kimi Code key.
-Activation requires confirmation that its terms and API permit privately hosted agent proxy use. If
-not, Paul must separately configure a standard Kimi Platform key or another selected provider key.
-No other LLM credential is assumed.
+DeepSeek is the initial API-key LLM because the credential inventory confirms a verified standard
+DeepSeek Platform API key. R3 adds only `deepseek.chat.complete@v1`; the exact endpoint and model
+are owner-selected and pinned after current-documentation verification. Kimi is a possible later
+connector, not initial scope.
 
-Nango is the first custody/proxy candidate, subject to a focused proof of exact GitHub, X, and
-API-key support; tenant namespacing/tags; callback ownership; deletion/revocation; fixed-operation
-proxying; and denial of all agent token-read/admin access. Failure selects dedicated KMS-backed
-custody, not a weaker credential surface.
+Nango is the first custody/proxy candidate. R0/R1 performs a credential-free, two-working-day static
+capability/security review that produces a sandbox plan but makes no behavioral claim. Only after
+explicit approval, a bounded sandbox with dedicated test credentials proves callback binding,
+deletion/revocation, proxy restrictions, audit behavior, tenant tags, and denial of agent token-read
+or admin access. Missing evidence moves design to dedicated KMS-backed custody without blocking
+unrelated R1 implementation or weakening the credential boundary.
 
 Owner authentication for R1 is a pending choice between an allowlisted immutable GitHub numeric
 identity and an external access layer. Login OAuth and provider-connection OAuth remain distinct,
@@ -47,7 +50,10 @@ permits, revocation, ambiguity handling, and the fixture regression suite.
 
 - Fixed typed operations and the four-tool MCP front door; never a generic proxy.
 - P-256 proof of possession, revocation, replay protection, and one-use dispatch permits.
-- Provider credentials only in dedicated custody; client private keys only on the client.
+- Provider credentials only in dedicated custody. API-key intake uses a short-lived custodian-hosted
+  top-level session: the value exists transiently only in Paul's browser and custodian ingestion
+  memory, never in Cairn HTML/DOM/process/storage/logs or redisplay. Client private keys remain only
+  on the client.
 - Secret-free receipts, including no LLM prompt or output.
 - Historical fixtures, acceptance documents, and tests as regression assets, not current product
   acceptance.
@@ -58,8 +64,10 @@ permits, revocation, ambiguity handling, and the fixture regression suite.
 
 R1, not a public fixture deployment, is the next product proof. Passkeys/recovery, separate workload
 identities, catalogue expansion, writes, generic proxying, billing, and public SaaS are deferred. R5
-adds invitations, memberships, recovery/second factor, tenant switching, isolation review, and
-quotas without re-keying authority or moving credentials because tenancy exists from R1.
+adds tenant-scoped owner/admin/member roles, invitations, recovery/second factor, tenant switching,
+isolation review, and quotas without re-keying authority or moving credentials because tenancy
+exists from R1. Membership removal revokes its client grants without deleting tenant-owned
+connections; tenant context is never caller-selected.
 
 No credential access, provider call, provisioning, deployment, or runtime change is authorized by
 this ADR.

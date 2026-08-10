@@ -55,5 +55,13 @@ Tenant/User/Membership/ClientPrincipal/Grant without weakening the proof or repl
     of a locally generated P-256 public-key fingerprint creates client authority.
 22. Configured and healthy are separate connection facts. Local denial is immediate on disconnect;
     upstream revoke/deletion certainty is reported separately and stale authority cannot reactivate.
-23. API-key intake never redisplays a secret. LLM prompt/output, provider bodies, credentials, and
-    client private keys are absent from HTML, clipboard data, commands, config, logs, and receipts.
+23. API-key intake uses a short-lived, purpose-bound, top-level custodian session with a masked,
+    empty-on-render field posting directly over HTTPS. The value exists transiently only in Paul's
+    browser and custodian ingestion memory, is cleared from the DOM after submission, and never
+    enters Cairn HTML/DOM/process/storage/logs, framework state, URL/history, analytics, clipboard,
+    commands, config, receipts, or redisplay. If custody cannot provide this, R3 remains blocked.
+24. R5 roles are tenant-scoped: owner controls ownership/membership/security, admin manages
+    connections/clients/grants without ownership powers, and member uses only explicitly assigned
+    authority. Membership removal denies all of its client grants without deleting tenant-owned
+    connections; tenant switching requires an authenticated membership and never trusts a caller
+    tenant value.

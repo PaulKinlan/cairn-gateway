@@ -1,4 +1,7 @@
-# M1 browser validation
+# Historical M1 browser validation
+
+> **Non-current evidence.** This validates the superseded local M1 fixture only. It does not accept
+> any current R0–R5 milestone; use [`PLAN.md`](../../PLAN.md) for current scope.
 
 - **Source commit:** `0e5a584bda425ce37271354be664de1826f9faca`
 - **Date:** 2026-08-02
@@ -54,6 +57,6 @@ successfully.
 
 ## Verdict
 
-M1 is browser-usable and responsive. It intentionally uses display labels mapped to the fixed closed
-fixture authority; genuine cryptographic agent/device enrollment and workload binding are M3 work
-and are not claimed here.
+The historical M1 fixture was browser-usable and responsive. It intentionally used display labels
+mapped to fixed closed fixture authority. Under the current plan, real P-256 client handoff is R1
+and separate workload identity is deferred; neither is claimed by this evidence.

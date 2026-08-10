@@ -3,12 +3,13 @@
 `PLAN.md` is the canonical product and delivery plan. If another document conflicts with this one,
 this file wins and the conflict must be corrected with the next related change.
 
-## Product now
+## Immediate product target
 
-Cairn is Paul's privately hosted, single-owner control plane for all of his agent sessions. Paul
-connects each provider once; separately enrolled clients receive narrow grants to fixed operations
-through MCP without receiving provider credentials. One provider connection may serve grants for
-many clients.
+Cairn's immediate product target is Paul's privately hosted, single-owner control plane for all of
+his agent sessions. Paul connects each provider once; separately enrolled clients receive narrow
+grants to fixed operations through MCP without receiving provider credentials. One provider
+connection may serve grants for many clients. The current implementation remains the historical
+fixture/regression harness described in `README.md`.
 
 The first provider set is:
 
@@ -16,11 +17,11 @@ The first provider set is:
 2. X through OAuth; and
 3. one API-key LLM provider.
 
-Kimi is the provisional LLM because the credential inventory confirms only Kimi is configured. R3
-activation is blocked until the provider confirms that the existing **Kimi Code** key may be used by
-a privately hosted agent proxy. If it may not, Paul must separately configure a standard Kimi
-Platform key or another selected LLM key. Cairn must not infer that Anthropic, Gemini, or any other
-LLM provider is configured.
+DeepSeek is the initial API-key LLM because the credential inventory confirms a verified standard
+DeepSeek Platform API key. R3 pins the exact endpoint and model in deployed owner-controlled
+configuration only after verification against current DeepSeek documentation. Kimi may be evaluated
+as a later connector; the configured Kimi Code key is not initial scope. Cairn makes no claim that
+only one LLM credential is configured.
 
 ## Permanent boundaries
 
@@ -30,9 +31,11 @@ LLM provider is configured.
   method, header, base URL, model, or raw provider response surface.
 - Preserve the accepted P-256 proof-of-possession, revocation, atomic replay, one-use permit, and
   ambiguous-dispatch core. Authority is rechecked at use time.
-- Provider credentials are visible only to the selected custodian. They never appear in HTML,
-  clipboard data, command arguments, client config, logs, receipts, analytics, support output, or
-  the journal. Client private keys remain local and are never uploaded.
+- Provider credentials are visible only to the selected custodian, except that an API key typed by
+  Paul necessarily exists transiently in his browser on the custodian's top-level intake origin.
+  Credentials never enter Cairn HTML/DOM, application processes, storage, logs, URLs/history,
+  analytics, clipboard data, command arguments, client config, receipts, support output, or the
+  journal. Client private keys remain local and are never uploaded.
 - Receipts contain allowlisted metadata only. LLM prompts and outputs and provider request/response
   bodies are never receipt fields.
 - The 90 Stage 0 tests, 24 Stage 1 scenarios, local fixture journey, acceptance records, and fixture
@@ -67,26 +70,34 @@ flows. This model must let R5 add users without re-keying records or moving prov
 
 ## Fixed initial operations
 
-| Operation                | Provider call                                                                           | Closed behavior                                                                                                                                                                                            |
-| ------------------------ | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `github.user.read@v1`    | `GET https://api.github.com/user`                                                       | Empty input; return only reviewed user fields. No repository or write access.                                                                                                                              |
-| `x.user.me.read@v1`      | `GET https://api.x.com/2/users/me` (verify the current canonical host and scopes in R2) | Empty input; current least-privilege scopes must be verified before activation. No writes, DMs, search, timeline, or arbitrary fields.                                                                     |
-| `kimi.message.create@v1` | Exact Kimi endpoint and model selected by the owner and fixed in deployed configuration | Bounded message schema, message count/size, output tokens, timeout, and cost. No caller-selected model/base URL/headers/tools/files and no arbitrary provider options. Prompt/output absent from receipts. |
+| Operation                   | Provider call                                                                                                                          | Closed behavior                                                                                                                                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `github.user.read@v1`       | `GET https://api.github.com/user`                                                                                                      | Empty input; return only reviewed user fields. No repository or write access.                                                                                                                              |
+| `x.user.me.read@v1`         | `GET https://api.x.com/2/users/me` (verify the current canonical host and scopes in R2)                                                | Empty input; current least-privilege scopes must be verified before activation. No writes, DMs, search, timeline, or arbitrary fields.                                                                     |
+| `deepseek.chat.complete@v1` | Exact DeepSeek endpoint and model selected by the owner, verified against current documentation, then pinned in deployed configuration | Bounded message schema, message count/size, output tokens, timeout, and cost. No caller-selected model/base URL/headers/tools/files and no arbitrary provider options. Prompt/output absent from receipts. |
 
 A new operation requires its own fixed route, closed input/output schemas, projection, scope, cost,
 failure mapping, revocation behavior, and security review.
 
 ## Custody
 
-Nango is the first candidate for GitHub, X, and API-key connection custody and proxying. R1 starts
-with a focused, credential-free vendor-capability spike. It must prove exact support for each
-connection type, tenant tags/namespacing, callback ownership, deletion and provider revocation
-semantics, fixed-operation proxy restrictions, audit behavior, and that agent-facing credentials
-cannot read tokens or access Nango administration. Marketing claims or an interface are not proof.
+Nango is the first candidate for GitHub, X, and API-key connection custody and proxying. Evaluation
+has two explicit phases:
 
-If Nango fails any required property, use dedicated KMS-backed custody with a narrowly privileged
-provider worker. Rejection never permits agent-visible credentials, operator token inspection, or a
-weaker generic proxy.
+1. **R0/R1 static review, credential-free and time-boxed to two working days.** Review current
+   documentation/contracts for connection types, tenant tags/namespacing, callback ownership,
+   deletion/revocation, fixed-operation proxy controls, audit behavior, key-intake sessions, and
+   credentials that cannot read tokens or access Nango administration. This establishes plausibility
+   and a sandbox test plan; it does not claim behavioral proof.
+2. **R1 bounded sandbox, only after explicit approval.** Dedicated test credentials and a disposable
+   test connection prove callback binding, deletion/revocation, proxy restriction, audit behavior,
+   tenant tags, and token-read/admin isolation. Record sanitized outcomes, then revoke/delete the
+   test assets.
+
+Static research must not block tenant model, UI, handoff, or durable-authority implementation beyond
+the time-box. If evidence is missing or Nango fails a required property, proceed with the dedicated
+KMS-backed custody design and keep live activation blocked. Rejection never permits agent-visible
+credentials, operator token inspection, or a weaker generic proxy.
 
 ## Owner authentication
 
@@ -119,11 +130,16 @@ unsupported, or failed. Delete removes custody according to verified vendor sema
 authority so stale grants cannot revive it. Reconnect creates fresh connection authority rather than
 relabeling dead authority active.
 
-API-key intake is a purpose-built, authenticated, same-origin, CSRF-protected, rate-limited form
-posted directly to custody or a single-use custody intake endpoint. The browser never receives the
-stored value again. Cairn shows provider, label, creation/rotation time, last health check, and last
-four fingerprint characters only when the custodian can derive them safely. There is no reveal,
-copy, download, debug, receipt, or log path for the value.
+For API-key intake, Connections asks the selected custodian to create a short-lived, purpose-bound
+intake session, then navigates Paul to a top-level page on the custodian origin. That page renders a
+masked input empty, posts directly to the custodian over HTTPS, clears/replaces the secret-bearing
+DOM after submission, and returns only an opaque connection reference/status to Cairn. The value
+necessarily exists transiently only in Paul's browser while typed/submitted and in custodian
+in-memory ingestion; it never enters Cairn HTML/DOM, application process/storage/logs, client
+framework state, URL/history, analytics, clipboard, receipts, or redisplay. Cairn may show provider,
+label, creation/rotation time, last health check, and a safely custodian-derived suffix. If the
+selected custodian cannot provide this exact flow, R3 remains blocked until a dedicated custody
+service provides the equivalent; a normal Cairn-hosted secret form is forbidden.
 
 ## Client handoff
 
@@ -180,12 +196,13 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
   Nango support before activation.
 - Add only `x.user.me.read@v1` and repeat the two-client isolation/revocation journey.
 
-### R3 — Kimi / API-key LLM
+### R3 — DeepSeek / API-key LLM
 
-- Resolve whether the configured Kimi Code key permits hosted proxy use; otherwise require a
-  separately configured standard Kimi Platform or selected alternative key.
-- Add secure API-key intake and only `kimi.message.create@v1` with enforced message/token/cost
-  bounds and receipt exclusion tests.
+- Use the verified standard DeepSeek Platform API key only through the approved custodian intake.
+  Verify current DeepSeek documentation, then have the owner select and pin the exact endpoint/model
+  in deployed configuration; callers cannot override either.
+- Add only `deepseek.chat.complete@v1` with enforced message/token/cost bounds and prompt/output
+  receipt-exclusion tests. Kimi remains a later candidate, not initial scope.
 
 ### R4 — fleet rollout
 
@@ -195,10 +212,25 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
 
 ### R5 — multiuser readiness and beta
 
-- Add invitations, membership roles, tenant creation/switching, recovery plus second factor,
-  isolation review, and per-tenant quotas.
-- Prove cross-tenant UI/API/custody/receipt/backup isolation. Existing records and custody bindings
-  stay in place because tenancy was present from R1.
+Roles are tenant-scoped and explicit:
+
+- **owner:** controls ownership, invitations/membership roles, tenant deletion, recovery policy,
+  connections, clients, grants, quotas, and all tenant activity/security views;
+- **admin:** manages connections, clients, grants, and tenant activity but cannot transfer
+  ownership, manage owners, delete the tenant, or change owner recovery/security policy; and
+- **member:** cannot invite, change roles, manage connections, or create authority; may view/use
+  only clients and grants explicitly assigned to that membership and manage only their own sessions.
+
+Add invitations, tenant creation/switching, recovery plus second factor, isolation review, and
+per-tenant quotas. Tenant selection comes only from the authenticated session plus an active
+membership; a caller-supplied tenant never authorizes or switches context.
+
+- **Accept:** create a second tenant with independent provider credentials; owner invites a user →
+  user accepts into a stated role → owner/admin assigns a role-permitted client and grant → user
+  switches between memberships and sees only each selected tenant's allowed clients/activity →
+  cross-tenant UI/API/custody/receipt/backup probes deny → owner removes the member → every client
+  grant assigned through that membership denies at use time while tenant-owned connections and other
+  members' grants persist. Existing R1 records/custody bindings require no re-key or move.
 
 ## Deferred
 
@@ -209,8 +241,9 @@ prerequisites for R1–R4. They require a later same-commit plan decision and se
 
 ## Immediate R1 decision checklist
 
-1. Spike Nango without credentials: GitHub/X/API-key support, tenant tags, callbacks, deletion,
-   revoke, proxy restriction, token-read/admin isolation, pricing, and self-host/private topology.
+1. Complete the two-day credential-free Nango static review and sandbox plan. Run the bounded
+   dedicated-test-credential sandbox only after explicit approval; otherwise continue the KMS-backed
+   design without blocking unrelated R1 implementation.
 2. Compare immutable GitHub numeric allowlist authentication with an external access layer and
    record the selection in an ADR.
 3. Design tenant-partitioned durable records and rerun all durability scenarios, keeping DUR-24
