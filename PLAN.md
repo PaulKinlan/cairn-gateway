@@ -266,7 +266,9 @@ prerequisites for R1–R4. They require a later same-commit plan decision and se
    record the selection in an ADR.
 3. Design tenant-partitioned durable records and rerun all durability scenarios, keeping DUR-24
    visibly unresolved until it passes for the correct reason.
-4. Specify the hosted URL/callback topology and the two-client helper acceptance run without
-   provisioning it.
+4. **Recorded 2026-08-12:** the hosted URL/callback topology and the exact two-client local-helper
+   acceptance run are specified in [ADR 0008](docs/adr/0008-hosted-url-callback-topology.md) without
+   provisioning. Nothing is provisioned, deployed, or authorized by that specification; items 1–3
+   and every activation gate remain open.
 
 No R1 activation occurs until those decisions are recorded and independently reviewed.
