@@ -28,3 +28,18 @@ Residual centralization, software key copyability, owner recovery before R5, pro
 semantics, DeepSeek endpoint/model current-documentation verification, Nango static and approved
 sandbox findings, X scopes, and the replacement durable-store topology block the relevant activation
 gate.
+
+## L1 local DeepSeek custody (2026-08-12)
+
+The DeepSeek key is accepted only by the distinct top-level custodian origin and stored only through
+Secret Service. Gateway/MCP authority can request the one typed operation using a random
+process-lifetime dispatch credential, but cannot select URL, model, headers, tools, files, or raw
+provider options and cannot read a credential. Provider errors and raw bodies are projected away;
+receipts omit prompts and answers. Intake uses a masked input, bounded form, session, CSRF,
+same-origin POST, no-store policy, and bodyless redirect. Custody enforces timeout, response
+ceiling, concurrency, and daily request/token counters.
+
+This reduces accidental/normal-surface disclosure, SSRF, generic proxy, log/receipt disclosure,
+model override, unbounded cost, and stale-authority risks. Root, a hostile same-user process,
+browser compromise, keyring compromise, and custodian memory inspection remain outside the local
+isolation claim. Hosted promotion remains gated by R1/R3.

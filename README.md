@@ -109,3 +109,12 @@ supported storage path.
   keys never enter HTML, clipboard data, command arguments, config, logs, receipts, or the journal.
 - The credential-free R1 authority/UI foundation is implemented on `main`; real credentials,
   provider calls, provisioning, deployment, and production mutation remain unactivated.
+
+## Active local-first DeepSeek slice
+
+Run `deno task local:run`, open <http://127.0.0.1:8787/>, and follow
+[`docs/local-setup.md`](docs/local-setup.md). A separate custodian origin accepts the masked key and
+stores it with Secret Service; the gateway and Antigravity retain no provider credential. The only
+provider operation is `deepseek.chat.complete@v1` through the existing four MCP tools. This is a
+local same-user protection boundary, not hostile-process isolation. The historical GitHub fixture is
+still available as `deno task local:fixture`.

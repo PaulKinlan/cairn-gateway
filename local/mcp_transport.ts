@@ -1,6 +1,13 @@
 import { MCP_CURRENT, MCP_LEGACY, TOOLS } from "../apps/gateway/mcp.ts";
 import { BodyTooLargeError, readBoundedBody } from "./bounded_body.ts";
 
+export interface ToolDescriptor {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+}
+
 interface FixtureDispatcher {
   dispatch(
     receivedBody: Uint8Array,
@@ -97,9 +104,18 @@ export class StreamableHttpFixtureTransport {
   readonly #harness: FixtureDispatcher;
   readonly #sessions = new Map<string, Session>();
   readonly #policy: SessionPolicy;
+  readonly #tools: readonly ToolDescriptor[];
+  readonly #mode: string;
 
-  constructor(harness: FixtureDispatcher, policy: Partial<SessionPolicy> = {}) {
+  constructor(
+    harness: FixtureDispatcher,
+    policy: Partial<SessionPolicy> = {},
+    tools: readonly ToolDescriptor[] = TOOLS,
+    mode = "fixture",
+  ) {
     this.#harness = harness;
+    this.#tools = tools;
+    this.#mode = mode;
     this.#policy = {
       now: policy.now ?? Date.now.bind(Date),
       initializationTimeoutMs: policy.initializationTimeoutMs ??
@@ -192,7 +208,7 @@ export class StreamableHttpFixtureTransport {
     // onboarding. Otherwise MCP clients report a broken connection at tools/list instead of showing
     // the tools and allowing the owner to complete setup in the browser.
     if (value.method === "tools/list") {
-      return jsonRpc({ jsonrpc: "2.0", id: value.id, result: { tools: TOOLS } });
+      return jsonRpc({ jsonrpc: "2.0", id: value.id, result: { tools: this.#tools } });
     }
 
     const adapted = {
@@ -230,7 +246,7 @@ export class StreamableHttpFixtureTransport {
         rpcError(
           value.id,
           -32003,
-          `fixture authority unavailable; complete or repair setup at ${
+          `${this.#mode} authority unavailable; complete or repair setup at ${
             new URL(request.url).origin
           }/`,
         ),
@@ -256,8 +272,9 @@ export class StreamableHttpFixtureTransport {
         result: {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: { tools: {} },
-          serverInfo: { name: "cairn-local-fixture", version: "0.1.0" },
-          instructions: "Use invoke_operation with github.user.read@v1 and connection_a.",
+          serverInfo: { name: `cairn-local-${this.#mode}`, version: "0.1.0" },
+          instructions:
+            `Use Cairn's four fixed MCP tools for the configured ${this.#mode} operation.`,
         },
       },
       200,

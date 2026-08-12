@@ -5,11 +5,13 @@ this file wins and the conflict must be corrected with the next related change.
 
 ## Immediate product target
 
-Cairn's immediate product target is Paul's privately hosted, single-owner control plane for all of
-his agent sessions. Paul connects each provider once; separately enrolled clients receive narrow
-grants to fixed operations through MCP without receiving provider credentials. One provider
-connection may serve grants for many clients. The current implementation remains the historical
-fixture/regression harness described in `README.md`.
+Cairn's immediate product target is an L1 local-first, single-owner DeepSeek custody slice for
+Paul's Antigravity client. R1 is the next hosted milestone and R3 is hosted DeepSeek promotion. The
+longer target remains Paul's privately hosted, single-owner control plane for all of his agent
+sessions. Paul connects each provider once; separately enrolled clients receive narrow grants to
+fixed operations through MCP without receiving provider credentials. One provider connection may
+serve grants for many clients. The current implementation remains the historical fixture/regression
+harness described in `README.md`.
 
 The first provider set is:
 
@@ -18,10 +20,11 @@ The first provider set is:
 3. one API-key LLM provider.
 
 DeepSeek is the initial API-key LLM because the credential inventory confirms a verified standard
-DeepSeek Platform API key. R3 pins the exact endpoint and model in deployed owner-controlled
-configuration only after verification against current DeepSeek documentation. Kimi may be evaluated
-as a later connector; the configured Kimi Code key is not initial scope. Cairn makes no claim that
-only one LLM credential is configured.
+DeepSeek Platform API key. L1 pins `https://api.deepseek.com/chat/completions` and
+`deepseek-v4-flash`, nonstreaming with thinking disabled, verified against current official DeepSeek
+documentation on 2026-08-12. R3 promotes this connector into hosted custody after the hosted
+security gates pass. Kimi may be evaluated as a later connector; the configured Kimi Code key is not
+initial scope. Cairn makes no claim that only one LLM credential is configured.
 
 ## Permanent boundaries
 
@@ -72,11 +75,11 @@ flows. This model must let R5 add users without re-keying records or moving prov
 
 ## Fixed initial operations
 
-| Operation                   | Provider call                                                                                                                          | Closed behavior                                                                                                                                                                                            |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `github.user.read@v1`       | `GET https://api.github.com/user`                                                                                                      | Empty input; return only reviewed user fields. No repository or write access.                                                                                                                              |
-| `x.user.me.read@v1`         | `GET https://api.x.com/2/users/me` (verify the current canonical host and scopes in R2)                                                | Empty input; current least-privilege scopes must be verified before activation. No writes, DMs, search, timeline, or arbitrary fields.                                                                     |
-| `deepseek.chat.complete@v1` | Exact DeepSeek endpoint and model selected by the owner, verified against current documentation, then pinned in deployed configuration | Bounded message schema, message count/size, output tokens, timeout, and cost. No caller-selected model/base URL/headers/tools/files and no arbitrary provider options. Prompt/output absent from receipts. |
+| Operation                   | Provider call                                                                                                | Closed behavior                                                                                                                                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `github.user.read@v1`       | `GET https://api.github.com/user`                                                                            | Empty input; return only reviewed user fields. No repository or write access.                                                                                                                              |
+| `x.user.me.read@v1`         | `GET https://api.x.com/2/users/me` (verify the current canonical host and scopes in R2)                      | Empty input; current least-privilege scopes must be verified before activation. No writes, DMs, search, timeline, or arbitrary fields.                                                                     |
+| `deepseek.chat.complete@v1` | `POST https://api.deepseek.com/chat/completions`, model `deepseek-v4-flash`, nonstreaming, thinking disabled | Bounded message schema, message count/size, output tokens, timeout, and cost. No caller-selected model/base URL/headers/tools/files and no arbitrary provider options. Prompt/output absent from receipts. |
 
 A new operation requires its own fixed route, closed input/output schemas, projection, scope, cost,
 failure mapping, revocation behavior, and security review.
@@ -175,6 +178,23 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
 
 ## Delivery milestones
 
+### L1 — local-first DeepSeek custody (current; implemented locally)
+
+- Separate loopback gateway and custodian origins; only the custodian renders the masked key form
+  and uses installed Secret Service through `/usr/bin/secret-tool` stdin.
+- Gateway holds an opaque connection identity plus process-lifetime random fixed-dispatch
+  credential. Exactly four MCP tools expose only `deepseek.chat.complete@v1`.
+- Fixed provider request and closed input/output schemas enforce message, byte, output-token,
+  timeout, response, concurrency, request/day, and token/day limits. Receipts exclude content.
+- Non-secret connection/grant/receipt metadata persists locally; the credential persists only in
+  Secret Service. Restart rechecks custody and requires no key re-entry when Secret Service is
+  available.
+- **Accept:** fake-provider/custodian end-to-end tests prove separate intake/redirect, exact
+  request, sentinel exclusion, bounds, lifecycle/restart, and the Antigravity four-tool journey;
+  deterministic credential-free smoke and full regression gates pass.
+- **Boundary:** protects extraction through normal Cairn surfaces, not root or hostile same-user
+  processes. See ADR 0009. No hosted activation is claimed.
+
 ### R0 — reset and model (accepted at `b927ca7`)
 
 - Canonical plan, pivot ADR, README, UI IA, historical labels, tenancy model, and decision gates
@@ -183,7 +203,7 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
 - **Accept:** documentation checks and full existing gate pass; independent review finds no
   contradiction or widened scope.
 
-### R1 — real GitHub vertical slice (current; executable foundation only)
+### R1 — real GitHub hosted vertical slice (next; executable foundation only)
 
 - Decide owner authentication and custody after focused spikes.
 - Implement tenant-partitioned authority, hosted owner UI, GitHub connect/disconnect/reconnect,
@@ -214,11 +234,10 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
   Nango support before activation.
 - Add only `x.user.me.read@v1` and repeat the two-client isolation/revocation journey.
 
-### R3 — DeepSeek / API-key LLM
+### R3 — hosted DeepSeek promotion
 
-- Use the verified standard DeepSeek Platform API key only through the approved custodian intake.
-  Verify current DeepSeek documentation, then have the owner select and pin the exact endpoint/model
-  in deployed configuration; callers cannot override either.
+- Promote the L1 fixed DeepSeek adapter to approved hosted custody. Reverify current documentation
+  at activation; callers cannot override endpoint or model.
 - Add only `deepseek.chat.complete@v1` with enforced message/token/cost bounds and prompt/output
   receipt-exclusion tests. Kimi remains a later candidate, not initial scope.
 
@@ -257,7 +276,7 @@ DMs/search, generic proxying, billing, public SaaS, enterprise federation, arbit
 owner-configurable base URLs/models/headers, and public fake-provider deployment are not
 prerequisites for R1–R4. They require a later same-commit plan decision and security review.
 
-## Immediate R1 decision checklist
+## Immediate L1/R1 decision checklist
 
 1. Complete the two-day credential-free Nango static review and sandbox plan. Run the bounded
    dedicated-test-credential sandbox only after explicit approval; otherwise continue the KMS-backed
