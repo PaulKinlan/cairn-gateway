@@ -251,34 +251,54 @@ export async function createDeepSeekController(
   }
   let health: boolean | null = null;
   let generation = 0;
-  let lifecycle = Promise.resolve();
+  let refreshSequence = 0;
+  let deletionInProgress = false;
+  let serializedTail = Promise.resolve();
+  const serialized = async <T>(operation: () => T | Promise<T>): Promise<T> => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => release = resolve);
+    const previous = serializedTail;
+    serializedTail = previous.then(() => gate, () => gate);
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
   const commit = async (next: LocalMetadata) => {
     await metadata.save(next);
     state = next;
   };
-  const refresh = async () => {
-    const status = await custodian.status();
-    const next = { ...structuredClone(state), configured: status.configured };
-    if (!status.configured) next.connected = false;
-    await commit(next);
-    health = status.healthy;
-  };
-  try {
-    await refresh();
-  } catch {
-    const denied = { ...structuredClone(state), configured: false, connected: false };
+  const beginRefresh = () => serialized(() => ({ generation, sequence: ++refreshSequence }));
+  const applyRefresh = async (
+    snapshot: { generation: number; sequence: number },
+    status?: { configured: boolean; healthy: boolean | null },
+  ): Promise<boolean> =>
+    await serialized(async () => {
+      if (snapshot.generation !== generation || snapshot.sequence !== refreshSequence) return false;
+      const configured = status?.configured ?? false;
+      // A status refresh owns only configured/health. Lifecycle state and grant version belong
+      // exclusively to connect/disconnect/delete and are preserved even on a negative refresh.
+      const next = { ...structuredClone(state), configured };
+      if (next.configured !== state.configured) {
+        await commit(next);
+        generation++;
+      }
+      health = status?.healthy ?? null;
+      return true;
+    });
+  const refresh = async (): Promise<boolean> => {
+    const snapshot = await beginRefresh();
     try {
-      await commit(denied);
+      return await applyRefresh(snapshot, await custodian.status());
     } catch {
-      throw new Error("metadata unavailable");
+      await applyRefresh(snapshot);
+      return false;
     }
-    health = null;
-  }
-  const mutate = async (operation: () => Promise<void>) => {
-    const pending = lifecycle.then(operation, operation);
-    lifecycle = pending.catch(() => {});
-    return await pending;
   };
+  await refresh();
+
   const addReceipt = async (
     decision: DeepSeekReceipt["decision"],
     reason: DeepSeekReceipt["reason"],
@@ -305,20 +325,23 @@ export async function createDeepSeekController(
       structuredContent,
     },
   });
+  const authorityAvailable = () => state.configured && state.connected;
+  const persistedAuthorityMatches = async (expectedGeneration: number) => {
+    if (generation !== expectedGeneration || !authorityAvailable()) return false;
+    let persisted: LocalMetadata | undefined;
+    try {
+      persisted = await metadata.load();
+    } catch {
+      return false;
+    }
+    return !!persisted && persisted.configured && persisted.connected &&
+      persisted.grantVersion === state.grantVersion;
+  };
+
   return Object.freeze({
     async view(): Promise<DeepSeekView> {
-      try {
-        await refresh();
-      } catch {
-        const denied = { ...structuredClone(state), configured: false, connected: false };
-        try {
-          await commit(denied);
-        } catch {
-          state = denied;
-        }
-        health = null;
-      }
-      return {
+      await refresh();
+      return await serialized(() => ({
         configured: state.configured,
         connected: state.connected,
         healthy: health,
@@ -328,22 +351,50 @@ export async function createDeepSeekController(
           version: state.grantVersion,
         },
         receipts: structuredClone(state.receipts),
-      };
+      }));
     },
-    connect: () =>
-      mutate(async () => {
-        await refresh();
-        if (!state.configured) throw new Error("not configured");
+    connect: async () => {
+      const snapshot = await serialized(() => {
+        if (deletionInProgress) throw new Error("deletion in progress");
+        return { generation, sequence: ++refreshSequence };
+      });
+      let status: { configured: boolean; healthy: boolean | null };
+      try {
+        status = await custodian.status();
+      } catch {
+        await applyRefresh(snapshot);
+        throw new Error("not configured");
+      }
+      await serialized(async () => {
+        if (
+          deletionInProgress || snapshot.generation !== generation ||
+          snapshot.sequence !== refreshSequence
+        ) {
+          throw new Error("authority changed");
+        }
+        if (!status.configured) {
+          const next = { ...structuredClone(state), configured: false };
+          if (next.configured !== state.configured) {
+            await commit(next);
+            generation++;
+          }
+          health = status.healthy;
+          throw new Error("not configured");
+        }
         const next = {
           ...structuredClone(state),
+          configured: true,
           connected: true,
           grantVersion: state.grantVersion + 1,
         };
         await commit(next);
+        health = status.healthy;
         generation++;
-      }),
+      });
+    },
     disconnect: () =>
-      mutate(async () => {
+      serialized(async () => {
+        refreshSequence++;
         const next = {
           ...structuredClone(state),
           connected: false,
@@ -352,26 +403,52 @@ export async function createDeepSeekController(
         await commit(next);
         generation++;
       }),
-    delete: () =>
-      mutate(async () => {
+    delete: async () => {
+      await serialized(async () => {
+        if (deletionInProgress) throw new Error("deletion in progress");
+        deletionInProgress = true;
+        refreshSequence++;
         const disabled = {
           ...structuredClone(state),
           connected: false,
           grantVersion: state.grantVersion + 1,
         };
-        await commit(disabled);
-        generation++;
+        try {
+          await commit(disabled);
+          generation++;
+        } catch (error) {
+          deletionInProgress = false;
+          throw error;
+        }
+      });
+      // Do not hold the authority lock across Secret Service deletion. Disconnect remains
+      // immediately effective, while connect is denied until deletion has a definitive outcome.
+      try {
         await custodian.delete();
-        const deleted = { ...structuredClone(state), configured: false, receipts: [] };
+      } catch (error) {
+        await serialized(() => deletionInProgress = false);
+        throw error;
+      }
+      await serialized(async () => {
+        if (!deletionInProgress || state.connected) {
+          throw new Error("authority changed during deletion");
+        }
+        const deleted = {
+          ...structuredClone(state),
+          configured: false,
+          connected: false,
+          receipts: [],
+        };
         try {
           await commit(deleted);
-        } catch {
-          state = deleted;
-          throw new Error("metadata unavailable after deletion");
+          generation++;
+          health = null;
+        } finally {
+          deletionInProgress = false;
         }
-      }),
+      });
+    },
     async dispatch(receivedBody: Uint8Array): Promise<Record<string, unknown>> {
-      await lifecycle;
       let rpc: unknown;
       try {
         rpc = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(receivedBody));
@@ -387,76 +464,92 @@ export async function createDeepSeekController(
       const name = rpc.params.name;
       const args = rpc.params.arguments;
       await refresh();
-      if (!state.configured || !state.connected) throw new Error("authority unavailable");
+
       if (name === "search_capabilities") {
         if (
           !exact(args, ["query"]) || typeof args.query !== "string" || args.query.length < 1 ||
           args.query.length > 200
         ) throw new Error("invalid input");
-        return result(id, {
-          operations: [{ id: DEEPSEEK_OPERATION, connection: DEEPSEEK_CONNECTION }],
-          count: 1,
+        return await serialized(() => {
+          if (!authorityAvailable()) throw new Error("authority unavailable");
+          return result(id, {
+            operations: [{ id: DEEPSEEK_OPERATION, connection: DEEPSEEK_CONNECTION }],
+            count: 1,
+          });
         });
       }
       if (name === "describe_operation") {
         if (!exact(args, ["operation"]) || args.operation !== DEEPSEEK_OPERATION) {
           throw new Error("invalid input");
         }
-        return result(id, {
-          id: DEEPSEEK_OPERATION,
-          provider: "deepseek",
-          inputSchema: { type: "object", required: ["messages"], additionalProperties: false },
-          outputSchema: {
-            type: "object",
-            required: ["outcome", "assistant_text", "finish_category", "usage", "receipt"],
-            additionalProperties: false,
-          },
-          requestUnits: 1,
+        return await serialized(() => {
+          if (!authorityAvailable()) throw new Error("authority unavailable");
+          return result(id, {
+            id: DEEPSEEK_OPERATION,
+            provider: "deepseek",
+            inputSchema: { type: "object", required: ["messages"], additionalProperties: false },
+            outputSchema: {
+              type: "object",
+              required: ["outcome", "assistant_text", "finish_category", "usage", "receipt"],
+              additionalProperties: false,
+            },
+            requestUnits: 1,
+          });
         });
       }
       if (name === "connection_status") {
         if (!exact(args, ["connection"]) || args.connection !== DEEPSEEK_CONNECTION) {
           throw new Error("invalid input");
         }
-        return result(id, {
-          connection: DEEPSEEK_CONNECTION,
-          status: "active",
-          configured: true,
-          healthy: health,
-          operation: DEEPSEEK_OPERATION,
+        return await serialized(() => {
+          if (!authorityAvailable()) throw new Error("authority unavailable");
+          return result(id, {
+            connection: DEEPSEEK_CONNECTION,
+            status: "active",
+            configured: true,
+            healthy: health,
+            operation: DEEPSEEK_OPERATION,
+          });
         });
       }
       if (
         name !== "invoke_operation" || !exact(args, ["operation", "connection", "arguments"]) ||
         args.operation !== DEEPSEEK_OPERATION || args.connection !== DEEPSEEK_CONNECTION
       ) throw new Error("invalid input");
-      const dispatchGeneration = generation;
+
+      const dispatchGeneration = await serialized(() => {
+        if (!authorityAvailable()) throw new Error("authority unavailable");
+        return generation;
+      });
+      // Provider I/O is deliberately outside the serialized authority section. A disconnect or
+      // delete can commit immediately; the generation and persisted authority are rechecked below.
       const output = await custodian.invoke(args.arguments);
-      await lifecycle;
-      if (dispatchGeneration !== generation || !state.connected || !state.configured) {
-        throw new Error("authority changed during dispatch");
-      }
-      if (output.outcome === "success") {
-        await addReceipt("allow", "policy_allow", 1, {
-          input: output.usage.input_tokens,
-          output: output.usage.output_tokens,
-        });
+      return await serialized(async () => {
+        if (!await persistedAuthorityMatches(dispatchGeneration)) {
+          throw new Error("authority changed during dispatch");
+        }
+        if (output.outcome === "success") {
+          await addReceipt("allow", "policy_allow", 1, {
+            input: output.usage.input_tokens,
+            output: output.usage.output_tokens,
+          });
+          return result(id, {
+            outcome: "success",
+            assistant_text: output.assistant_text,
+            finish_category: output.finish_category,
+            usage: {
+              input_tokens: output.usage.input_tokens,
+              output_tokens: output.usage.output_tokens,
+              total_tokens: output.usage.total_tokens,
+            },
+            receipt: { decision: "allow", reason: "policy_allow", requestUnits: 1 },
+          });
+        }
+        await addReceipt("error", "custodian_denied", 0);
         return result(id, {
-          outcome: "success",
-          assistant_text: output.assistant_text,
-          finish_category: output.finish_category,
-          usage: {
-            input_tokens: output.usage.input_tokens,
-            output_tokens: output.usage.output_tokens,
-            total_tokens: output.usage.total_tokens,
-          },
-          receipt: { decision: "allow", reason: "policy_allow", requestUnits: 1 },
+          outcome: output.outcome,
+          receipt: { decision: "error", reason: "custodian_denied", requestUnits: 0 },
         });
-      }
-      await addReceipt("error", "custodian_denied", 0);
-      return result(id, {
-        outcome: output.outcome,
-        receipt: { decision: "error", reason: "custodian_denied", requestUnits: 0 },
       });
     },
   });

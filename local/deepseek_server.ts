@@ -14,6 +14,16 @@ import {
 import { renderDeepSeekPage } from "./deepseek_ui.ts";
 import { readBoundedBody } from "./bounded_body.ts";
 
+const RECEIPT_ERROR_SCHEMA = {
+  type: "object",
+  properties: {
+    decision: { const: "error" },
+    reason: { const: "custodian_denied" },
+    requestUnits: { const: 0 },
+  },
+  required: ["decision", "reason", "requestUnits"],
+  additionalProperties: false,
+};
 const SUCCESS_OUTPUT_SCHEMA = {
   type: "object",
   properties: {
@@ -56,6 +66,21 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
     },
     outputSchema: {
       type: "object",
+      properties: {
+        operations: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { const: DEEPSEEK_OPERATION },
+              connection: { const: "deepseek_local" },
+            },
+            required: ["id", "connection"],
+            additionalProperties: false,
+          },
+        },
+        count: { type: "integer", minimum: 0 },
+      },
       required: ["operations", "count"],
       additionalProperties: false,
     },
@@ -71,6 +96,13 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
     },
     outputSchema: {
       type: "object",
+      properties: {
+        id: { const: DEEPSEEK_OPERATION },
+        provider: { const: "deepseek" },
+        inputSchema: { type: "object" },
+        outputSchema: { type: "object" },
+        requestUnits: { const: 1 },
+      },
       required: ["id", "provider", "inputSchema", "outputSchema", "requestUnits"],
       additionalProperties: false,
     },
@@ -106,7 +138,28 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
       required: ["operation", "connection", "arguments"],
       additionalProperties: false,
     },
-    outputSchema: SUCCESS_OUTPUT_SCHEMA,
+    outputSchema: {
+      oneOf: [
+        SUCCESS_OUTPUT_SCHEMA,
+        {
+          type: "object",
+          properties: {
+            outcome: {
+              enum: [
+                "invalid_input",
+                "rate_limited",
+                "auth_required",
+                "provider_unavailable",
+                "authority_changed",
+              ],
+            },
+            receipt: RECEIPT_ERROR_SCHEMA,
+          },
+          required: ["outcome", "receipt"],
+          additionalProperties: false,
+        },
+      ],
+    },
   },
   {
     name: "connection_status",
@@ -119,6 +172,13 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
     },
     outputSchema: {
       type: "object",
+      properties: {
+        connection: { const: "deepseek_local" },
+        status: { const: "active" },
+        configured: { const: true },
+        healthy: { type: ["boolean", "null"] },
+        operation: { const: DEEPSEEK_OPERATION },
+      },
       required: ["connection", "status", "configured", "healthy", "operation"],
       additionalProperties: false,
     },

@@ -20,11 +20,14 @@ sharing credentials.
 
 ## Decision
 
-Cairn's immediate product target is a privately hosted, single-owner control plane, while storing
-all authority and custody metadata in tenant-partitioned contracts from day one. The current
-implementation is still the historical fixture/regression harness. The canonical milestones are R0
-reset, R1 real GitHub vertical slice with hosted owner UI and two-client handoff, R2 X, R3 one
-API-key LLM, R4 fleet rollout, and R5 multiuser readiness/beta.
+Cairn's immediate product target is now L1, a local-first single-owner DeepSeek custody slice for
+Paul's Antigravity client; the longer target remains a privately hosted control plane with
+tenant-partitioned authority and custody metadata. The current served implementation is L1. Its
+Secret Service key and non-secret local connection/grant/receipt/quota metadata survive restart,
+while MCP sessions do not. The GitHub fixture, Stage 0/Stage 1 harnesses, and R1 in-memory
+foundation are historical or credential-free regression assets, not the current served product. L1
+provides no hosted durability or real-provider acceptance. R1 is the next hosted milestone, followed
+by R2 X, R3 hosted DeepSeek promotion, R4 fleet rollout, and R5 multiuser readiness/beta.
 
 DeepSeek is the initial API-key LLM because the credential inventory confirms a verified standard
 DeepSeek Platform API key. R3 adds only `deepseek.chat.complete@v1`; its endpoint and model are

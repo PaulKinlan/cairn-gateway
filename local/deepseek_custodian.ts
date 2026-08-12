@@ -16,7 +16,8 @@ export interface SecretStore {
   delete(): Promise<void>;
 }
 export interface CommandResult {
-  success: boolean;
+  category: "success" | "absent" | "failure";
+  code: number;
   stdout: Uint8Array;
 }
 export interface SecretCommandRunner {
@@ -29,7 +30,7 @@ class DenoSecretCommandRunner implements SecretCommandRunner {
       args,
       stdin: stdin ? "piped" : "null",
       stdout: "piped",
-      stderr: "null",
+      stderr: "piped",
     }).spawn();
     if (stdin) {
       const writer = child.stdin.getWriter();
@@ -37,7 +38,16 @@ class DenoSecretCommandRunner implements SecretCommandRunner {
       await writer.close();
     }
     const output = await child.output();
-    return { success: output.success, stdout: output.stdout };
+    // For lookup only, secret-tool's exact no-match result is exit 1 with no stdout or stderr.
+    // Locked/disconnected/tool failures emit diagnostics and remain a generic failure category;
+    // diagnostics are discarded rather than exposed or logged.
+    const absent = args[0] === "lookup" && output.code === 1 && output.stdout.length === 0 &&
+      output.stderr.length === 0;
+    return {
+      category: output.success ? "success" : absent ? "absent" : "failure",
+      code: output.code,
+      stdout: output.stdout,
+    };
   }
 }
 export class SecretToolStore implements SecretStore {
@@ -50,17 +60,21 @@ export class SecretToolStore implements SecretStore {
       ["store", "--label=Cairn DeepSeek API key", "cairn", "deepseek", "owner", "local"],
       encoder.encode(secret),
     );
-    if (!result.success) throw new Error("secret storage unavailable");
+    if (result.category !== "success") throw new Error("secret storage unavailable");
   }
   async get(): Promise<string | undefined> {
     const output = await this.runner.run(["lookup", "cairn", "deepseek", "owner", "local"]);
-    if (!output.success) return undefined;
-    const secret = new TextDecoder().decode(output.stdout).trimEnd();
-    return secret || undefined;
+    if (output.category === "success") {
+      const secret = new TextDecoder().decode(output.stdout).trimEnd();
+      if (!secret) throw new Error("secret lookup unavailable");
+      return secret;
+    }
+    if (output.category === "absent") return undefined;
+    throw new Error("secret lookup unavailable");
   }
   async delete(): Promise<void> {
     const cleared = await this.runner.run(["clear", "cairn", "deepseek", "owner", "local"]);
-    if (!cleared.success) throw new Error("secret deletion unavailable");
+    if (cleared.category !== "success") throw new Error("secret deletion unavailable");
     if (await this.get() !== undefined) throw new Error("secret deletion not confirmed");
   }
 }

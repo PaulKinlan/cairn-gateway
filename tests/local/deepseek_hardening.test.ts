@@ -1,4 +1,6 @@
 import { assert, equals, rejects } from "../assert.ts";
+import { validatesSchema } from "../../apps/gateway/json_schema.ts";
+import { atomicWriteJson, readJsonFile } from "../../local/atomic_json.ts";
 import {
   createCustodianApp,
   MemoryUsageStore,
@@ -11,6 +13,7 @@ import {
   FileMetadataStore,
   MemoryMetadataStore,
 } from "../../local/deepseek_controller.ts";
+import { DEEPSEEK_TOOLS } from "../../local/deepseek_server.ts";
 import { childSpecs, secretServiceTransportEnv } from "../../local/supervisor.ts";
 
 const credential = "dispatch_credential_123456789012345678901234";
@@ -46,16 +49,27 @@ function connectedMetadata() {
   return metadata;
 }
 
-Deno.test("SecretToolStore deletion checks clear status and verifies lookup absence", async () => {
-  let mode: "clear-fails" | "remains" | "gone" = "clear-fails";
+Deno.test("SecretToolStore deletion confirms only exact lookup absence", async () => {
+  let mode: "clear-fails" | "remains" | "gone" | "lookup-fails" = "clear-fails";
   const runner: SecretCommandRunner = {
     run: (args) => {
       if (args[0] === "clear") {
-        return Promise.resolve({ success: mode !== "clear-fails", stdout: new Uint8Array() });
+        return Promise.resolve({
+          category: mode === "clear-fails" ? "failure" : "success",
+          code: mode === "clear-fails" ? 2 : 0,
+          stdout: new Uint8Array(),
+        });
+      }
+      if (mode === "gone") {
+        return Promise.resolve({ category: "absent", code: 1, stdout: new Uint8Array() });
+      }
+      if (mode === "lookup-fails") {
+        return Promise.resolve({ category: "failure", code: 2, stdout: new Uint8Array() });
       }
       return Promise.resolve({
-        success: mode !== "gone",
-        stdout: mode === "gone" ? new Uint8Array() : new TextEncoder().encode("still-there"),
+        category: "success",
+        code: 0,
+        stdout: new TextEncoder().encode("still-there"),
       });
     },
   };
@@ -63,8 +77,26 @@ Deno.test("SecretToolStore deletion checks clear status and verifies lookup abse
   await rejects(() => store.delete(), "deletion unavailable");
   mode = "remains";
   await rejects(() => store.delete(), "not confirmed");
+  mode = "lookup-fails";
+  await rejects(() => store.delete(), "lookup unavailable");
   mode = "gone";
   await store.delete();
+});
+
+Deno.test("post-rename directory sync failure is consistently reported as committed", async () => {
+  const directory = await Deno.makeTempDir();
+  const path = `${directory}/authority.json`;
+  try {
+    await atomicWriteJson(path, { connected: false });
+    await atomicWriteJson(path, { connected: true }, {
+      syncDirectory: () => Promise.reject(new Error("injected directory sync failure")),
+    });
+    equals(await readJsonFile(path, 1024), { connected: true });
+    const mode = (await Deno.stat(path)).mode;
+    if (mode !== null) equals(mode & 0o777, 0o600);
+  } finally {
+    await Deno.remove(directory, { recursive: true });
+  }
 });
 
 Deno.test("metadata corruption and missing bootstrap fail closed; disconnect survives new instance", async () => {
@@ -229,6 +261,120 @@ Deno.test("failed controller persistence rolls back authority and receipts", asy
   await rejects(() => controller.dispatch(rpc()), "save failed");
   metadata.fail = false;
   equals(metadata.value?.receipts.length, 0);
+});
+
+Deno.test("delayed status refresh cannot restore authority after disconnect or dispatch provider", async () => {
+  class RacingMetadataStore extends MemoryMetadataStore {
+    racing = false;
+    disableStarted!: () => void;
+    readonly disabling = new Promise<void>((resolve) => this.disableStarted = resolve);
+    releaseDisable!: () => void;
+    readonly disabled = new Promise<void>((resolve) => this.releaseDisable = resolve);
+    releaseRestore!: () => void;
+    readonly restoreReleased = new Promise<void>((resolve) => this.releaseRestore = resolve);
+    override async save(value: Parameters<MemoryMetadataStore["save"]>[0]) {
+      if (this.racing && !value.connected) {
+        this.disableStarted();
+        await this.disabled;
+      } else if (this.racing && value.connected) {
+        // Under the rejected implementation, the delayed refresh snapshots connected=true while
+        // the disconnect write is pending and reaches this stale write. Releasing it after the
+        // disconnect deterministically reproduced BYPASS (restored authority and provider call).
+        await this.restoreReleased;
+      }
+      await super.save(value);
+    }
+  }
+  let releaseStatus!: () => void;
+  let statusCalls = 0;
+  let providerCalls = 0;
+  const statusBlocked = new Promise<void>((resolve) => releaseStatus = resolve);
+  const metadata = new RacingMetadataStore();
+  metadata.value = connectedMetadata().value;
+  const controller = await createDeepSeekController({
+    status: async () => {
+      statusCalls++;
+      if (statusCalls === 2) await statusBlocked;
+      return { configured: true, healthy: true };
+    },
+    invoke: () => {
+      providerCalls++;
+      return Promise.resolve(success);
+    },
+    delete: () => Promise.resolve(),
+  }, metadata);
+  metadata.racing = true;
+  const delayedView = controller.view();
+  await new Promise((done) => setTimeout(done, 0));
+  const disconnect = controller.disconnect();
+  await metadata.disabling;
+  releaseStatus();
+  await new Promise((done) => setTimeout(done, 0));
+  metadata.releaseDisable();
+  await disconnect;
+  metadata.releaseRestore();
+  equals((await delayedView).connected, false);
+  await rejects(() => controller.dispatch(rpc()), "authority unavailable");
+  equals(providerCalls, 0);
+  equals(metadata.value?.connected, false);
+  equals((await controller.view()).connected, false);
+});
+
+Deno.test("advertised DeepSeek output schemas validate actual success and error responses", async () => {
+  const outputSchema = (name: string): Record<string, unknown> => {
+    const found = DEEPSEEK_TOOLS.find((tool) => tool.name === name);
+    assert(found?.outputSchema);
+    return found.outputSchema;
+  };
+  const custodian: CustodianClient = {
+    status: () => Promise.resolve({ configured: true, healthy: null }),
+    invoke: () => Promise.resolve(success),
+    delete: () => Promise.resolve(),
+  };
+  const controller = await createDeepSeekController(custodian, connectedMetadata());
+  const call = async (id: number, name: string, args: Record<string, unknown>) => {
+    const output = await controller.dispatch(new TextEncoder().encode(JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method: "tools/call",
+      params: { name, arguments: args },
+    })));
+    return (output.result as Record<string, unknown>).structuredContent;
+  };
+  const responses = [
+    ["search_capabilities", await call(1, "search_capabilities", { query: "deepseek" })],
+    [
+      "describe_operation",
+      await call(2, "describe_operation", { operation: "deepseek.chat.complete@v1" }),
+    ],
+    ["connection_status", await call(3, "connection_status", { connection: "deepseek_local" })],
+    [
+      "invoke_operation",
+      await call(4, "invoke_operation", {
+        operation: "deepseek.chat.complete@v1",
+        connection: "deepseek_local",
+        arguments: { messages: [{ role: "user", content: "hi" }] },
+      }),
+    ],
+  ] as const;
+  for (const [name, response] of responses) {
+    assert(
+      validatesSchema(outputSchema(name), response),
+      `${name} schema rejected output`,
+    );
+  }
+
+  const errorController = await createDeepSeekController({
+    ...custodian,
+    invoke: () => Promise.resolve({ outcome: "rate_limited" }),
+  }, connectedMetadata());
+  const error = await errorController.dispatch(rpc(5));
+  assert(
+    validatesSchema(
+      outputSchema("invoke_operation"),
+      (error.result as Record<string, unknown>).structuredContent,
+    ),
+  );
 });
 
 Deno.test("gateway projects exact custodian output and lifecycle race cannot return success or receipt", async () => {

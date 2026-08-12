@@ -114,6 +114,64 @@ Deno.test("separate custodian intake redirects away and fixed provider request i
   });
 });
 
+Deno.test("delete lookup infrastructure failure never claims the key was deleted", async () => {
+  const store = new FakeStore();
+  store.value = sentinel;
+  store.delete = () => Promise.reject(new Error("lookup infrastructure unavailable"));
+  const custodian = await createCustodianApp({
+    dispatchCredential: credential,
+    gatewayOrigin: "http://127.0.0.1:8787",
+    store,
+  });
+  const metadata = new MemoryMetadataStore();
+  metadata.value = {
+    schemaVersion: 1,
+    configured: true,
+    connected: true,
+    grantVersion: 1,
+    receipts: [],
+  };
+  const app = await createDeepSeekApp({
+    custodianOrigin: "http://127.0.0.1:8788",
+    dispatchCredential: credential,
+    metadata,
+    custodian: {
+      status: () => Promise.resolve({ configured: true, healthy: null }),
+      invoke: () => Promise.resolve({ outcome: "provider_unavailable" }),
+      delete: async () => {
+        try {
+          const response = await custodian.fetch(
+            new Request("http://127.0.0.1:8788/internal/delete", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${credential}` },
+            }),
+          );
+          if (!response.ok) throw new Error("custodian deletion denied");
+        } catch {
+          throw new Error("custodian deletion denied");
+        }
+      },
+    },
+  });
+  const home = await app.fetch(new Request("http://127.0.0.1:8787/"));
+  const html = await home.text();
+  const deleted = await app.fetch(
+    new Request("http://127.0.0.1:8787/admin/delete", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1:8787",
+        Cookie: cookie(home),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ csrf_token: csrf(html) }),
+    }),
+  );
+  const failure = await deleted.text();
+  assert(!failure.includes("key deleted"));
+  assert(failure.includes("Action denied"));
+  equals(metadata.value?.connected, false);
+});
+
 Deno.test("locked Secret Service returns retry UI without exposing submitted value", async () => {
   const app = await createCustodianApp({
     dispatchCredential: credential,

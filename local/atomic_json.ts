@@ -1,6 +1,24 @@
 const encoder = new TextEncoder();
 
-export async function atomicWriteJson(path: string, value: unknown): Promise<void> {
+export interface AtomicWriteOptions {
+  /** Test seam for the best-effort durability barrier after the rename commits the new value. */
+  syncDirectory?: (directory: string) => Promise<void>;
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  const directoryFile = await Deno.open(directory, { read: true });
+  try {
+    await directoryFile.sync();
+  } finally {
+    directoryFile.close();
+  }
+}
+
+export async function atomicWriteJson(
+  path: string,
+  value: unknown,
+  options: AtomicWriteOptions = {},
+): Promise<void> {
   const slash = path.lastIndexOf("/");
   if (slash < 1) throw new Error("absolute metadata path required");
   const directory = path.slice(0, slash);
@@ -13,14 +31,16 @@ export async function atomicWriteJson(path: string, value: unknown): Promise<voi
     await file.sync();
     file.close();
     file = undefined;
+    // Everything which can make the write fail is completed before rename. Rename is the
+    // commitment point: callers must never interpret a later durability-barrier failure as a
+    // rollback while the new file is already visible.
     await Deno.chmod(temporary, 0o600);
     await Deno.rename(temporary, path);
-    await Deno.chmod(path, 0o600);
-    const directoryFile = await Deno.open(directory, { read: true });
     try {
-      await directoryFile.sync();
-    } finally {
-      directoryFile.close();
+      await (options.syncDirectory ?? syncDirectory)(directory);
+    } catch {
+      // The renamed value is committed and readable. Directory fsync is best effort because
+      // reporting failure here would create an ambiguous, falsely rolled-back authority change.
     }
   } catch (error) {
     try {

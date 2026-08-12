@@ -10,8 +10,9 @@ Paul's Antigravity client. R1 is the next hosted milestone and R3 is hosted Deep
 longer target remains Paul's privately hosted, single-owner control plane for all of his agent
 sessions. Paul connects each provider once; separately enrolled clients receive narrow grants to
 fixed operations through MCP without receiving provider credentials. One provider connection may
-serve grants for many clients. The current implementation remains the historical fixture/regression
-harness described in `README.md`.
+serve grants for many clients. The current served implementation is the L1 local DeepSeek slice; the
+GitHub fixture, Stage 0/Stage 1 harnesses, and R1 in-memory foundation remain historical or
+credential-free regression assets as described in `README.md`.
 
 The first provider set is:
 

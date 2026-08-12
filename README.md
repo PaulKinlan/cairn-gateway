@@ -1,14 +1,13 @@
 # Cairn Gateway
 
-Cairn's immediate product target is Paul's privately hosted control plane for agent sessions. It
-will connect each provider once, keep credentials in dedicated custody, and let independently
-enrolled clients invoke only fixed, typed operations through four MCP tools. Clients will never
-receive provider tokens, and Cairn will never provide an arbitrary request surface. The historical
-fixture/regression harness remains available, while the current L1 implementation is the local-first
-DeepSeek connector described below.
+Cairn's immediate product target is L1: a local-first, single-owner DeepSeek custody slice for
+Paul's Antigravity client. The longer target is Paul's privately hosted control plane for agent
+sessions, where independently enrolled clients invoke only fixed, typed operations without receiving
+provider tokens. Cairn never provides an arbitrary request surface. The historical fixture and
+regression harnesses remain available alongside the current local implementation.
 
-[PLAN.md](PLAN.md) is the canonical product plan. The active sequence is R0 documentation/model
-reset, R1 real GitHub vertical slice, R2 X, R3 one API-key LLM, R4 fleet rollout, and R5 multiuser
+[PLAN.md](PLAN.md) is the canonical product plan. L1 is implemented locally; R1 is the next hosted
+milestone, followed by R2 X, R3 hosted DeepSeek promotion, R4 fleet rollout, and R5 multiuser
 readiness. A public fake-provider deployment is not a prerequisite.
 
 ## Target provider set
@@ -27,21 +26,21 @@ URL/model, or raw provider response.
 
 ## Current implementation
 
-Cairn has substantial durability code, but **no durable adapter is connected to the served product
-yet**. Do not confuse “not wired into the runtime” with “not implemented in the repository.”
+The served L1 product has narrow local persistence; it must not be confused with hosted durability
+or the historical fixture/reference adapters.
 
-| Surface                                              | Storage today                                                             | What it proves                                                                                                                                                                                                        |
-| ---------------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Historical local fixture (`deno task local:fixture`) | `MemoryStore`                                                             | Four-tool MCP lifecycle, P-256 enrollment/revocation/replay, fixed GitHub projection, and secret-free receipts. State is lost when the process stops.                                                                 |
-| R1 foundation on `main` (`deno task test:r1`)        | In-memory tenant-partitioned maps                                         | Two named P-256 clients sharing one tenant-owned connection, independent revocation, disconnect/fresh reconnect, and synthetic second-tenant isolation. State is lost when the process stops.                         |
-| Stage 1 durability reference adapter                 | Atomic disk-backed `authority.json` behind `DurableAuthorityTransactions` | The unchanged 24-scenario restart, concurrency, replay, migration, restore, and crash-boundary contract across independent Deno processes. This is deliberately test-only reference machinery, not the product store. |
-| Deno KV candidate                                    | Real local file-backed `Deno.openKv()` with strong reads and CAS          | A production-store experiment. It is not used by the runtime and is rejected in its current global single-value form: the complete graph hits a 64 KiB ceiling and the latest run is 27/28 with `DUR-24` unresolved.  |
-| Public deployment                                    | None                                                                      | Credential-free historical preview only. `/mcp` is intentionally disabled.                                                                                                                                            |
+| Surface                                              | Storage today                                                                                                                      | Restart boundary and proof                                                                                                                                                                                 |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L1 local DeepSeek (`deno task local:run`)            | Secret Service key plus atomic mode-0600 JSON for non-secret connection/grant/receipt metadata and conservative quota reservations | The key and non-secret local connection, grant, receipt, and quota metadata survive restart. MCP transport sessions do not. This is local single-owner persistence, not hosted or multi-tenant durability. |
+| Historical local fixture (`deno task local:fixture`) | `MemoryStore`                                                                                                                      | Four-tool fixture lifecycle, P-256 enrollment/revocation/replay, fixed GitHub projection, and secret-free receipts. All state is lost when the process stops.                                              |
+| R1 foundation on `main` (`deno task test:r1`)        | In-memory tenant-partitioned maps                                                                                                  | Two named P-256 clients, independent revocation, reconnect, and synthetic second-tenant isolation. All state is lost when the process stops.                                                               |
+| Stage 1 durability reference adapter                 | Atomic disk-backed `authority.json` behind `DurableAuthorityTransactions`                                                          | Historical test-only 24-scenario restart/concurrency/replay/migration/restore machinery, not a served product store.                                                                                       |
+| Deno KV candidate                                    | Real local file-backed `Deno.openKv()` with strong reads and CAS                                                                   | Rejected experiment: global single-value storage hits 64 KiB and the latest run is 27/28 with `DUR-24` unresolved. It is not used by a runtime.                                                            |
+| Public deployment                                    | None                                                                                                                               | Credential-free historical preview only; `/mcp` is intentionally disabled. No hosted durability or real-provider acceptance is claimed.                                                                    |
 
-The missing implementation is therefore specific: a **tenant-partitioned durable adapter must be
-connected to the R1 authority service, owner UI, receipts, and hosted MCP runtime**. It must satisfy
-the existing durability contract without the rejected global 64 KiB envelope. Until that is done,
-Cairn is not restart-safe or usable as the hosted control plane.
+R1 still requires a tenant-partitioned durable adapter connected to its authority service, owner UI,
+receipts, and hosted MCP runtime. L1 is restart-safe only for the local metadata listed above; it is
+not usable or accepted as the hosted control plane, and no real-provider acceptance is claimed.
 
 The accepted Stage 0 base had 90 cases. The current Stage 0 denominator is 96: that historical base
 plus six cases in the two pinned enrollment-wiring test files. The Stage 1 24-scenario contract,
