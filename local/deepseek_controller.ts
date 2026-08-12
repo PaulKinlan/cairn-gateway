@@ -1,7 +1,13 @@
 import { atomicWriteJson, readJsonFile } from "./atomic_json.ts";
 
-export const DEEPSEEK_OPERATION = "deepseek.chat.complete@v1" as const;
-export const DEEPSEEK_CONNECTION = "deepseek_local" as const;
+import {
+  CHAT_ARGUMENTS_SCHEMA,
+  CHAT_OPERATION_OUTPUT_SCHEMA,
+  DEEPSEEK_CONNECTION,
+  DEEPSEEK_OPERATION,
+} from "./deepseek_contract.ts";
+
+export { DEEPSEEK_CONNECTION, DEEPSEEK_OPERATION } from "./deepseek_contract.ts";
 const MAX_METADATA_BYTES = 16 * 1024;
 
 export interface DeepSeekReceipt {
@@ -487,12 +493,8 @@ export async function createDeepSeekController(
           return result(id, {
             id: DEEPSEEK_OPERATION,
             provider: "deepseek",
-            inputSchema: { type: "object", required: ["messages"], additionalProperties: false },
-            outputSchema: {
-              type: "object",
-              required: ["outcome", "assistant_text", "finish_category", "usage", "receipt"],
-              additionalProperties: false,
-            },
+            inputSchema: CHAT_ARGUMENTS_SCHEMA,
+            outputSchema: CHAT_OPERATION_OUTPUT_SCHEMA,
             requestUnits: 1,
           });
         });

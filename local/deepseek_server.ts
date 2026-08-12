@@ -1,11 +1,16 @@
 import {
   createDeepSeekController,
   type CustodianClient,
-  DEEPSEEK_OPERATION,
   FileMetadataStore,
   httpCustodianClient,
   type MetadataStore,
 } from "./deepseek_controller.ts";
+import {
+  CHAT_ARGUMENTS_SCHEMA,
+  CHAT_OPERATION_OUTPUT_SCHEMA,
+  DEEPSEEK_CONNECTION,
+  DEEPSEEK_OPERATION,
+} from "./deepseek_contract.ts";
 import {
   MCP_ENDPOINT,
   StreamableHttpFixtureTransport,
@@ -14,46 +19,6 @@ import {
 import { renderDeepSeekPage } from "./deepseek_ui.ts";
 import { readBoundedBody } from "./bounded_body.ts";
 
-const RECEIPT_ERROR_SCHEMA = {
-  type: "object",
-  properties: {
-    decision: { const: "error" },
-    reason: { const: "custodian_denied" },
-    requestUnits: { const: 0 },
-  },
-  required: ["decision", "reason", "requestUnits"],
-  additionalProperties: false,
-};
-const SUCCESS_OUTPUT_SCHEMA = {
-  type: "object",
-  properties: {
-    outcome: { const: "success" },
-    assistant_text: { type: "string" },
-    finish_category: { enum: ["complete", "length"] },
-    usage: {
-      type: "object",
-      properties: {
-        input_tokens: { type: "integer", minimum: 0 },
-        output_tokens: { type: "integer", minimum: 0 },
-        total_tokens: { type: "integer", minimum: 0 },
-      },
-      required: ["input_tokens", "output_tokens", "total_tokens"],
-      additionalProperties: false,
-    },
-    receipt: {
-      type: "object",
-      properties: {
-        decision: { const: "allow" },
-        reason: { const: "policy_allow" },
-        requestUnits: { const: 1 },
-      },
-      required: ["decision", "reason", "requestUnits"],
-      additionalProperties: false,
-    },
-  },
-  required: ["outcome", "assistant_text", "finish_category", "usage", "receipt"],
-  additionalProperties: false,
-};
 export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
   {
     name: "search_capabilities",
@@ -73,7 +38,7 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
             type: "object",
             properties: {
               id: { const: DEEPSEEK_OPERATION },
-              connection: { const: "deepseek_local" },
+              connection: { const: DEEPSEEK_CONNECTION },
             },
             required: ["id", "connection"],
             additionalProperties: false,
@@ -114,66 +79,27 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
       type: "object",
       properties: {
         operation: { const: DEEPSEEK_OPERATION },
-        connection: { const: "deepseek_local" },
-        arguments: {
-          type: "object",
-          properties: {
-            messages: {
-              type: "array",
-              minItems: 1,
-              maxItems: 8,
-              items: {
-                type: "object",
-                properties: { role: { enum: ["system", "user"] }, content: { type: "string" } },
-                required: ["role", "content"],
-                additionalProperties: false,
-              },
-            },
-            max_output_tokens: { type: "integer", minimum: 1, maximum: 1024 },
-          },
-          required: ["messages"],
-          additionalProperties: false,
-        },
+        connection: { const: DEEPSEEK_CONNECTION },
+        arguments: CHAT_ARGUMENTS_SCHEMA,
       },
       required: ["operation", "connection", "arguments"],
       additionalProperties: false,
     },
-    outputSchema: {
-      oneOf: [
-        SUCCESS_OUTPUT_SCHEMA,
-        {
-          type: "object",
-          properties: {
-            outcome: {
-              enum: [
-                "invalid_input",
-                "rate_limited",
-                "auth_required",
-                "provider_unavailable",
-                "authority_changed",
-              ],
-            },
-            receipt: RECEIPT_ERROR_SCHEMA,
-          },
-          required: ["outcome", "receipt"],
-          additionalProperties: false,
-        },
-      ],
-    },
+    outputSchema: CHAT_OPERATION_OUTPUT_SCHEMA,
   },
   {
     name: "connection_status",
     description: "connection status",
     inputSchema: {
       type: "object",
-      properties: { connection: { const: "deepseek_local" } },
+      properties: { connection: { const: DEEPSEEK_CONNECTION } },
       required: ["connection"],
       additionalProperties: false,
     },
     outputSchema: {
       type: "object",
       properties: {
-        connection: { const: "deepseek_local" },
+        connection: { const: DEEPSEEK_CONNECTION },
         status: { const: "active" },
         configured: { const: true },
         healthy: { type: ["boolean", "null"] },

@@ -15,10 +15,11 @@ readiness. A public fake-provider deployment is not a prerequisite.
 - GitHub OAuth: `github.user.read@v1`, fixed `GET /user`.
 - X OAuth: `x.user.me.read@v1`, fixed `GET /2/users/me`; exact current scopes and host must be
   verified before R2 activation.
-- DeepSeek API key: `deepseek.chat.complete@v1`, bounded messages/tokens/cost against an exact
-  endpoint/model that the owner selects and pins only after current DeepSeek documentation is
-  verified. The inventory confirms a verified standard DeepSeek Platform key. Kimi is a possible
-  later connector, not initial scope; Cairn does not claim only one LLM credential is configured.
+- DeepSeek API key: the local v1 connector pins `deepseek.chat.complete@v1` to
+  `https://api.deepseek.com/chat/completions` and `deepseek-v4-flash`, verified against current
+  DeepSeek documentation on 2026-08-12. The inventory confirms a verified standard DeepSeek Platform
+  key. Kimi is a possible later connector, not initial scope; Cairn does not claim only one LLM
+  credential is configured.
 
 The MCP front door remains `search_capabilities`, `describe_operation`, `connection_status`, and
 `invoke_operation`. There is no generic proxy, token export, caller-selected URL/method/header/base

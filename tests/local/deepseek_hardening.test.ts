@@ -320,7 +320,7 @@ Deno.test("delayed status refresh cannot restore authority after disconnect or d
   equals((await controller.view()).connected, false);
 });
 
-Deno.test("advertised DeepSeek output schemas validate actual success and error responses", async () => {
+Deno.test("advertised DeepSeek and described operation schemas validate actual values", async () => {
   const outputSchema = (name: string): Record<string, unknown> => {
     const found = DEEPSEEK_TOOLS.find((tool) => tool.name === name);
     assert(found?.outputSchema);
@@ -363,6 +363,23 @@ Deno.test("advertised DeepSeek output schemas validate actual success and error 
       `${name} schema rejected output`,
     );
   }
+  const described = responses[1][1] as Record<string, unknown>;
+  assert(validatesSchema(described.inputSchema as Record<string, unknown>, {
+    messages: [{ role: "user", content: "hello" }],
+    max_output_tokens: 32,
+  }));
+  assert(validatesSchema(described.outputSchema as Record<string, unknown>, {
+    outcome: "success",
+    assistant_text: "answer",
+    finish_category: "complete",
+    usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    receipt: { decision: "allow", reason: "policy_allow", requestUnits: 1 },
+  }));
+  assert(
+    !validatesSchema(described.inputSchema as Record<string, unknown>, {
+      messages: [{ role: "user", content: "x".repeat(8193) }],
+    }),
+  );
 
   const errorController = await createDeepSeekController({
     ...custodian,
