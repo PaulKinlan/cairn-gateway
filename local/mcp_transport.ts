@@ -1,4 +1,4 @@
-import { MCP_CURRENT, MCP_LEGACY } from "../apps/gateway/mcp.ts";
+import { MCP_CURRENT, MCP_LEGACY, TOOLS } from "../apps/gateway/mcp.ts";
 import { BodyTooLargeError, readBoundedBody } from "./bounded_body.ts";
 
 interface FixtureDispatcher {
@@ -188,6 +188,12 @@ export class StreamableHttpFixtureTransport {
     if (value.method !== "tools/list" && value.method !== "tools/call") {
       return jsonRpc(rpcError(value.id, -32601, "method denied"));
     }
+    // Tool descriptors are static, contain no authority, and must remain discoverable before local
+    // onboarding. Otherwise MCP clients report a broken connection at tools/list instead of showing
+    // the tools and allowing the owner to complete setup in the browser.
+    if (value.method === "tools/list") {
+      return jsonRpc({ jsonrpc: "2.0", id: value.id, result: { tools: TOOLS } });
+    }
 
     const adapted = {
       jsonrpc: "2.0",
@@ -220,7 +226,15 @@ export class StreamableHttpFixtureTransport {
       }
       return jsonRpc(response ?? rpcError(value.id, -32603, "empty response denied"));
     } catch {
-      return jsonRpc(rpcError(value.id, -32003, "fixture authority denied"));
+      return jsonRpc(
+        rpcError(
+          value.id,
+          -32003,
+          `fixture authority unavailable; complete or repair setup at ${
+            new URL(request.url).origin
+          }/`,
+        ),
+      );
     }
   }
 

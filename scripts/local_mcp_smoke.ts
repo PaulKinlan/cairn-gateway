@@ -144,7 +144,11 @@ try {
     ] as const
   ) {
     const denied = await call(firstSession, id, name, args);
-    if (denied.error?.message !== "fixture authority denied") {
+    if (
+      !denied.error?.message?.includes(
+        "fixture authority unavailable; complete or repair setup at",
+      )
+    ) {
       throw new Error(`${name} did not deny after revoke`);
     }
   }

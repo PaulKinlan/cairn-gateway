@@ -56,25 +56,32 @@ Requires Deno 2.9.0.
 deno task local:run
 ```
 
-Open <http://127.0.0.1:8787/>. The local page can create fixture authority, label the fixed fixture
-agent/device/workload, grant `github.user.read@v1`, invoke over MCP, inspect metadata-only receipts,
-revoke, replace, and reconnect.
+Open <http://127.0.0.1:8787/> and complete the four onboarding steps. The local page creates fixture
+authority, labels the fixed agent/device/workload, grants `github.user.read@v1`, invokes over MCP,
+shows metadata-only receipts, and supports revoke/replace/reconnect. Authority remains in memory, so
+repeat onboarding after every server restart.
 
-The fixture endpoint is `http://127.0.0.1:8787/mcp`. The following is illustrative wire
-configuration only; VS Code compatibility has not been accepted:
+### Antigravity
+
+Verified with Antigravity CLI 1.1.12. Save this globally at `~/.gemini/config/mcp_config.json`, or
+per workspace at `.agents/mcp_config.json`:
 
 ```json
 {
-  "servers": {
-    "cairn-local-fixture": {
-      "type": "http",
-      "url": "http://127.0.0.1:8787/mcp"
+  "mcpServers": {
+    "cairn-local": {
+      "serverUrl": "http://127.0.0.1:8787/mcp"
     }
   }
 }
 ```
 
-See [docs/local-setup.md](docs/local-setup.md) for the historical fixture lifecycle.
+Antigravity requires `mcpServers` and `serverUrl`; VS Code-style `servers` and `url` fields fail.
+Refresh the MCP Manager after editing. Cairn exposes its four static tool descriptors before browser
+onboarding, but every call remains denied with a setup URL until the fixture grant is active.
+
+See [docs/local-setup.md](docs/local-setup.md) for the complete fixture lifecycle and Antigravity
+reload steps.
 
 ## Verification
 

@@ -115,7 +115,7 @@ button?.addEventListener("click", async () => {
   const config = document.querySelector("#client-config")?.textContent ?? "";
   try {
     await navigator.clipboard.writeText(config);
-    status.textContent = "VS Code candidate configuration copied.";
+    status.textContent = "Antigravity configuration copied.";
   } catch {
     status.textContent = "Copy was blocked. Select the configuration and copy it manually.";
   }
@@ -138,8 +138,8 @@ function isoTime(seconds: number): string {
 export function clientConfiguration(origin: string): string {
   return JSON.stringify(
     {
-      servers: {
-        "cairn-local": { type: "http", url: `${origin}/mcp` },
+      mcpServers: {
+        "cairn-local": { serverUrl: `${origin}/mcp` },
       },
     },
     null,
@@ -248,6 +248,9 @@ function usageRows(state: LocalFixtureView): string {
 export function renderAdminPage(state: AdminPageState): string {
   const endpoint = `${state.origin}/mcp`;
   const config = clientConfiguration(state.origin);
+  const mcpReadiness = state.fixture.grant?.status === "active"
+    ? "Authority is ready for Antigravity."
+    : "The server can list tools, but calls remain denied until onboarding is complete.";
   const notice = state.notice === undefined
     ? ""
     : `<section class="wide notice" aria-live="polite"><p>${
@@ -304,13 +307,13 @@ export function renderAdminPage(state: AdminPageState): string {
   }</tbody></table></div></section>
     <section class="wide" aria-labelledby="connect-title">
       <h2 id="connect-title">Connect over MCP</h2>
-      <p>The endpoint is <code>${escapeHtml(endpoint)}</code>. Complete onboarding first.</p>
+      <p>The endpoint is <code>${escapeHtml(endpoint)}</code>. ${escapeHtml(mcpReadiness)}</p>
       <label for="endpoint">MCP endpoint</label>
       <input class="endpoint" id="endpoint" value="${escapeHtml(endpoint)}" readonly>
       <pre id="client-config">${escapeHtml(config)}</pre>
-      <button type="button" class="secondary" data-copy>Copy VS Code candidate configuration</button>
+      <button type="button" class="secondary" data-copy>Copy Antigravity configuration</button>
       <p id="copy-status" class="copy-status" aria-live="polite"></p>
-      <p><strong>VS Code candidate, not yet tested.</strong></p>
+      <p><strong>Verified with Antigravity CLI 1.1.12.</strong> Save globally to <code>~/.gemini/config/mcp_config.json</code> or per workspace to <code>.agents/mcp_config.json</code>, then refresh the MCP Manager. Antigravity requires <code>mcpServers</code> and <code>serverUrl</code>; <code>servers</code> and <code>url</code> will not work.</p>
       <h3>Wire sequence</h3>
       <ol>
         <li>Send <code>initialize</code>, retain <code>Mcp-Session-Id</code>, then send <code>notifications/initialized</code>.</li>

@@ -180,7 +180,10 @@ Deno.test("local page presents ordered onboarding, authority, grant, receipts, a
   assert(html.includes("Authority graph"));
   assert(html.includes("Invocation receipts"));
   assert(html.includes("Recent usage"));
-  assert(html.includes("VS Code candidate, not yet tested"));
+  assert(html.includes("Verified with Antigravity CLI 1.1.12"));
+  assert(html.includes("&quot;mcpServers&quot;"));
+  assert(html.includes("&quot;serverUrl&quot;"));
+  assert(!html.includes("&quot;servers&quot;"));
   assert(html.includes("Wire sequence"));
   assert(html.includes("Reconnect by initializing a new session"));
   assert(!html.includes("Wire evidence is not VS Code acceptance"));
@@ -700,7 +703,11 @@ Deno.test("actual listener completes all four tools, visible receipt, revoke, re
       ] as const
     ) {
       const denial = await toolCall(origin, first, id, name, args);
-      equals((denial.error as Record<string, unknown>).message, "fixture authority denied");
+      assert(
+        String((denial.error as Record<string, unknown>).message).includes(
+          "fixture authority unavailable; complete or repair setup at",
+        ),
+      );
     }
 
     const revokedExpiry = browser.html.match(/datetime="([^"]+)"/)?.[1];
@@ -806,7 +813,11 @@ Deno.test("actual listener serializes grant/reset, duplicate grant, invoke/reset
       "invoke_operation",
       invocationArgs,
     );
-    equals((postReset.error as Record<string, unknown>).message, "fixture authority denied");
+    assert(
+      String((postReset.error as Record<string, unknown>).message).includes(
+        "fixture authority unavailable; complete or repair setup at",
+      ),
+    );
     await refresh();
     assert(browser.html.includes("No invocation receipts yet"));
 
@@ -828,10 +839,61 @@ Deno.test("actual listener serializes grant/reset, duplicate grant, invoke/reset
       "invoke_operation",
       invocationArgs,
     );
-    equals((afterRevoke.error as Record<string, unknown>).message, "fixture authority denied");
+    assert(
+      String((afterRevoke.error as Record<string, unknown>).message).includes(
+        "fixture authority unavailable; complete or repair setup at",
+      ),
+    );
   } finally {
     await server.shutdown();
   }
+});
+
+Deno.test("Antigravity can list tools before onboarding and receives an actionable call denial", async () => {
+  const transport = new StreamableHttpFixtureTransport(createLocalFixtureController());
+  const endpoint = "http://127.0.0.1:8787/mcp";
+  const init = await transport.fetch(
+    new Request(endpoint, {
+      method: "POST",
+      headers: mcpHeaders(),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "antigravity", version: "1.1.12" },
+        },
+      }),
+    }),
+  );
+  const session = init.headers.get("Mcp-Session-Id");
+  assert(session);
+  const post = async (body: unknown) =>
+    await transport.fetch(
+      new Request(endpoint, {
+        method: "POST",
+        headers: mcpHeaders(session),
+        body: JSON.stringify(body),
+      }),
+    );
+  equals(
+    (await post({ jsonrpc: "2.0", method: "notifications/initialized" })).status,
+    202,
+  );
+  const listed = await (await post({ jsonrpc: "2.0", id: 2, method: "tools/list" })).json();
+  equals(
+    listed.result.tools.map((tool: { name: string }) => tool.name),
+    ["search_capabilities", "describe_operation", "invoke_operation", "connection_status"],
+  );
+  const denied = await (await post({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "search_capabilities", arguments: { query: "github user" } },
+  })).json();
+  assert(denied.error.message.includes("complete or repair setup at http://127.0.0.1:8787/"));
 });
 
 Deno.test("Streamable HTTP host, negotiation, lifecycle, and unrelated sessions fail closed", async () => {

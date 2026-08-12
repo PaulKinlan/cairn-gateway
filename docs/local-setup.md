@@ -98,20 +98,33 @@ The result contains only the fixed projected `fixture` GitHub user and a bounded
 capability, signer, store, raw authority state, provider body, token, generic request input, or
 caller-selected network destination is returned.
 
-## Candidate VS Code configuration
+## Antigravity configuration
 
-The configuration below matches the endpoint. **VS Code candidate, not yet tested.**
+Verified with Antigravity CLI 1.1.12. Antigravity's remote MCP schema is different from VS Code's:
+it requires top-level `mcpServers` and `serverUrl`. The legacy `servers`, `url`, and `httpUrl`
+fields do not work.
+
+Save this globally at `~/.gemini/config/mcp_config.json`, or for one workspace at
+`.agents/mcp_config.json`:
 
 ```json
 {
-  "servers": {
+  "mcpServers": {
     "cairn-local": {
-      "type": "http",
-      "url": "http://127.0.0.1:8787/mcp"
+      "serverUrl": "http://127.0.0.1:8787/mcp"
     }
   }
 }
 ```
+
+In Antigravity IDE, open **Agent panel → … → MCP Servers → Manage MCP Servers → View raw config**.
+After editing, use the MCP Manager refresh button. In Antigravity CLI, enter `/mcp` and reload the
+server configuration.
+
+Cairn now lets an MCP client complete `tools/list` before fixture onboarding, so the server appears
+connected with all four tool descriptors. Tool calls return a setup-specific denial until the
+browser onboarding and grant are complete. Because fixture authority is in memory, restarting Cairn
+requires repeating browser onboarding.
 
 ## Run the focused demo
 
