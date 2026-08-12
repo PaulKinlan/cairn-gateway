@@ -24,29 +24,29 @@ The MCP front door remains `search_capabilities`, `describe_operation`, `connect
 `invoke_operation`. There is no generic proxy, token export, caller-selected URL/method/header/base
 URL/model, or raw provider response.
 
-## Current repository state
+## Current implementation
 
-The usable implementation remains a **historical local fixture/regression harness**, not the target
-private control plane. It proves the four-tool wire lifecycle, P-256 proof/revocation/replay
-invariants, fixed GitHub projection, and secret-free receipts without credentials or provider calls.
-It uses in-memory authority and fixed GitHub data; state is lost on restart.
+Cairn has substantial durability code, but **no durable adapter is connected to the served product
+yet**. Do not confuse “not wired into the runtime” with “not implemented in the repository.”
 
-The existing public deployment is likewise a historical credential-free preview. Its MCP routes are
-intentionally disabled. It is not R1 acceptance and need not be expanded before the real GitHub
-slice.
+| Surface                                       | Storage today                                                             | What it proves                                                                                                                                                                                                        |
+| --------------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local fixture (`deno task local:run`)         | `MemoryStore`                                                             | Four-tool MCP lifecycle, P-256 enrollment/revocation/replay, fixed GitHub projection, and secret-free receipts. State is lost when the process stops.                                                                 |
+| R1 foundation on `main` (`deno task test:r1`) | In-memory tenant-partitioned maps                                         | Two named P-256 clients sharing one tenant-owned connection, independent revocation, disconnect/fresh reconnect, and synthetic second-tenant isolation. State is lost when the process stops.                         |
+| Stage 1 durability reference adapter          | Atomic disk-backed `authority.json` behind `DurableAuthorityTransactions` | The unchanged 24-scenario restart, concurrency, replay, migration, restore, and crash-boundary contract across independent Deno processes. This is deliberately test-only reference machinery, not the product store. |
+| Deno KV candidate                             | Real local file-backed `Deno.openKv()` with strong reads and CAS          | A production-store experiment. It is not used by the runtime and is rejected in its current global single-value form: the complete graph hits a 64 KiB ceiling and the latest run is 27/28 with `DUR-24` unresolved.  |
+| Public deployment                             | None                                                                      | Credential-free historical preview only. `/mcp` is intentionally disabled.                                                                                                                                            |
 
-Branch `feat/r1-foundation` adds an in-memory, credential-free executable R1 model and
-server-rendered Connections/Agents views. Its focused journey proves two named P-256 clients sharing
-one tenant-owned fixture connection, independent client revocation, disconnect/fresh reconnect, and
-a synthetic second tenant. It does not add a provider call, hosted persistence, owner
-authentication, OAuth, custody, deployment, or live GitHub. Run it with `deno task test:r1`.
+The missing implementation is therefore specific: a **tenant-partitioned durable adapter must be
+connected to the R1 authority service, owner UI, receipts, and hosted MCP runtime**. It must satisfy
+the existing durability contract without the rejected global 64 KiB envelope. Until that is done,
+Cairn is not restart-safe or usable as the hosted control plane.
 
 The accepted Stage 0 base had 90 cases. The current Stage 0 denominator is 96: that historical base
 plus six cases in the two pinned enrollment-wiring test files. The Stage 1 24-scenario contract,
-fixtures, and `docs/acceptance/` records are likewise preserved regression/historical assets. They
-do not prove hosted custody, a real provider, a named client, or current milestone completion. The
-Deno KV global 64 KiB envelope candidate is rejected; the latest direct candidate result is 27/28
-with `DUR-24` unresolved.
+fixtures, and `docs/acceptance/` records are preserved regression/historical assets. They prove real
+durability behavior at the contract/reference-adapter boundary, but not hosted product persistence,
+provider custody, OAuth, or a live provider.
 
 ## Run the historical local fixture
 
@@ -100,5 +100,5 @@ supported storage path.
   only in Paul's browser and custodian ingestion memory and never passes through Cairn.
 - Enrollment emits only non-secret Pi/MCP configuration. Provider tokens and local P-256 private
   keys never enter HTML, clipboard data, command arguments, config, logs, receipts, or the journal.
-- This reset authorizes documentation only: no credentials, providers, provisioning, deployment, or
-  runtime changes.
+- The credential-free R1 authority/UI foundation is implemented on `main`; real credentials,
+  provider calls, provisioning, deployment, and production mutation remain unactivated.
