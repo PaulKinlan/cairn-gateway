@@ -1,5 +1,8 @@
+import { atomicWriteJson, readJsonFile } from "./atomic_json.ts";
+
 export const DEEPSEEK_OPERATION = "deepseek.chat.complete@v1" as const;
 export const DEEPSEEK_CONNECTION = "deepseek_local" as const;
+const MAX_METADATA_BYTES = 16 * 1024;
 
 export interface DeepSeekReceipt {
   id: string;
@@ -22,6 +25,7 @@ export interface DeepSeekView {
   receipts: readonly DeepSeekReceipt[];
 }
 export interface LocalMetadata {
+  schemaVersion: 1;
   configured: boolean;
   connected: boolean;
   grantVersion: number;
@@ -32,23 +36,64 @@ export interface MetadataStore {
   save(value: LocalMetadata): Promise<void>;
   reset(): Promise<void>;
 }
+function record(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+function exact(value: Record<string, unknown>, keys: string[]) {
+  return keys.every((key) => key in value) && Object.keys(value).every((key) => keys.includes(key));
+}
+function validReceipt(value: unknown): value is DeepSeekReceipt {
+  if (
+    !record(value) ||
+    !exact(value, [
+      "id",
+      "at",
+      "decision",
+      "reason",
+      "requestUnits",
+      ...(value.inputTokens === undefined ? [] : ["inputTokens"]),
+      ...(value.outputTokens === undefined ? [] : ["outputTokens"]),
+    ])
+  ) return false;
+  return typeof value.id === "string" && /^[a-f0-9]{16}$/.test(value.id) &&
+    Number.isSafeInteger(value.at) &&
+    ["allow", "deny", "error"].includes(value.decision as string) &&
+    ["policy_allow", "not_configured", "disconnected", "custodian_denied"].includes(
+      value.reason as string,
+    ) &&
+    (value.requestUnits === 0 || value.requestUnits === 1) &&
+    (value.inputTokens === undefined ||
+      Number.isSafeInteger(value.inputTokens) && (value.inputTokens as number) >= 0) &&
+    (value.outputTokens === undefined ||
+      Number.isSafeInteger(value.outputTokens) && (value.outputTokens as number) >= 0);
+}
+function validMetadata(value: unknown): value is LocalMetadata {
+  return record(value) &&
+    exact(value, ["schemaVersion", "configured", "connected", "grantVersion", "receipts"]) &&
+    value.schemaVersion === 1 && typeof value.configured === "boolean" &&
+    typeof value.connected === "boolean" &&
+    Number.isSafeInteger(value.grantVersion) && (value.grantVersion as number) >= 1 &&
+    (value.grantVersion as number) <= 1_000_000 && Array.isArray(value.receipts) &&
+    value.receipts.length <= 8 &&
+    value.receipts.every(validReceipt);
+}
 export class FileMetadataStore implements MetadataStore {
   constructor(readonly path: string) {}
   async load() {
-    try {
-      return JSON.parse(await Deno.readTextFile(this.path)) as LocalMetadata;
-    } catch {
-      return undefined;
-    }
+    const value = await readJsonFile(this.path, MAX_METADATA_BYTES);
+    if (value === undefined) return undefined;
+    if (!validMetadata(value)) throw new Error("metadata invalid");
+    return value;
   }
-  async save(value: LocalMetadata) {
-    await Deno.mkdir(this.path.slice(0, this.path.lastIndexOf("/")), { recursive: true });
-    await Deno.writeTextFile(this.path, JSON.stringify(value));
+  save(value: LocalMetadata) {
+    return atomicWriteJson(this.path, value);
   }
   async reset() {
     try {
       await Deno.remove(this.path);
-    } catch { /* absent */ }
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) throw error;
+    }
   }
 }
 export class MemoryMetadataStore implements MetadataStore {
@@ -65,57 +110,180 @@ export class MemoryMetadataStore implements MetadataStore {
     return Promise.resolve();
   }
 }
+export interface CustodianSuccess {
+  outcome: "success";
+  assistant_text: string;
+  finish_category: "complete" | "length";
+  usage: { input_tokens: number; output_tokens: number; total_tokens: number };
+}
+export type CustodianOutput = CustodianSuccess | {
+  outcome:
+    | "invalid_input"
+    | "rate_limited"
+    | "auth_required"
+    | "provider_unavailable"
+    | "authority_changed";
+};
 export interface CustodianClient {
   status(): Promise<{ configured: boolean; healthy: boolean | null }>;
-  invoke(input: unknown): Promise<Record<string, unknown>>;
+  invoke(input: unknown): Promise<CustodianOutput>;
   delete(): Promise<void>;
 }
+async function boundedJsonResponse(
+  response: Response,
+  allowedStatuses: readonly number[],
+): Promise<unknown> {
+  if (!allowedStatuses.includes(response.status)) throw new Error("custodian request denied");
+  const contentLength = Number(response.headers.get("content-length") ?? "0");
+  if (contentLength > 64 * 1024) throw new Error("custodian response too large");
+  if (!response.body) throw new Error("custodian response denied");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > 64 * 1024) {
+      await reader.cancel();
+      throw new Error("custodian response too large");
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+function validStatus(value: unknown): value is { configured: boolean; healthy: boolean | null } {
+  return record(value) && exact(value, ["configured", "healthy"]) &&
+    typeof value.configured === "boolean" &&
+    (value.healthy === null || typeof value.healthy === "boolean");
+}
+function validOutput(value: unknown): value is CustodianOutput {
+  if (!record(value) || typeof value.outcome !== "string") return false;
+  if (value.outcome !== "success") {
+    return exact(value, ["outcome"]) &&
+      [
+        "invalid_input",
+        "rate_limited",
+        "auth_required",
+        "provider_unavailable",
+        "authority_changed",
+      ].includes(value.outcome);
+  }
+  return exact(value, ["outcome", "assistant_text", "finish_category", "usage"]) &&
+    typeof value.assistant_text === "string" &&
+    ["complete", "length"].includes(value.finish_category as string) && record(value.usage) &&
+    exact(value.usage, ["input_tokens", "output_tokens", "total_tokens"]) &&
+    [value.usage.input_tokens, value.usage.output_tokens, value.usage.total_tokens].every((n) =>
+      Number.isSafeInteger(n) && (n as number) >= 0
+    ) &&
+    (value.usage.input_tokens as number) + (value.usage.output_tokens as number) ===
+      value.usage.total_tokens;
+}
 export function httpCustodianClient(origin: string, credential: string): CustodianClient {
-  const request = async (path: string, method = "GET", body?: unknown) => {
-    const response = await fetch(`${origin}${path}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${credential}`,
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-      },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    return await response.json();
-  };
+  const request = async (
+    path: string,
+    method = "GET",
+    body?: unknown,
+    allowedStatuses: readonly number[] = [200],
+  ) =>
+    boundedJsonResponse(
+      await fetch(`${origin}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${credential}`,
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+      allowedStatuses,
+    );
   return {
-    status: () => request("/internal/status"),
-    invoke: (input) => request("/internal/invoke", "POST", input),
+    status: async () => {
+      const value = await request("/internal/status");
+      if (!validStatus(value)) throw new Error("custodian status denied");
+      return value;
+    },
+    invoke: async (input) => {
+      const value = await request(
+        "/internal/invoke",
+        "POST",
+        input,
+        [200, 400, 401, 409, 429, 503],
+      );
+      if (!validOutput(value)) throw new Error("custodian output denied");
+      return value;
+    },
     delete: async () => {
-      await request("/internal/delete", "POST");
+      const value = await request("/internal/delete", "POST");
+      if (!record(value) || !exact(value, ["deleted"]) || value.deleted !== true) {
+        throw new Error("custodian deletion denied");
+      }
     },
   };
 }
-function object(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
-}
-function exact(value: Record<string, unknown>, keys: string[]) {
-  return keys.every((key) => key in value) && Object.keys(value).every((key) => keys.includes(key));
-}
+
 export async function createDeepSeekController(
   custodian: CustodianClient,
   metadata: MetadataStore,
 ) {
-  const saved = await metadata.load();
-  const state: LocalMetadata =
-    saved && typeof saved.configured === "boolean" && typeof saved.connected === "boolean" &&
-      Number.isInteger(saved.grantVersion) && Array.isArray(saved.receipts)
-      ? saved
-      : { configured: false, connected: true, grantVersion: 1, receipts: [] };
+  let state: LocalMetadata;
+  let bootstrapped = false;
+  try {
+    const saved = await metadata.load();
+    if (saved) state = saved;
+    else {
+      state = {
+        schemaVersion: 1,
+        configured: false,
+        connected: false,
+        grantVersion: 1,
+        receipts: [],
+      };
+      await metadata.save(state);
+    }
+    bootstrapped = true;
+  } catch {
+    state = {
+      schemaVersion: 1,
+      configured: false,
+      connected: false,
+      grantVersion: 1,
+      receipts: [],
+    };
+  }
   let health: boolean | null = null;
-  const persist = () => metadata.save(state);
+  let generation = 0;
+  let lifecycle = Promise.resolve();
+  const persist = async () => {
+    if (!bootstrapped) throw new Error("metadata unavailable");
+    await metadata.save(state);
+  };
   const refresh = async () => {
+    if (!bootstrapped) throw new Error("metadata unavailable");
     const status = await custodian.status();
     state.configured = status.configured;
     health = status.healthy;
     await persist();
   };
-  await refresh();
-  const receipt = async (
+  try {
+    await refresh();
+  } catch {
+    state.configured = false;
+    state.connected = false;
+    health = null;
+  }
+  const mutate = async (operation: () => Promise<void>) => {
+    const pending = lifecycle.then(operation, operation);
+    lifecycle = pending.catch(() => {});
+    return await pending;
+  };
+  const addReceipt = async (
     decision: DeepSeekReceipt["decision"],
     reason: DeepSeekReceipt["reason"],
     units: 0 | 1,
@@ -132,9 +300,23 @@ export async function createDeepSeekController(
     state.receipts.length = Math.min(8, state.receipts.length);
     await persist();
   };
+  const result = (id: string | number, structuredContent: Record<string, unknown>) => ({
+    jsonrpc: "2.0",
+    id,
+    result: {
+      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+      structuredContent,
+    },
+  });
   return Object.freeze({
     async view(): Promise<DeepSeekView> {
-      await refresh();
+      try {
+        await refresh();
+      } catch {
+        state.configured = false;
+        state.connected = false;
+        health = null;
+      }
       return {
         configured: state.configured,
         connected: state.connected,
@@ -147,27 +329,35 @@ export async function createDeepSeekController(
         receipts: structuredClone(state.receipts),
       };
     },
-    async connect() {
-      await refresh();
-      if (!state.configured) throw new Error("not configured");
-      state.connected = true;
-      state.grantVersion++;
-      await persist();
-    },
-    async disconnect() {
-      state.connected = false;
-      state.grantVersion++;
-      await persist();
-    },
-    async delete() {
-      state.connected = false;
-      state.configured = false;
-      state.grantVersion++;
-      state.receipts = [];
-      await custodian.delete();
-      await persist();
-    },
+    connect: () =>
+      mutate(async () => {
+        await refresh();
+        if (!state.configured) throw new Error("not configured");
+        state.connected = true;
+        state.grantVersion++;
+        generation++;
+        await persist();
+      }),
+    disconnect: () =>
+      mutate(async () => {
+        state.connected = false;
+        state.grantVersion++;
+        generation++;
+        await persist();
+      }),
+    delete: () =>
+      mutate(async () => {
+        state.connected = false;
+        state.grantVersion++;
+        generation++;
+        await persist();
+        await custodian.delete();
+        state.configured = false;
+        state.receipts = [];
+        await persist();
+      }),
     async dispatch(receivedBody: Uint8Array): Promise<Record<string, unknown>> {
+      await lifecycle;
       let rpc: unknown;
       try {
         rpc = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(receivedBody));
@@ -175,20 +365,13 @@ export async function createDeepSeekController(
         throw new Error("request denied");
       }
       if (
-        !object(rpc) || rpc.jsonrpc !== "2.0" || rpc.method !== "tools/call" ||
-        !object(rpc.params) || typeof rpc.params.name !== "string" || !object(rpc.params.arguments)
+        !record(rpc) || rpc.jsonrpc !== "2.0" || rpc.method !== "tools/call" ||
+        !record(rpc.params) || typeof rpc.params.name !== "string" ||
+        !record(rpc.params.arguments) || !(typeof rpc.id === "string" || typeof rpc.id === "number")
       ) throw new Error("request denied");
-      const id = rpc.id as string | number;
+      const id = rpc.id;
       const name = rpc.params.name;
       const args = rpc.params.arguments;
-      const result = (structuredContent: Record<string, unknown>) => ({
-        jsonrpc: "2.0",
-        id,
-        result: {
-          content: [{ type: "text", text: JSON.stringify(structuredContent) }],
-          structuredContent,
-        },
-      });
       await refresh();
       if (!state.configured || !state.connected) throw new Error("authority unavailable");
       if (name === "search_capabilities") {
@@ -196,7 +379,7 @@ export async function createDeepSeekController(
           !exact(args, ["query"]) || typeof args.query !== "string" || args.query.length < 1 ||
           args.query.length > 200
         ) throw new Error("invalid input");
-        return result({
+        return result(id, {
           operations: [{ id: DEEPSEEK_OPERATION, connection: DEEPSEEK_CONNECTION }],
           count: 1,
         });
@@ -205,10 +388,15 @@ export async function createDeepSeekController(
         if (!exact(args, ["operation"]) || args.operation !== DEEPSEEK_OPERATION) {
           throw new Error("invalid input");
         }
-        return result({
+        return result(id, {
           id: DEEPSEEK_OPERATION,
           provider: "deepseek",
           inputSchema: { type: "object", required: ["messages"], additionalProperties: false },
+          outputSchema: {
+            type: "object",
+            required: ["outcome", "assistant_text", "finish_category", "usage", "receipt"],
+            additionalProperties: false,
+          },
           requestUnits: 1,
         });
       }
@@ -216,7 +404,7 @@ export async function createDeepSeekController(
         if (!exact(args, ["connection"]) || args.connection !== DEEPSEEK_CONNECTION) {
           throw new Error("invalid input");
         }
-        return result({
+        return result(id, {
           connection: DEEPSEEK_CONNECTION,
           status: "active",
           configured: true,
@@ -228,23 +416,32 @@ export async function createDeepSeekController(
         name !== "invoke_operation" || !exact(args, ["operation", "connection", "arguments"]) ||
         args.operation !== DEEPSEEK_OPERATION || args.connection !== DEEPSEEK_CONNECTION
       ) throw new Error("invalid input");
+      const dispatchGeneration = generation;
       const output = await custodian.invoke(args.arguments);
-      if (
-        output.outcome === "success" && object(output.usage) &&
-        typeof output.assistant_text === "string"
-      ) {
-        await receipt("allow", "policy_allow", 1, {
-          input: Number(output.usage.input_tokens),
-          output: Number(output.usage.output_tokens),
+      await lifecycle;
+      if (dispatchGeneration !== generation || !state.connected || !state.configured) {
+        throw new Error("authority changed during dispatch");
+      }
+      if (output.outcome === "success") {
+        await addReceipt("allow", "policy_allow", 1, {
+          input: output.usage.input_tokens,
+          output: output.usage.output_tokens,
         });
-        return result({
-          ...output,
+        return result(id, {
+          outcome: "success",
+          assistant_text: output.assistant_text,
+          finish_category: output.finish_category,
+          usage: {
+            input_tokens: output.usage.input_tokens,
+            output_tokens: output.usage.output_tokens,
+            total_tokens: output.usage.total_tokens,
+          },
           receipt: { decision: "allow", reason: "policy_allow", requestUnits: 1 },
         });
       }
-      await receipt("error", "custodian_denied", 0);
-      return result({
-        outcome: typeof output.outcome === "string" ? output.outcome : "provider_unavailable",
+      await addReceipt("error", "custodian_denied", 0);
+      return result(id, {
+        outcome: output.outcome,
         receipt: { decision: "error", reason: "custodian_denied", requestUnits: 0 },
       });
     },

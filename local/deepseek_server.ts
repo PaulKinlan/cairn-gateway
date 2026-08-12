@@ -14,6 +14,36 @@ import {
 import { renderDeepSeekPage } from "./deepseek_ui.ts";
 import { readBoundedBody } from "./bounded_body.ts";
 
+const SUCCESS_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    outcome: { const: "success" },
+    assistant_text: { type: "string" },
+    finish_category: { enum: ["complete", "length"] },
+    usage: {
+      type: "object",
+      properties: {
+        input_tokens: { type: "integer", minimum: 0 },
+        output_tokens: { type: "integer", minimum: 0 },
+        total_tokens: { type: "integer", minimum: 0 },
+      },
+      required: ["input_tokens", "output_tokens", "total_tokens"],
+      additionalProperties: false,
+    },
+    receipt: {
+      type: "object",
+      properties: {
+        decision: { const: "allow" },
+        reason: { const: "policy_allow" },
+        requestUnits: { const: 1 },
+      },
+      required: ["decision", "reason", "requestUnits"],
+      additionalProperties: false,
+    },
+  },
+  required: ["outcome", "assistant_text", "finish_category", "usage", "receipt"],
+  additionalProperties: false,
+};
 export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
   {
     name: "search_capabilities",
@@ -24,6 +54,11 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
       required: ["query"],
       additionalProperties: false,
     },
+    outputSchema: {
+      type: "object",
+      required: ["operations", "count"],
+      additionalProperties: false,
+    },
   },
   {
     name: "describe_operation",
@@ -32,6 +67,11 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
       type: "object",
       properties: { operation: { const: DEEPSEEK_OPERATION } },
       required: ["operation"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      required: ["id", "provider", "inputSchema", "outputSchema", "requestUnits"],
       additionalProperties: false,
     },
   },
@@ -66,6 +106,7 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
       required: ["operation", "connection", "arguments"],
       additionalProperties: false,
     },
+    outputSchema: SUCCESS_OUTPUT_SCHEMA,
   },
   {
     name: "connection_status",
@@ -74,6 +115,11 @@ export const DEEPSEEK_TOOLS: readonly ToolDescriptor[] = Object.freeze([
       type: "object",
       properties: { connection: { const: "deepseek_local" } },
       required: ["connection"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      required: ["connection", "status", "configured", "healthy", "operation"],
       additionalProperties: false,
     },
   },
@@ -107,24 +153,32 @@ export async function createDeepSeekApp(
     metadata,
   );
   const transport = new StreamableHttpFixtureTransport(controller, {}, DEEPSEEK_TOOLS, "deepseek");
-  const sessions = new Map<string, string>();
+  const sessions = new Map<string, { csrf: string; lastSeen: number }>();
+  const purgeSessions = () => {
+    const cutoff = Date.now() - 10 * 60_000;
+    for (const [id, session] of sessions) if (session.lastSeen < cutoff) sessions.delete(id);
+    while (sessions.size >= 16) sessions.delete(sessions.keys().next().value!);
+  };
   const page = async (request: Request, notice = "") => {
+    purgeSessions();
     let id = cookie(request);
     if (!id || !sessions.has(id)) {
       id = crypto.randomUUID().replaceAll("-", "").slice(0, 32);
-      sessions.set(id, crypto.randomUUID().replaceAll("-", ""));
+      sessions.set(id, { csrf: crypto.randomUUID().replaceAll("-", ""), lastSeen: Date.now() });
     }
+    const session = sessions.get(id)!;
+    session.lastSeen = Date.now();
     return response(
       renderDeepSeekPage(
         new URL(request.url).origin,
         options.custodianOrigin,
-        sessions.get(id)!,
+        session.csrf,
         await controller.view(),
         notice,
       ),
       200,
       "text/html; charset=utf-8",
-      { "Set-Cookie": `cairn_local=${id}; HttpOnly; SameSite=Strict; Path=/` },
+      { "Set-Cookie": `cairn_local=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=600` },
     );
   };
   return Object.freeze({
@@ -150,7 +204,8 @@ export async function createDeepSeekApp(
         return response("denied", 403, "text/plain");
       }
       const id = cookie(request);
-      const csrf = id ? sessions.get(id) : undefined;
+      purgeSessions();
+      const csrf = id ? sessions.get(id)?.csrf : undefined;
       let values: URLSearchParams;
       try {
         values = new URLSearchParams(
@@ -166,7 +221,7 @@ export async function createDeepSeekApp(
         if (url.pathname === "/admin/connect") await controller.connect();
         else if (url.pathname === "/admin/disconnect") await controller.disconnect();
         else await controller.delete();
-        sessions.set(id!, crypto.randomUUID().replaceAll("-", ""));
+        sessions.set(id!, { csrf: crypto.randomUUID().replaceAll("-", ""), lastSeen: Date.now() });
         return await page(
           request,
           url.pathname.endsWith("delete")

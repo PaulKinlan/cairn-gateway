@@ -18,7 +18,7 @@ class FakeStore implements SecretStore {
 }
 const credential = "smoke_dispatch_123456789012345678901234567890";
 const store = new FakeStore();
-const custodian = createCustodianApp({
+const custodian = await createCustodianApp({
   dispatchCredential: credential,
   gatewayOrigin: "http://127.0.0.1:8787",
   store,

@@ -186,9 +186,9 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
   credential. Exactly four MCP tools expose only `deepseek.chat.complete@v1`.
 - Fixed provider request and closed input/output schemas enforce message, byte, output-token,
   timeout, response, concurrency, request/day, and token/day limits. Receipts exclude content.
-- Non-secret connection/grant/receipt metadata persists locally; the credential persists only in
-  Secret Service. Restart rechecks custody and requires no key re-entry when Secret Service is
-  available.
+- Non-secret connection/grant/receipt metadata and conservative daily request/token reservations
+  persist atomically and fail closed locally; the credential persists only in Secret Service.
+  Restart rechecks custody and requires no key re-entry when Secret Service is available.
 - **Accept:** fake-provider/custodian end-to-end tests prove separate intake/redirect, exact
   request, sentinel exclusion, bounds, lifecycle/restart, and the Antigravity four-tool journey;
   deterministic credential-free smoke and full regression gates pass.

@@ -21,8 +21,10 @@ Open <http://127.0.0.1:8787/> and select **Add DeepSeek key**. The masked input 
 separate custodian origin, <http://127.0.0.1:8788/intake>. Submission stores the value through
 `secret-tool` stdin and redirects back to the gateway, removing the input from the displayed DOM.
 Use **Disconnect** to deny dispatch while retaining the key, **Connect** to create fresh grant
-authority, **Replace key** to repeat intake, and **Delete key and authority** to clear Secret
-Service and disable the grant.
+authority, **Replace key** to repeat intake directly (whether connected or disconnected), and
+**Delete key and authority** to clear Secret Service and disable the grant. This first usable
+connector adds, replaces, and deletes one DeepSeek key. Additional APIs require separate reviewed,
+fixed connectors; Cairn does not support arbitrary API configuration.
 
 Custom distinct ports are supported:
 
@@ -32,7 +34,8 @@ deno task local:run --gateway-port 8790 --custodian-port 8791
 
 ## Antigravity
 
-Save this at `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json`, then refresh MCP:
+Verified configuration shape with Antigravity CLI 1.1.12. Save this globally at
+`~/.gemini/config/mcp_config.json`, or for one workspace at `.agents/mcp_config.json`:
 
 ```json
 {
@@ -43,6 +46,11 @@ Save this at `~/.gemini/config/mcp_config.json` or `.agents/mcp_config.json`, th
   }
 }
 ```
+
+In Antigravity IDE, open **Agent panel → … → MCP Servers → Manage MCP Servers → View raw config**.
+After editing, use the MCP Manager refresh button. In Antigravity CLI, enter `/mcp` and reload the
+server configuration. The handcrafted MCP test suite checks the protocol contract; it is not a real
+Antigravity acceptance run.
 
 The four tools are `search_capabilities`, `describe_operation`, `connection_status`, and
 `invoke_operation`. Invoke only:
@@ -61,7 +69,10 @@ The four tools are `search_capabilities`, `describe_operation`, `connection_stat
 Inputs allow 1–8 system/user messages, at most 8192 UTF-8 bytes each and 32768 total, and optional
 output tokens 1–1024. Endpoint, model, headers, tools, files, streaming, and other provider options
 are not caller inputs. Output contains bounded assistant text, complete/length finish category, and
-validated token counts. Receipts contain no prompts or outputs.
+validated token counts. Receipts contain no prompts or outputs. Daily policy permits at most 100
+dispatched requests and 50,000 conservatively reserved tokens. Each reservation charges UTF-8 input
+bytes plus requested maximum output tokens before dispatch and persists atomically in non-secret
+custodian metadata; failed or ambiguous dispatches are not refunded or retried.
 
 ## Stop and reset
 

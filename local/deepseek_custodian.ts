@@ -1,47 +1,103 @@
 import { BodyTooLargeError, readBoundedBody } from "./bounded_body.ts";
+import { atomicWriteJson, readJsonFile } from "./atomic_json.ts";
 
 export const DEEPSEEK_ENDPOINT = "https://api.deepseek.com/chat/completions";
 export const DEEPSEEK_MODEL = "deepseek-v4-flash";
 const MAX_FORM_BYTES = 12 * 1024;
 const MAX_PROVIDER_BYTES = 128 * 1024;
 const MAX_OUTPUT_BYTES = 32 * 1024;
+const MAX_USAGE_BYTES = 1024;
 const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface SecretStore {
   put(secret: string): Promise<void>;
   get(): Promise<string | undefined>;
   delete(): Promise<void>;
 }
-
-export class SecretToolStore implements SecretStore {
-  async put(secret: string): Promise<void> {
-    const command = new Deno.Command("/usr/bin/secret-tool", {
-      args: ["store", "--label=Cairn DeepSeek API key", "cairn", "deepseek", "owner", "local"],
-      stdin: "piped",
-      stdout: "null",
-      stderr: "null",
-    }).spawn();
-    const writer = command.stdin.getWriter();
-    await writer.write(encoder.encode(secret));
-    await writer.close();
-    if (!(await command.status).success) throw new Error("secret storage unavailable");
-  }
-  async get(): Promise<string | undefined> {
-    const output = await new Deno.Command("/usr/bin/secret-tool", {
-      args: ["lookup", "cairn", "deepseek", "owner", "local"],
+export interface CommandResult {
+  success: boolean;
+  stdout: Uint8Array;
+}
+export interface SecretCommandRunner {
+  run(args: string[], stdin?: Uint8Array): Promise<CommandResult>;
+}
+class DenoSecretCommandRunner implements SecretCommandRunner {
+  async run(args: string[], stdin?: Uint8Array): Promise<CommandResult> {
+    const child = new Deno.Command("/usr/bin/secret-tool", {
+      args,
+      stdin: stdin ? "piped" : "null",
       stdout: "piped",
       stderr: "null",
-    }).output();
+    }).spawn();
+    if (stdin) {
+      const writer = child.stdin.getWriter();
+      await writer.write(stdin);
+      await writer.close();
+    }
+    const output = await child.output();
+    return { success: output.success, stdout: output.stdout };
+  }
+}
+export class SecretToolStore implements SecretStore {
+  constructor(private readonly runner: SecretCommandRunner = new DenoSecretCommandRunner()) {}
+  async put(secret: string): Promise<void> {
+    const result = await this.runner.run(
+      ["store", "--label=Cairn DeepSeek API key", "cairn", "deepseek", "owner", "local"],
+      encoder.encode(secret),
+    );
+    if (!result.success) throw new Error("secret storage unavailable");
+  }
+  async get(): Promise<string | undefined> {
+    const output = await this.runner.run(["lookup", "cairn", "deepseek", "owner", "local"]);
     if (!output.success) return undefined;
     const secret = new TextDecoder().decode(output.stdout).trimEnd();
     return secret || undefined;
   }
   async delete(): Promise<void> {
-    await new Deno.Command("/usr/bin/secret-tool", {
-      args: ["clear", "cairn", "deepseek", "owner", "local"],
-      stdout: "null",
-      stderr: "null",
-    }).output();
+    const cleared = await this.runner.run(["clear", "cairn", "deepseek", "owner", "local"]);
+    if (!cleared.success) throw new Error("secret deletion unavailable");
+    if (await this.get() !== undefined) throw new Error("secret deletion not confirmed");
+  }
+}
+
+interface Usage {
+  version: 1;
+  day: string;
+  requests: number;
+  reservedTokens: number;
+}
+export interface UsageStore {
+  load(): Promise<Usage | undefined>;
+  save(value: Usage): Promise<void>;
+}
+function validUsage(value: unknown): value is Usage {
+  return exactObject(value, ["version", "day", "requests", "reservedTokens"]) &&
+    value.version === 1 && typeof value.day === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value.day) &&
+    Number.isSafeInteger(value.requests) && (value.requests as number) >= 0 &&
+    (value.requests as number) <= 100_000 && Number.isSafeInteger(value.reservedTokens) &&
+    (value.reservedTokens as number) >= 0 && (value.reservedTokens as number) <= 100_000_000;
+}
+export class FileUsageStore implements UsageStore {
+  constructor(readonly path: string) {}
+  async load(): Promise<Usage | undefined> {
+    const value = await readJsonFile(this.path, MAX_USAGE_BYTES);
+    if (value === undefined) return undefined;
+    if (!validUsage(value)) throw new Error("usage metadata invalid");
+    return value;
+  }
+  save(value: Usage) {
+    return atomicWriteJson(this.path, value);
+  }
+}
+export class MemoryUsageStore implements UsageStore {
+  value?: Usage;
+  load() {
+    return Promise.resolve(this.value ? structuredClone(this.value) : undefined);
+  }
+  save(value: Usage) {
+    this.value = structuredClone(value);
+    return Promise.resolve();
   }
 }
 
@@ -52,6 +108,7 @@ export interface CustodianOptions {
   dispatchCredential: string;
   gatewayOrigin: string;
   store: SecretStore;
+  usageStore?: UsageStore;
   providerFetch?: ProviderCall;
   now?: () => number;
   requestLimitPerDay?: number;
@@ -62,13 +119,8 @@ export interface CustodianOptions {
 interface Session {
   csrf: string;
   expiresAt: number;
+  createdAt: number;
 }
-interface Usage {
-  day: string;
-  requests: number;
-  tokens: number;
-}
-
 type ChatInput = {
   messages: Array<{ role: "system" | "user"; content: string }>;
   max_output_tokens?: number;
@@ -110,6 +162,13 @@ export function validateChatInput(value: unknown): value is ChatInput {
     (Number.isInteger(value.max_output_tokens) && (value.max_output_tokens as number) >= 1 &&
       (value.max_output_tokens as number) <= 1024);
 }
+function inputReservation(input: ChatInput): number {
+  return input.messages.reduce(
+    (sum, message) => sum + encoder.encode(message.content).byteLength,
+    0,
+  ) +
+    (input.max_output_tokens ?? 256);
+}
 function securityHeaders(contentType: string): Headers {
   return new Headers({
     "Cache-Control": "no-store, max-age=0",
@@ -128,7 +187,7 @@ function safeJson(value: unknown, status = 200): Response {
   });
 }
 
-export function createCustodianApp(options: CustodianOptions) {
+export async function createCustodianApp(options: CustodianOptions) {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(options.dispatchCredential)) {
     throw new Error("dispatch credential denied");
   }
@@ -139,18 +198,37 @@ export function createCustodianApp(options: CustodianOptions) {
   const tokenLimit = options.tokenLimitPerDay ?? 50_000;
   const timeoutMs = options.timeoutMs ?? 30_000;
   const concurrency = options.concurrency ?? 1;
+  const usageStore = options.usageStore ?? new MemoryUsageStore();
   let active = 0;
-  let usage: Usage = { day: "", requests: 0, tokens: 0 };
+  let generation = 0;
+  let usage: Usage;
+  try {
+    usage = await usageStore.load() ??
+      {
+        version: 1,
+        day: new Date(now()).toISOString().slice(0, 10),
+        requests: 0,
+        reservedTokens: 0,
+      };
+  } catch {
+    throw new Error("usage metadata unavailable");
+  }
   let healthy: boolean | null = null;
 
   const authorized = (request: Request) =>
     request.headers.get("authorization") === `Bearer ${options.dispatchCredential}`;
-  const configured = async () => {
-    const found = await options.store.get();
-    return found !== undefined;
+  const configured = async () => await options.store.get() !== undefined;
+  const purgeSessions = () => {
+    const time = now();
+    for (const [id, session] of sessions) if (session.expiresAt <= time) sessions.delete(id);
+    while (sessions.size >= 16) {
+      const oldest = [...sessions.entries()].sort((a, b) => a[1].createdAt - b[1].createdAt)[0];
+      if (!oldest) break;
+      sessions.delete(oldest[0]);
+    }
   };
   const intakePage = (csrf: string, notice = "") =>
-    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Add DeepSeek key — Cairn custodian</title><style>body{font:16px system-ui;max-width:42rem;margin:4rem auto;padding:1rem}input,button{font:inherit;padding:.75rem;width:100%;margin:.5rem 0}p{line-height:1.5}.notice{border-left:4px solid #176b42;padding-left:1rem}</style></head><body><h1>Add DeepSeek key</h1>${
+    `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Add DeepSeek key — Cairn custodian</title><style>body{font:16px system-ui;max-width:42rem;margin:4rem auto;padding:1rem}input,button{font:inherit;padding:.75rem;width:100%;margin:.5rem 0}p{line-height:1.5}.notice{border-left:4px solid #176b42;padding-left:1rem}</style></head><body><h1>Add or replace DeepSeek key</h1>${
       notice ? `<p class="notice">${htmlEscape(notice)}</p>` : ""
     }<p>This masked field is served only by the separate loopback custodian. The key is stored by Secret Service and is never sent to the Cairn gateway or MCP.</p><form method="post" action="/intake"><input type="hidden" name="csrf_token" value="${csrf}"><label for="api-key">DeepSeek API key</label><input id="api-key" name="api_key" type="password" autocomplete="off" minlength="8" maxlength="8192" required><button type="submit">Store key and return to Cairn</button></form></body></html>`;
 
@@ -161,12 +239,17 @@ export function createCustodianApp(options: CustodianOptions) {
         return safeJson({ error: "host_denied" }, 403);
       }
       if (url.search) return safeJson({ error: "not_found" }, 404);
+      purgeSessions();
       if (url.pathname === "/intake" && request.method === "GET") {
         const id = crypto.randomUUID().replaceAll("-", "").slice(0, 32);
         const csrf = crypto.randomUUID().replaceAll("-", "");
-        sessions.set(id, { csrf, expiresAt: now() + 10 * 60_000 });
+        const createdAt = now();
+        sessions.set(id, { csrf, createdAt, expiresAt: createdAt + 10 * 60_000 });
         const headers = securityHeaders("text/html; charset=utf-8");
-        headers.set("Set-Cookie", `cairn_custodian=${id}; HttpOnly; SameSite=Strict; Path=/intake`);
+        headers.set(
+          "Set-Cookie",
+          `cairn_custodian=${id}; HttpOnly; SameSite=Strict; Path=/intake; Max-Age=600`,
+        );
         return new Response(intakePage(csrf), { headers });
       }
       if (url.pathname === "/intake" && request.method === "POST") {
@@ -175,7 +258,8 @@ export function createCustodianApp(options: CustodianOptions) {
           request.headers.get("content-type")?.split(";", 1)[0] !==
             "application/x-www-form-urlencoded"
         ) return safeJson({ error: "intake_denied" }, 403);
-        const session = sessions.get(cookie(request) ?? "");
+        const sessionId = cookie(request) ?? "";
+        const session = sessions.get(sessionId);
         if (!session || session.expiresAt <= now()) {
           return safeJson({ error: "session_denied" }, 403);
         }
@@ -188,7 +272,12 @@ export function createCustodianApp(options: CustodianOptions) {
             400,
           );
         }
-        const values = new URLSearchParams(new TextDecoder("utf-8", { fatal: true }).decode(body));
+        let values: URLSearchParams;
+        try {
+          values = new URLSearchParams(decoder.decode(body));
+        } catch {
+          return safeJson({ error: "invalid" }, 400);
+        }
         if (
           [...values.keys()].sort().join(",") !== "api_key,csrf_token" ||
           values.getAll("api_key").length !== 1 || values.getAll("csrf_token").length !== 1 ||
@@ -204,7 +293,8 @@ export function createCustodianApp(options: CustodianOptions) {
           });
         }
         await options.store.put(secret);
-        sessions.delete(cookie(request) ?? "");
+        sessions.delete(sessionId);
+        generation++;
         healthy = null;
         return new Response(null, {
           status: 303,
@@ -212,6 +302,7 @@ export function createCustodianApp(options: CustodianOptions) {
             "Location": `${options.gatewayOrigin}/?connected=1`,
             "Cache-Control": "no-store",
             "Clear-Site-Data": '"cache"',
+            "Set-Cookie": "cairn_custodian=; HttpOnly; SameSite=Strict; Path=/intake; Max-Age=0",
           },
         });
       }
@@ -223,6 +314,7 @@ export function createCustodianApp(options: CustodianOptions) {
       }
       if (url.pathname === "/internal/delete" && request.method === "POST") {
         await options.store.delete();
+        generation++;
         healthy = null;
         return safeJson({ deleted: true });
       }
@@ -232,25 +324,33 @@ export function createCustodianApp(options: CustodianOptions) {
       if (active >= concurrency) return safeJson({ outcome: "provider_unavailable" }, 429);
       let input: unknown;
       try {
-        input = JSON.parse(
-          new TextDecoder("utf-8", { fatal: true }).decode(
-            await readBoundedBody(request, 48 * 1024),
-          ),
-        );
+        input = JSON.parse(decoder.decode(await readBoundedBody(request, 48 * 1024)));
       } catch {
         return safeJson({ outcome: "invalid_input" }, 400);
       }
       if (!validateChatInput(input)) return safeJson({ outcome: "invalid_input" }, 400);
       const day = new Date(now()).toISOString().slice(0, 10);
-      if (usage.day !== day) usage = { day, requests: 0, tokens: 0 };
-      const maxTokens = input.max_output_tokens ?? 256;
-      if (usage.requests >= requestLimit || usage.tokens + maxTokens > tokenLimit) {
+      if (usage.day !== day) usage = { version: 1, day, requests: 0, reservedTokens: 0 };
+      const reservation = inputReservation(input);
+      if (usage.requests + 1 > requestLimit || usage.reservedTokens + reservation > tokenLimit) {
         return safeJson({ outcome: "rate_limited" }, 429);
       }
       const secret = await options.store.get();
       if (!secret) return safeJson({ outcome: "auth_required" }, 401);
+      const nextUsage = {
+        ...usage,
+        requests: usage.requests + 1,
+        reservedTokens: usage.reservedTokens + reservation,
+      };
+      try {
+        await usageStore.save(nextUsage);
+      } catch {
+        return safeJson({ outcome: "provider_unavailable" }, 503);
+      }
+      usage = nextUsage;
+      const dispatchGeneration = generation;
       active++;
-      usage.requests++;
+      const maxTokens = input.max_output_tokens ?? 256;
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);
       try {
@@ -268,7 +368,10 @@ export function createCustodianApp(options: CustodianOptions) {
             signal: abort.signal,
           }),
         );
-        if (!provider.ok) {
+        if (provider.status < 200 || provider.status > 299) {
+          if (dispatchGeneration !== generation) {
+            return safeJson({ outcome: "authority_changed" }, 409);
+          }
           healthy = false;
           return safeJson({
             outcome: provider.status === 401 || provider.status === 403
@@ -278,43 +381,33 @@ export function createCustodianApp(options: CustodianOptions) {
               : "provider_unavailable",
           });
         }
-        const reader = provider.body?.getReader();
-        if (!reader) throw new Error("provider body unavailable");
-        const chunks: Uint8Array[] = [];
-        let size = 0;
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          if (size > MAX_PROVIDER_BYTES) {
-            await reader.cancel();
-            throw new Error("provider response too large");
-          }
-          chunks.push(value);
-        }
-        const bytes = new Uint8Array(size);
-        let offset = 0;
-        for (const chunk of chunks) {
-          bytes.set(chunk, offset);
-          offset += chunk.byteLength;
-        }
-        const raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
-        const text = raw?.choices?.[0]?.message?.content;
-        const finish = raw?.choices?.[0]?.finish_reason;
-        const promptTokens = raw?.usage?.prompt_tokens;
-        const completionTokens = raw?.usage?.completion_tokens;
-        const totalTokens = raw?.usage?.total_tokens;
+        const bytes = await readBoundedBody(
+          new Request("http://provider.invalid", { method: "POST", body: provider.body }),
+          MAX_PROVIDER_BYTES,
+        );
+        const raw = JSON.parse(decoder.decode(bytes));
+        if (
+          !exactObject(raw, ["choices", "usage"]) || !Array.isArray(raw.choices) ||
+          raw.choices.length !== 1 || !exactObject(raw.choices[0], ["message", "finish_reason"]) ||
+          !exactObject(raw.choices[0].message, ["content"]) ||
+          !exactObject(raw.usage, ["prompt_tokens", "completion_tokens", "total_tokens"])
+        ) throw new Error("provider response invalid");
+        const text = raw.choices[0].message.content;
+        const finish = raw.choices[0].finish_reason;
+        const promptTokens = raw.usage.prompt_tokens;
+        const completionTokens = raw.usage.completion_tokens;
+        const totalTokens = raw.usage.total_tokens;
         if (
           typeof text !== "string" || encoder.encode(text).byteLength > MAX_OUTPUT_BYTES ||
-          !["stop", "length"].includes(finish) ||
+          !["stop", "length"].includes(finish as string) ||
           ![promptTokens, completionTokens, totalTokens].every((n) =>
-            Number.isInteger(n) && n >= 0
-          ) || promptTokens + completionTokens !== totalTokens
-        ) {
-          healthy = false;
-          return safeJson({ outcome: "provider_unavailable" });
+            Number.isSafeInteger(n) && (n as number) >= 0
+          ) || (promptTokens as number) + (completionTokens as number) !== totalTokens ||
+          (completionTokens as number) > maxTokens || (totalTokens as number) > reservation
+        ) throw new Error("provider response invalid");
+        if (dispatchGeneration !== generation || !await configured()) {
+          return safeJson({ outcome: "authority_changed" }, 409);
         }
-        usage.tokens += totalTokens;
         healthy = true;
         return safeJson({
           outcome: "success",
@@ -327,6 +420,9 @@ export function createCustodianApp(options: CustodianOptions) {
           },
         });
       } catch {
+        if (dispatchGeneration !== generation) {
+          return safeJson({ outcome: "authority_changed" }, 409);
+        }
         healthy = false;
         return safeJson({ outcome: "provider_unavailable" });
       } finally {

@@ -39,7 +39,7 @@ function cookie(response: Response) {
 Deno.test("separate custodian intake redirects away and fixed provider request is exact", async () => {
   const store = new FakeStore();
   let captured: Request | undefined;
-  const custodian = createCustodianApp({
+  const custodian = await createCustodianApp({
     dispatchCredential: credential,
     gatewayOrigin: "http://127.0.0.1:8787",
     store,
@@ -98,7 +98,7 @@ Deno.test("closed schema rejects bounds and caller-selected provider controls", 
   const store = new FakeStore();
   store.value = sentinel;
   let calls = 0;
-  const app = createCustodianApp({
+  const app = await createCustodianApp({
     dispatchCredential: credential,
     gatewayOrigin: "http://127.0.0.1:8787",
     store,
@@ -142,7 +142,7 @@ Deno.test("gateway four-tool Antigravity journey, receipts, disconnect delete an
         usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
       }),
     );
-  const custodian = createCustodianApp({
+  const custodian = await createCustodianApp({
     dispatchCredential: credential,
     gatewayOrigin: "http://127.0.0.1:8787",
     store,
@@ -173,6 +173,13 @@ Deno.test("gateway four-tool Antigravity journey, receipts, disconnect delete an
     },
   };
   const metadata = new MemoryMetadataStore();
+  metadata.value = {
+    schemaVersion: 1,
+    configured: true,
+    connected: true,
+    grantVersion: 1,
+    receipts: [],
+  };
   const app = await createDeepSeekApp({
     custodianOrigin: "http://127.0.0.1:8788",
     dispatchCredential: credential,

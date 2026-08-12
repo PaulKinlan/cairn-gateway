@@ -32,7 +32,9 @@ export function renderDeepSeekPage(
     : view.connected
     ? `<form method="post" action="/admin/disconnect">${
       hidden(csrf)
-    }<button>Disconnect</button></form>`
+    }<button>Disconnect</button></form><a class="button secondary" href="${
+      escape(custodianOrigin)
+    }/intake">Replace key</a>`
     : `<form method="post" action="/admin/connect">${
       hidden(csrf)
     }<button>Connect</button></form><a class="button secondary" href="${

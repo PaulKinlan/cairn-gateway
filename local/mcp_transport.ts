@@ -228,6 +228,29 @@ export class StreamableHttpFixtureTransport {
         "/mcp",
         "mcp",
       );
+      if (value.method === "tools/call" && this.#mode === "deepseek") {
+        if (
+          !isObject(response) || response.jsonrpc !== "2.0" || response.id !== value.id ||
+          !isObject(response.result) || !isObject(response.result.structuredContent) ||
+          Object.keys(response.result).sort().join(",") !== "content,structuredContent" ||
+          !Array.isArray(response.result.content) || response.result.content.length !== 1 ||
+          !isObject(response.result.content[0]) || response.result.content[0].type !== "text" ||
+          typeof response.result.content[0].text !== "string" ||
+          response.result.content[0].text !== JSON.stringify(response.result.structuredContent) ||
+          Object.keys(response).sort().join(",") !== "id,jsonrpc,result"
+        ) throw new Error("dispatcher response denied");
+        return jsonRpc({
+          jsonrpc: "2.0",
+          id: value.id,
+          result: {
+            content: [{
+              type: "text",
+              text: JSON.stringify(response.result.structuredContent),
+            }],
+            structuredContent: response.result.structuredContent,
+          },
+        });
+      }
       if (value.method === "tools/call" && isObject(response) && isObject(response.result)) {
         const structured = response.result.structuredContent;
         if (isObject(structured)) {
