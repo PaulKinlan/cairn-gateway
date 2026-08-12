@@ -32,10 +32,10 @@ custodian during intake/invocation. Hosted protection is deferred to R1/R3 gates
 ## Persistence
 
 Secret Service is the sole durable credential store. Non-secret connection, grant-version, and
-sanitized receipt metadata is stored at `~/.local/state/cairn/deepseek.json`. Conservative daily
-request/token reservations are non-secret and stored separately at
-`~/.local/state/cairn/deepseek-usage.json`. Both stores use validated bounded schemas and atomic
-restrictive-mode replacement; missing/corrupt state fails closed rather than restoring authority or
-resetting quota. On restart, the custodian rechecks Secret Service; no key re-entry is required when
-Secret Service is available. The random dispatch credential is intentionally regenerated and never
-persisted.
+sanitized receipt metadata is stored at `~/.local/state/cairn/gateway/deepseek.json`. Conservative
+daily request/token reservations are non-secret and stored separately at
+`~/.local/state/cairn/custodian/deepseek-usage.json`. Each child receives read/write permission only
+to its exact state directory. Both stores use validated bounded schemas and atomic restrictive-mode
+replacement; missing/corrupt state fails closed rather than restoring authority or resetting quota.
+On restart, the custodian rechecks Secret Service; no key re-entry is required when Secret Service
+is available. The random dispatch credential is intentionally regenerated and never persisted.

@@ -147,7 +147,9 @@ export async function createDeepSeekApp(
   },
 ) {
   const metadata = options.metadata ??
-    new FileMetadataStore(`${Deno.env.get("HOME") ?? "."}/.local/state/cairn/deepseek.json`);
+    new FileMetadataStore(
+      `${Deno.env.get("HOME") ?? "."}/.local/state/cairn/gateway/deepseek.json`,
+    );
   const controller = await createDeepSeekController(
     options.custodian ?? httpCustodianClient(options.custodianOrigin, options.dispatchCredential),
     metadata,
@@ -192,7 +194,7 @@ export async function createDeepSeekApp(
         return await page(
           request,
           url.searchParams.get("connected") === "1"
-            ? "Key stored by the custodian. Connect or invoke when ready."
+            ? "Key stored by the custodian. Click Connect before invoking."
             : "",
         );
       }

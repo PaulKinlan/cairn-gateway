@@ -233,22 +233,9 @@ export async function createDeepSeekController(
   metadata: MetadataStore,
 ) {
   let state: LocalMetadata;
-  let bootstrapped = false;
-  try {
-    const saved = await metadata.load();
-    if (saved) state = saved;
-    else {
-      state = {
-        schemaVersion: 1,
-        configured: false,
-        connected: false,
-        grantVersion: 1,
-        receipts: [],
-      };
-      await metadata.save(state);
-    }
-    bootstrapped = true;
-  } catch {
+  const saved = await metadata.load();
+  if (saved) state = saved;
+  else {
     state = {
       schemaVersion: 1,
       configured: false,
@@ -256,26 +243,35 @@ export async function createDeepSeekController(
       grantVersion: 1,
       receipts: [],
     };
+    try {
+      await metadata.save(state);
+    } catch {
+      throw new Error("metadata unavailable");
+    }
   }
   let health: boolean | null = null;
   let generation = 0;
   let lifecycle = Promise.resolve();
-  const persist = async () => {
-    if (!bootstrapped) throw new Error("metadata unavailable");
-    await metadata.save(state);
+  const commit = async (next: LocalMetadata) => {
+    await metadata.save(next);
+    state = next;
   };
   const refresh = async () => {
-    if (!bootstrapped) throw new Error("metadata unavailable");
     const status = await custodian.status();
-    state.configured = status.configured;
+    const next = { ...structuredClone(state), configured: status.configured };
+    if (!status.configured) next.connected = false;
+    await commit(next);
     health = status.healthy;
-    await persist();
   };
   try {
     await refresh();
   } catch {
-    state.configured = false;
-    state.connected = false;
+    const denied = { ...structuredClone(state), configured: false, connected: false };
+    try {
+      await commit(denied);
+    } catch {
+      throw new Error("metadata unavailable");
+    }
     health = null;
   }
   const mutate = async (operation: () => Promise<void>) => {
@@ -289,7 +285,8 @@ export async function createDeepSeekController(
     units: 0 | 1,
     tokens?: { input: number; output: number },
   ) => {
-    state.receipts.unshift({
+    const next = structuredClone(state);
+    next.receipts.unshift({
       id: crypto.randomUUID().replaceAll("-", "").slice(0, 16),
       at: Math.floor(Date.now() / 1000),
       decision,
@@ -297,8 +294,8 @@ export async function createDeepSeekController(
       requestUnits: units,
       ...(tokens ? { inputTokens: tokens.input, outputTokens: tokens.output } : {}),
     });
-    state.receipts.length = Math.min(8, state.receipts.length);
-    await persist();
+    next.receipts.length = Math.min(8, next.receipts.length);
+    await commit(next);
   };
   const result = (id: string | number, structuredContent: Record<string, unknown>) => ({
     jsonrpc: "2.0",
@@ -313,8 +310,12 @@ export async function createDeepSeekController(
       try {
         await refresh();
       } catch {
-        state.configured = false;
-        state.connected = false;
+        const denied = { ...structuredClone(state), configured: false, connected: false };
+        try {
+          await commit(denied);
+        } catch {
+          state = denied;
+        }
         health = null;
       }
       return {
@@ -333,28 +334,41 @@ export async function createDeepSeekController(
       mutate(async () => {
         await refresh();
         if (!state.configured) throw new Error("not configured");
-        state.connected = true;
-        state.grantVersion++;
+        const next = {
+          ...structuredClone(state),
+          connected: true,
+          grantVersion: state.grantVersion + 1,
+        };
+        await commit(next);
         generation++;
-        await persist();
       }),
     disconnect: () =>
       mutate(async () => {
-        state.connected = false;
-        state.grantVersion++;
+        const next = {
+          ...structuredClone(state),
+          connected: false,
+          grantVersion: state.grantVersion + 1,
+        };
+        await commit(next);
         generation++;
-        await persist();
       }),
     delete: () =>
       mutate(async () => {
-        state.connected = false;
-        state.grantVersion++;
+        const disabled = {
+          ...structuredClone(state),
+          connected: false,
+          grantVersion: state.grantVersion + 1,
+        };
+        await commit(disabled);
         generation++;
-        await persist();
         await custodian.delete();
-        state.configured = false;
-        state.receipts = [];
-        await persist();
+        const deleted = { ...structuredClone(state), configured: false, receipts: [] };
+        try {
+          await commit(deleted);
+        } catch {
+          state = deleted;
+          throw new Error("metadata unavailable after deletion");
+        }
       }),
     async dispatch(receivedBody: Uint8Array): Promise<Record<string, unknown>> {
       await lifecycle;

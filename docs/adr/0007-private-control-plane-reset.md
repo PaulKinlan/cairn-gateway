@@ -27,9 +27,9 @@ reset, R1 real GitHub vertical slice with hosted owner UI and two-client handoff
 API-key LLM, R4 fleet rollout, and R5 multiuser readiness/beta.
 
 DeepSeek is the initial API-key LLM because the credential inventory confirms a verified standard
-DeepSeek Platform API key. R3 adds only `deepseek.chat.complete@v1`; the exact endpoint and model
-are owner-selected and pinned after current-documentation verification. Kimi is a possible later
-connector, not initial scope.
+DeepSeek Platform API key. R3 adds only `deepseek.chat.complete@v1`; its endpoint and model are
+fixed in reviewed code and reverified against current documentation before promotion. Kimi is a
+possible later connector, not initial scope.
 
 Nango is the first custody/proxy candidate. R0/R1 performs a credential-free, two-working-day static
 capability/security review that produces a sandbox plan but makes no behavioral claim. Only after

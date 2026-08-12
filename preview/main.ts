@@ -73,7 +73,7 @@ const HOME_HTML = `<!DOCTYPE html>
     <p class="eyebrow">Cairn local fixture</p>
     <h1>Run Cairn on your machine.</h1>
     <p class="lede">Clone the repository, install Deno 2.9.0, then start the loopback-only MCP server and setup page.</p>
-    <code class="command">deno task local:run</code>
+    <code class="command">deno task local:fixture</code>
     <p>Open <code>http://127.0.0.1:8787/</code>. The local page shows the endpoint, fixture grant state, test controls, and a candidate VS Code configuration pending named-client validation.</p>
   </header>
   <main>

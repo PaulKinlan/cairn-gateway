@@ -85,13 +85,14 @@ enter `/mcp` and reload the server configuration. Cairn exposes its four static 
 before browser onboarding, but every call remains denied with a setup URL until the DeepSeek
 connection is active.
 
-See [docs/local-setup.md](docs/local-setup.md) for the complete fixture lifecycle and Antigravity
-reload steps.
+See [docs/local-setup.md](docs/local-setup.md) for the complete local DeepSeek lifecycle and
+Antigravity reload steps.
 
 ## Verification
 
 ```sh
-deno task local:demo
+deno task local:fixture
+deno task local:fixture-smoke
 deno task check:local
 deno task check
 ```

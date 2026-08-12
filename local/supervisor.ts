@@ -11,6 +11,23 @@ export interface SupervisorOptions {
   sourceRoot: string;
   stateDir: string;
   dispatchCredential: string;
+  secretToolPath?: string;
+  secretServiceEnv?: Record<string, string | undefined>;
+}
+export function secretServiceTransportEnv(
+  env: Record<string, string | undefined>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  const bus = env.DBUS_SESSION_BUS_ADDRESS;
+  if (bus && /^unix:path=\/[^\r\n\0;]{1,4096}$/.test(bus)) {
+    result.DBUS_SESSION_BUS_ADDRESS = bus;
+  }
+  const runtime = env.XDG_RUNTIME_DIR;
+  if (
+    runtime && runtime.startsWith("/") && runtime.length <= 4096 &&
+    !/[\r\n\0]/.test(runtime) && !runtime.split("/").includes("..")
+  ) result.XDG_RUNTIME_DIR = runtime;
+  return result;
 }
 function parseArgs(values: string[]) {
   let gatewayPort = 8787;
@@ -29,18 +46,25 @@ function parseArgs(values: string[]) {
 export function childSpecs(options: SupervisorOptions): [ChildSpec, ChildSpec] {
   const gatewayOrigin = `http://127.0.0.1:${options.gatewayPort}`;
   const custodianOrigin = `http://127.0.0.1:${options.custodianPort}`;
-  const usagePath = `${options.stateDir}/deepseek-usage.json`;
-  const metadataPath = `${options.stateDir}/deepseek.json`;
+  const custodianStateDir = `${options.stateDir}/custodian`;
+  const gatewayStateDir = `${options.stateDir}/gateway`;
+  const usagePath = `${custodianStateDir}/deepseek-usage.json`;
+  const metadataPath = `${gatewayStateDir}/deepseek.json`;
+  const secretToolPath = options.secretToolPath ?? "/usr/bin/secret-tool";
+  const transportEnv = secretServiceTransportEnv(options.secretServiceEnv ?? {});
+  const transportNames = Object.keys(transportEnv).sort();
   return [{
     name: "custodian",
     command: options.denoPath,
     args: [
       "run",
       "--allow-net=127.0.0.1,api.deepseek.com:443",
-      "--allow-run=/usr/bin/secret-tool",
-      "--allow-env=CAIRN_CUSTODIAN_PORT,CAIRN_GATEWAY_ORIGIN,CAIRN_DISPATCH_CREDENTIAL,CAIRN_USAGE_PATH",
-      `--allow-read=${usagePath}`,
-      `--allow-write=${options.stateDir},${usagePath}`,
+      `--allow-run=${secretToolPath}`,
+      `--allow-env=CAIRN_CUSTODIAN_PORT,CAIRN_GATEWAY_ORIGIN,CAIRN_DISPATCH_CREDENTIAL,CAIRN_USAGE_PATH,CAIRN_SECRET_TOOL_PATH${
+        transportNames.length ? `,${transportNames.join(",")}` : ""
+      }`,
+      `--allow-read=${custodianStateDir}`,
+      `--allow-write=${custodianStateDir}`,
       `${options.sourceRoot}/local/custodian_main.ts`,
     ],
     env: {
@@ -48,6 +72,8 @@ export function childSpecs(options: SupervisorOptions): [ChildSpec, ChildSpec] {
       CAIRN_CUSTODIAN_PORT: String(options.custodianPort),
       CAIRN_GATEWAY_ORIGIN: gatewayOrigin,
       CAIRN_USAGE_PATH: usagePath,
+      CAIRN_SECRET_TOOL_PATH: secretToolPath,
+      ...transportEnv,
     },
   }, {
     name: "gateway",
@@ -56,8 +82,8 @@ export function childSpecs(options: SupervisorOptions): [ChildSpec, ChildSpec] {
       "run",
       "--allow-net=127.0.0.1",
       "--allow-env=CAIRN_GATEWAY_PORT,CAIRN_CUSTODIAN_ORIGIN,CAIRN_DISPATCH_CREDENTIAL,CAIRN_METADATA_PATH",
-      `--allow-read=${metadataPath}`,
-      `--allow-write=${options.stateDir},${metadataPath}`,
+      `--allow-read=${gatewayStateDir}`,
+      `--allow-write=${gatewayStateDir}`,
       `${options.sourceRoot}/local/gateway_main.ts`,
     ],
     env: {
@@ -142,5 +168,9 @@ if (import.meta.main) {
     stateDir: `${home}/.local/state/cairn`,
     dispatchCredential: crypto.randomUUID().replaceAll("-", "") +
       crypto.randomUUID().replaceAll("-", ""),
+    secretServiceEnv: {
+      DBUS_SESSION_BUS_ADDRESS: Deno.env.get("DBUS_SESSION_BUS_ADDRESS"),
+      XDG_RUNTIME_DIR: Deno.env.get("XDG_RUNTIME_DIR"),
+    },
   });
 }

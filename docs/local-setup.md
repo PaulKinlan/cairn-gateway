@@ -77,14 +77,17 @@ custodian metadata; failed or ambiguous dispatches are not refunded or retried.
 ## Stop and reset
 
 Stop both child services with **Ctrl-C**. To restart, run the same command; the key remains only in
-Secret Service and non-secret authority metadata remains in `~/.local/state/cairn/deepseek.json`.
+Secret Service and non-secret authority metadata remains in
+`~/.local/state/cairn/gateway/deepseek.json`; conservative quota reservations remain in
+`~/.local/state/cairn/custodian/deepseek-usage.json`.
 
 Preferred reset: click **Delete key and authority**. If the service cannot start, clear exactly this
 credential and then remove only the non-secret Cairn metadata:
 
 ```sh
 /usr/bin/secret-tool clear cairn deepseek owner local
-rm -f ~/.local/state/cairn/deepseek.json
+rm -f ~/.local/state/cairn/gateway/deepseek.json
+rm -f ~/.local/state/cairn/custodian/deepseek-usage.json
 ```
 
 ## Credential-free validation and fixture regression

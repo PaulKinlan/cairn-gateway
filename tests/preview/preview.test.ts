@@ -69,7 +69,7 @@ Deno.test("GET / leads with local run steps and labels VS Code config as candida
     assert(html.includes(landmark), `missing ${landmark}`);
   }
   assert(html.includes("Run Cairn on your machine."));
-  assert(html.includes("deno task local:run"));
+  assert(html.includes("deno task local:fixture"));
   assert(html.includes("http://127.0.0.1:8787/"));
   assert(html.includes("candidate VS Code configuration pending named-client validation"));
   assert(html.includes("not an accepted compatibility claim"));

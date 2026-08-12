@@ -73,6 +73,26 @@ Deno.test("separate custodian intake redirects away and fixed provider request i
   equals(submitted.headers.get("location"), "http://127.0.0.1:8787/?connected=1");
   equals(await submitted.text(), "");
   equals(store.value, sentinel);
+  const replacement = "ds_SECOND_SENTINEL_REPLACES_FIRST";
+  const secondIntake = await custodian.fetch(new Request("http://127.0.0.1:8788/intake"));
+  const secondCookie = cookie(secondIntake);
+  const secondHtml = await secondIntake.text();
+  const secondSubmit = await custodian.fetch(
+    new Request("http://127.0.0.1:8788/intake", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1:8788",
+        Cookie: secondCookie,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ csrf_token: csrf(secondHtml), api_key: replacement }),
+    }),
+  );
+  equals(secondSubmit.status, 303);
+  equals(await secondSubmit.text(), "");
+  equals(store.value, replacement);
+  assert(!secondHtml.includes(sentinel));
+  assert(!secondHtml.includes(replacement));
   const invoked = await custodian.fetch(
     new Request("http://127.0.0.1:8788/internal/invoke", {
       method: "POST",
@@ -84,7 +104,7 @@ Deno.test("separate custodian intake redirects away and fixed provider request i
   assert(captured);
   equals(captured.url, DEEPSEEK_ENDPOINT);
   equals(captured.method, "POST");
-  equals(captured.headers.get("authorization"), `Bearer ${sentinel}`);
+  equals(captured.headers.get("authorization"), `Bearer ${replacement}`);
   equals(await captured.json(), {
     model: DEEPSEEK_MODEL,
     messages: [{ role: "user", content: "Hi" }],
@@ -92,6 +112,42 @@ Deno.test("separate custodian intake redirects away and fixed provider request i
     stream: false,
     thinking: { type: "disabled" },
   });
+});
+
+Deno.test("locked Secret Service returns retry UI without exposing submitted value", async () => {
+  const app = await createCustodianApp({
+    dispatchCredential: credential,
+    gatewayOrigin: "http://127.0.0.1:8787",
+    store: {
+      put: () => Promise.reject(new Error("locked")),
+      get: () => Promise.reject(new Error("locked")),
+      delete: () => Promise.reject(new Error("locked")),
+    },
+  });
+  const intake = await app.fetch(new Request("http://127.0.0.1:8788/intake"));
+  const html = await intake.text();
+  const submitted = await app.fetch(
+    new Request("http://127.0.0.1:8788/intake", {
+      method: "POST",
+      headers: {
+        Origin: "http://127.0.0.1:8788",
+        Cookie: cookie(intake),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ csrf_token: csrf(html), api_key: sentinel }),
+    }),
+  );
+  equals(submitted.status, 503);
+  const failure = await submitted.text();
+  assert(failure.includes("locked or unavailable"));
+  assert(!failure.includes(sentinel));
+  const status = await app.fetch(
+    new Request("http://127.0.0.1:8788/internal/status", {
+      headers: { Authorization: `Bearer ${credential}` },
+    }),
+  );
+  equals(status.status, 503);
+  equals(await status.json(), { error: "custody_unavailable" });
 });
 
 Deno.test("closed schema rejects bounds and caller-selected provider controls", async () => {
@@ -132,7 +188,7 @@ Deno.test("closed schema rejects bounds and caller-selected provider controls", 
   equals(calls, 0);
 });
 
-Deno.test("gateway four-tool Antigravity journey, receipts, disconnect delete and restart retain no sentinel", async () => {
+Deno.test("gateway four-tool MCP protocol journey, receipts, disconnect delete and restart retain no sentinel", async () => {
   const store = new FakeStore();
   store.value = sentinel;
   const provider = () =>

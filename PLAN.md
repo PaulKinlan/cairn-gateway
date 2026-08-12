@@ -190,8 +190,9 @@ contention, limits, backup/restore, retention/deletion, and cost remain activati
   persist atomically and fail closed locally; the credential persists only in Secret Service.
   Restart rechecks custody and requires no key re-entry when Secret Service is available.
 - **Accept:** fake-provider/custodian end-to-end tests prove separate intake/redirect, exact
-  request, sentinel exclusion, bounds, lifecycle/restart, and the Antigravity four-tool journey;
-  deterministic credential-free smoke and full regression gates pass.
+  request, sentinel exclusion, bounds, lifecycle/restart, and the four-tool MCP protocol journey; a
+  real Antigravity run remains separate manual acceptance evidence; deterministic credential-free
+  smoke and full regression gates pass.
 - **Boundary:** protects extraction through normal Cairn surfaces, not root or hostile same-user
   processes. See ADR 0009. No hosted activation is claimed.
 

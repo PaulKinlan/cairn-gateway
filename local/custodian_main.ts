@@ -8,7 +8,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("custod
 const app = await createCustodianApp({
   dispatchCredential,
   gatewayOrigin,
-  store: new SecretToolStore(),
+  store: new SecretToolStore(undefined, Deno.env.get("CAIRN_SECRET_TOOL_PATH")),
   usageStore: new FileUsageStore(usagePath),
 });
 Deno.serve({ hostname: "127.0.0.1", port, onListen() {} }, (request) => app.fetch(request));

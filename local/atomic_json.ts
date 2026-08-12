@@ -16,6 +16,12 @@ export async function atomicWriteJson(path: string, value: unknown): Promise<voi
     await Deno.chmod(temporary, 0o600);
     await Deno.rename(temporary, path);
     await Deno.chmod(path, 0o600);
+    const directoryFile = await Deno.open(directory, { read: true });
+    try {
+      await directoryFile.sync();
+    } finally {
+      directoryFile.close();
+    }
   } catch (error) {
     try {
       file?.close();

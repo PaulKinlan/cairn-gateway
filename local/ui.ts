@@ -282,7 +282,7 @@ export function renderAdminPage(state: AdminPageState): string {
     <p class="eyebrow">Local fixture</p>
     <h1>Create authority. Test it. Revoke it.</h1>
     <p class="lede">Run the complete Cairn fixture journey on this machine. Nothing connects to GitHub.</p>
-    <code class="command">deno task local:run</code>
+    <code class="command">deno task local:fixture</code>
   </header>
   <main id="content">
     ${notice}

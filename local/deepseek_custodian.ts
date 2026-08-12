@@ -23,8 +23,9 @@ export interface SecretCommandRunner {
   run(args: string[], stdin?: Uint8Array): Promise<CommandResult>;
 }
 class DenoSecretCommandRunner implements SecretCommandRunner {
+  constructor(private readonly path = "/usr/bin/secret-tool") {}
   async run(args: string[], stdin?: Uint8Array): Promise<CommandResult> {
-    const child = new Deno.Command("/usr/bin/secret-tool", {
+    const child = new Deno.Command(this.path, {
       args,
       stdin: stdin ? "piped" : "null",
       stdout: "piped",
@@ -40,7 +41,10 @@ class DenoSecretCommandRunner implements SecretCommandRunner {
   }
 }
 export class SecretToolStore implements SecretStore {
-  constructor(private readonly runner: SecretCommandRunner = new DenoSecretCommandRunner()) {}
+  private readonly runner: SecretCommandRunner;
+  constructor(runner?: SecretCommandRunner, path = "/usr/bin/secret-tool") {
+    this.runner = runner ?? new DenoSecretCommandRunner(path);
+  }
   async put(secret: string): Promise<void> {
     const result = await this.runner.run(
       ["store", "--label=Cairn DeepSeek API key", "cairn", "deepseek", "owner", "local"],
@@ -201,6 +205,7 @@ export async function createCustodianApp(options: CustodianOptions) {
   const usageStore = options.usageStore ?? new MemoryUsageStore();
   let active = 0;
   let generation = 0;
+  let reservationQueue = Promise.resolve();
   let usage: Usage;
   try {
     usage = await usageStore.load() ??
@@ -214,6 +219,35 @@ export async function createCustodianApp(options: CustodianOptions) {
     throw new Error("usage metadata unavailable");
   }
   let healthy: boolean | null = null;
+  const reserve = async (reservation: number): Promise<"reserved" | "limited" | "busy"> => {
+    let decision: "reserved" | "limited" | "busy" = "busy";
+    const operation = reservationQueue.then(async () => {
+      if (active >= concurrency) return;
+      const day = new Date(now()).toISOString().slice(0, 10);
+      const current = usage.day === day
+        ? usage
+        : { version: 1 as const, day, requests: 0, reservedTokens: 0 };
+      if (
+        current.requests + 1 > requestLimit ||
+        current.reservedTokens + reservation > tokenLimit
+      ) {
+        decision = "limited";
+        return;
+      }
+      const nextUsage = {
+        ...current,
+        requests: current.requests + 1,
+        reservedTokens: current.reservedTokens + reservation,
+      };
+      await usageStore.save(nextUsage);
+      usage = nextUsage;
+      active++;
+      decision = "reserved";
+    });
+    reservationQueue = operation.catch(() => {});
+    await operation;
+    return decision;
+  };
 
   const authorized = (request: Request) =>
     request.headers.get("authorization") === `Bearer ${options.dispatchCredential}`;
@@ -292,7 +326,17 @@ export async function createCustodianApp(options: CustodianOptions) {
             headers: securityHeaders("text/html; charset=utf-8"),
           });
         }
-        await options.store.put(secret);
+        try {
+          await options.store.put(secret);
+        } catch {
+          return new Response(
+            intakePage(
+              session.csrf,
+              "Secret Service is locked or unavailable. Unlock it and retry.",
+            ),
+            { status: 503, headers: securityHeaders("text/html; charset=utf-8") },
+          );
+        }
         sessions.delete(sessionId);
         generation++;
         healthy = null;
@@ -310,7 +354,11 @@ export async function createCustodianApp(options: CustodianOptions) {
         return safeJson({ error: "not_found" }, 404);
       }
       if (url.pathname === "/internal/status" && request.method === "GET") {
-        return safeJson({ configured: await configured(), healthy });
+        try {
+          return safeJson({ configured: await configured(), healthy });
+        } catch {
+          return safeJson({ error: "custody_unavailable" }, 503);
+        }
       }
       if (url.pathname === "/internal/delete" && request.method === "POST") {
         await options.store.delete();
@@ -321,7 +369,6 @@ export async function createCustodianApp(options: CustodianOptions) {
       if (url.pathname !== "/internal/invoke" || request.method !== "POST") {
         return safeJson({ error: "not_found" }, 404);
       }
-      if (active >= concurrency) return safeJson({ outcome: "provider_unavailable" }, 429);
       let input: unknown;
       try {
         input = JSON.parse(decoder.decode(await readBoundedBody(request, 48 * 1024)));
@@ -329,27 +376,29 @@ export async function createCustodianApp(options: CustodianOptions) {
         return safeJson({ outcome: "invalid_input" }, 400);
       }
       if (!validateChatInput(input)) return safeJson({ outcome: "invalid_input" }, 400);
-      const day = new Date(now()).toISOString().slice(0, 10);
-      if (usage.day !== day) usage = { version: 1, day, requests: 0, reservedTokens: 0 };
       const reservation = inputReservation(input);
-      if (usage.requests + 1 > requestLimit || usage.reservedTokens + reservation > tokenLimit) {
-        return safeJson({ outcome: "rate_limited" }, 429);
-      }
-      const secret = await options.store.get();
-      if (!secret) return safeJson({ outcome: "auth_required" }, 401);
-      const nextUsage = {
-        ...usage,
-        requests: usage.requests + 1,
-        reservedTokens: usage.reservedTokens + reservation,
-      };
+      let reservationDecision: "reserved" | "limited" | "busy";
       try {
-        await usageStore.save(nextUsage);
+        reservationDecision = await reserve(reservation);
       } catch {
         return safeJson({ outcome: "provider_unavailable" }, 503);
       }
-      usage = nextUsage;
+      if (reservationDecision === "limited") return safeJson({ outcome: "rate_limited" }, 429);
+      if (reservationDecision === "busy") {
+        return safeJson({ outcome: "provider_unavailable" }, 429);
+      }
+      let secret: string | undefined;
+      try {
+        secret = await options.store.get();
+      } catch {
+        active--;
+        return safeJson({ outcome: "provider_unavailable" }, 503);
+      }
+      if (!secret) {
+        active--;
+        return safeJson({ outcome: "auth_required" }, 401);
+      }
       const dispatchGeneration = generation;
-      active++;
       const maxTokens = input.max_output_tokens ?? 256;
       const abort = new AbortController();
       const timer = setTimeout(() => abort.abort(), timeoutMs);

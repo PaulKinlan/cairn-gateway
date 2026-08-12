@@ -35,7 +35,7 @@
     "typecheck:preview": "deno check preview/main.ts preview/server.ts scripts/preview_smoke.ts tests/preview/preview.test.ts",
     "test:preview": "deno test --allow-read=preview tests/preview",
     "check:preview": "deno fmt --check preview scripts/preview_smoke.ts tests/preview && deno lint preview scripts/preview_smoke.ts tests/preview && deno task typecheck:preview && deno task test:preview && deno task preview:run",
-    "local:run": "deno run --allow-run --allow-net=127.0.0.1 --allow-env=HOME local/supervisor.ts",
+    "local:run": "deno run --allow-run --allow-net=127.0.0.1 --allow-env=HOME,DBUS_SESSION_BUS_ADDRESS,XDG_RUNTIME_DIR local/supervisor.ts",
     "local:fixture": "deno run --allow-net=127.0.0.1 local/main.ts",
     "local:smoke": "deno run --allow-net=127.0.0.1 scripts/local_deepseek_smoke.ts",
     "local:fixture-smoke": "deno run --allow-net=127.0.0.1 scripts/local_mcp_smoke.ts",
